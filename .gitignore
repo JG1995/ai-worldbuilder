@@ -3,3 +3,24 @@
 AGENTS.md
 CLAUDE.md
 scripts/
+.work/
+.claude/worktrees/
+
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Test reports
+test-results/
+playwright-report/
+
+# Logs
+*.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+*.sw?

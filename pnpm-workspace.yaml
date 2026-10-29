@@ -1,0 +1,2 @@
+# Without this, pnpm only warns when the Node version does not match `engines.node` in package.json.
+engineStrict: true
