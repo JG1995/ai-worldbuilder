@@ -37,3 +37,18 @@ Build Windows installers from a separate clone of the repository on the Windows 
 - `pnpm tauri dev` runs the desktop application in development mode.
 - `pnpm check` runs every check: Biome, `tsc`, secretlint, the production build and its sample-data check, Vitest, the Playwright smoke test, `cargo fmt --check`, `cargo clippy` and `cargo test`. It stops at the first failing check.
 - `pnpm tauri build` builds unsigned installers for the current OS into `src-tauri/target/release/bundle/`.
+
+## Continuous integration and releases
+
+GitHub Actions runs two workflows:
+
+- **Check** runs on every push to `main` and every pull request. `pnpm check (Ubuntu)` runs the full `pnpm check`; `Rust checks (Windows)` builds the frontend and runs `cargo fmt --check`, `cargo clippy` and `cargo test`.
+- **Release** builds Windows, Linux and macOS installers. It runs for version tags and, without creating a release, for pull requests that change the release workflow, the tag check, `package.json`, `src-tauri/tauri.conf.json` or `src-tauri/Cargo.toml`. Those pull-request runs keep the installers as workflow artifacts.
+
+To make a draft release:
+
+1. Set the new version in `package.json` and `src-tauri/Cargo.toml`, run `pnpm check` so `src-tauri/Cargo.lock` follows, and merge the change to `main`.
+2. Tag that commit with `v` followed by the version, and push the tag: `git tag v0.1.0 && git push origin v0.1.0`.
+3. The Release workflow checks that the tag matches the version in `package.json` and fails without creating a release when it does not. Otherwise it attaches the unsigned installers to a draft GitHub release.
+
+Drafts stay unpublished until the maintainer reviews and publishes them on GitHub.
