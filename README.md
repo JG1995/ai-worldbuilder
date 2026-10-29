@@ -42,8 +42,10 @@ Build Windows installers from a separate clone of the repository on the Windows 
 
 GitHub Actions runs two workflows:
 
-- **Check** runs on every push to `main` and every pull request. `pnpm check (Ubuntu)` runs the full `pnpm check`; `Rust checks (Windows)` builds the frontend and runs `cargo fmt --check`, `cargo clippy` and `cargo test`.
-- **Release** builds Windows, Linux and macOS installers. It runs for version tags and, without creating a release, for pull requests that change the release workflow, the tag check, `package.json`, `src-tauri/tauri.conf.json` or `src-tauri/Cargo.toml`. Those pull-request runs keep the installers as workflow artifacts.
+- **Check** runs `pnpm check (Ubuntu)`, the full `pnpm check`, on every pull request and every push to `main`. `Rust checks (Windows)` builds the frontend and runs `cargo fmt --check`, `cargo clippy` and `cargo test`; it runs only on pushes to `main`, not on pull requests. Changes to Markdown files alone run neither job. You can also start the workflow by hand from the Actions tab.
+- **Release** builds Windows, Linux and macOS installers. It runs only for version tags, or when you start it by hand from the Actions tab. A manual run on a branch creates no release and keeps the installers as workflow artifacts, so you can test the installers without releasing anything.
+
+Merging to `main` never creates a release.
 
 To make a draft release:
 

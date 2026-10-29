@@ -1,9 +1,14 @@
 name: Check
 
+# Pull requests get the Linux check only. The Windows Rust checks run after a merge
+# to main and on demand. Markdown-only changes skip both.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**/*.md"]
   pull_request:
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,6 +53,7 @@ jobs:
 
   rust-windows:
     name: Rust checks (Windows)
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7

@@ -1,17 +1,11 @@
 name: Release
 
-# Version tags build installers into a draft release. Pull requests that change
-# release-relevant files run the same builds without creating a release.
+# Version tags build installers into a draft release. A manual run on a branch
+# builds the same installers as workflow artifacts without creating a release.
 on:
   push:
     tags: ["v*"]
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
-      - .github/scripts/check-release-tag.sh
-      - src-tauri/tauri.conf.json
-      - src-tauri/Cargo.toml
-      - package.json
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,7 +13,7 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.platform }})
-    # Needed to create the draft release; pull-request runs make no release calls.
+    # Needed to create the draft release; manual runs on a branch make no release calls.
     permissions:
       contents: write
     strategy:
