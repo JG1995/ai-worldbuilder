@@ -18,7 +18,6 @@ function ContextMenuRow({ onSelect }: { onSelect: (id: string) => void }) {
       <button type="button" onClick={() => setOpen(true)}>
         Saltmere
       </button>
-      <button type="button">Elsewhere</button>
       {open && (
         <Menu
           label="Page actions"
@@ -73,14 +72,10 @@ describe("Menu", () => {
     expect(row).toHaveFocus();
   });
 
-  it("closes on Escape and on a click outside, returning focus each time", () => {
+  // e2e/controls.spec.ts covers a click outside, whose focus outcome jsdom cannot show.
+  it("closes on Escape and returns focus", () => {
     const { row } = openMenu();
     key("Escape");
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(row).toHaveFocus();
-
-    fireEvent.click(row);
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Elsewhere" }));
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(row).toHaveFocus();
   });

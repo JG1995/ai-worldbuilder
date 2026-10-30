@@ -27,6 +27,28 @@ function enabledItems(menu: HTMLElement | null) {
 }
 
 /**
+ * Consumes the click that ends a primary press, so a press that closes a menu activates nothing
+ * under it, as with a native context menu. The browser dispatches that click in the same task as
+ * `pointerup`, so a press that ends without one stops the swallowing right after.
+ */
+function swallowNextClick() {
+  const done = new AbortController();
+  const options = { capture: true, signal: done.signal };
+  const stopSwallowing = () => setTimeout(() => done.abort());
+  window.addEventListener(
+    "click",
+    (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      done.abort();
+    },
+    options,
+  );
+  window.addEventListener("pointerup", stopSwallowing, options);
+  window.addEventListener("pointercancel", stopSwallowing, options);
+}
+
+/**
  * A menu in a portal on the menu layer. It focuses its first enabled item, and closing it by
  * Escape, Tab, a click outside or an activated item returns focus to where it was when it opened.
  */
@@ -36,7 +58,11 @@ export function Menu({ label, items, at, onSelect, onClose }: MenuProps) {
   const closeOnOutsidePointer = useEffectEvent((event: PointerEvent) => {
     const target = event.target as Node;
     const onAnchor = at instanceof Element && at.contains(target);
-    if (!menu.current?.contains(target) && !onAnchor) onClose();
+    if (menu.current?.contains(target) || onAnchor) return;
+    // Cancelling the press keeps the browser from moving focus away from the returned opener.
+    event.preventDefault();
+    if (event.button === 0) swallowNextClick();
+    onClose();
   });
 
   useEffect(() => {
@@ -81,6 +107,8 @@ export function Menu({ label, items, at, onSelect, onClose }: MenuProps) {
       aria-label={label}
       style={position}
       onKeyDown={moveFocus}
+      // A press on the padding or a divider must not take focus off the items.
+      onMouseDown={(event) => event.preventDefault()}
       className="z-(--z-menu) flex min-w-[200px] flex-col rounded-md border border-divider bg-raised py-1 shadow-(--level-2-shadow) transition-opacity duration-(--duration-fade) starting:opacity-0"
     >
       {items.map((item, index) => (
