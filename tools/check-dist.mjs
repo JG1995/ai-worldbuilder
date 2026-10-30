@@ -1,4 +1,5 @@
-// Fails when the production build is missing or contains the browser preview's sample data.
+// Fails when the production build is missing, contains the browser preview's sample data or the
+// showcase page, or inlines a font or image as a data: URL, which the production CSP blocks.
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,7 @@ import { fileURLToPath } from "node:url";
 // The sample version in src/lib/preview-fixtures.ts. It is fixture data that the preview
 // reads at runtime, so it is in any bundle that includes the fixtures.
 const PREVIEW_MARKER = "0.0.0-preview.sample-data";
+const INLINED_ASSET = /data:font\/|data:application\/font|data:image\/|url\(\s*["']?data:/;
 const distDir = fileURLToPath(new URL("../dist/", import.meta.url));
 
 /** @type {import("node:fs").Dirent[]} */
@@ -22,13 +24,29 @@ const files = entries
   .map((entry) => join(entry.parentPath, entry.name));
 /** @type {string[]} */
 const offenders = [];
+/** @type {string[]} */
+const inlined = [];
 for (const file of files) {
   const contents = await readFile(file, "utf8");
   if (contents.includes(PREVIEW_MARKER)) offenders.push(relative(distDir, file));
+  if (INLINED_ASSET.test(contents)) inlined.push(relative(distDir, file));
 }
+const showcase = files.filter((file) => file.endsWith("showcase.html"));
 
 if (offenders.length > 0) {
   console.error(`Preview sample data found in the production build: ${offenders.join(", ")}`);
   process.exit(1);
 }
-console.log(`dist/ has no preview sample data (${files.length} files checked).`);
+if (showcase.length > 0) {
+  console.error(`The showcase page is in the production build: ${showcase.join(", ")}`);
+  process.exit(1);
+}
+if (inlined.length > 0) {
+  console.error(
+    `Fonts or images inlined as data: URLs in the production build: ${inlined.join(", ")}`,
+  );
+  process.exit(1);
+}
+console.log(
+  `dist/ has no preview sample data, showcase or inlined assets (${files.length} files checked).`,
+);

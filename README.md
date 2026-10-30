@@ -35,7 +35,10 @@ Build Windows installers from a separate clone of the repository on the Windows 
 - `pnpm install` installs dependencies.
 - `pnpm dev` runs the interface alone in a browser preview, answering Rust commands with development-only sample data.
 - `pnpm tauri dev` runs the desktop application in development mode.
-- `pnpm check` runs every check: Biome, `tsc`, secretlint, the production build and its sample-data check, Vitest, the Playwright smoke test, `cargo fmt --check`, `cargo clippy` and `cargo test`. It stops at the first failing check.
+- `pnpm check` runs every check: Biome, `tsc`, secretlint, the production build and its check for sample data, the showcase and inlined assets, Vitest, the Playwright tests, `cargo fmt --check`, `cargo clippy` and `cargo test`. It stops at the first failing check.
+- `pnpm icons` rebuilds the bundled icon font and `src/ui/icon-glyphs.ts` from the names in `src/ui/icon-names.json`. It needs [pipx](https://pipx.pypa.io/) and network access, because it fetches fonttools from PyPI.
+
+In development, `/showcase.html` on the dev server shows the design foundation: the colour, type, spacing and shape tokens, the icons and the logo, with a switch between the OS, dark and light colour modes. Under `pnpm tauri dev`, the placeholder screen links to it. Production builds never include it.
 - `pnpm tauri build` builds unsigned installers for the current OS into `src-tauri/target/release/bundle/`.
 
 ## Continuous integration and releases
