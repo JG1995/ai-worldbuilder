@@ -79,6 +79,29 @@ describe("Menu", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(row).toHaveFocus();
   });
+
+  it("flips above a rectangle anchor and closes on a press inside it", () => {
+    const onClose = vi.fn();
+    render(
+      <>
+        <div>Saltmere row</div>
+        <Menu
+          label="Page actions"
+          items={items}
+          // jsdom's viewport is 768 pixels tall, so the menu does not fit below this rectangle.
+          at={new DOMRect(20, 740, 200, 24)}
+          onSelect={vi.fn()}
+          onClose={onClose}
+        />
+      </>,
+    );
+    expect(screen.getByRole("menu")).toHaveStyle({ top: "736px" });
+
+    const row = screen.getByText("Saltmere row");
+    fireEvent.pointerDown(row);
+    fireEvent.click(row);
+    expect(onClose).toHaveBeenCalled();
+  });
 });
 
 describe("MenuButton", () => {

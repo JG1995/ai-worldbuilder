@@ -6,15 +6,17 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "destructive";
 
 // Hover and pressed colours apply to enabled buttons only. Pressed reuses existing fills: secondary
 // and ghost take `selected`, and primary shows its base fill again. DESIGN.md defines no hover
-// colour for destructive buttons, so they keep their fill.
+// colour for destructive buttons, so they keep their fill. Every button has a 1px border, transparent
+// unless the variant draws one, so Windows contrast themes still paint each button's boundary.
 const ghost =
-  "text-text-muted enabled:hover:bg-hover enabled:hover:text-text enabled:active:bg-selected";
+  "border-transparent text-text-muted enabled:hover:bg-hover enabled:hover:text-text enabled:active:bg-selected";
 
 const variants: Record<ButtonVariant, string> = {
-  primary: "bg-accent text-on-accent enabled:hover:bg-accent-hover enabled:active:bg-accent",
-  secondary: "border border-outline text-text enabled:hover:bg-hover enabled:active:bg-selected",
+  primary:
+    "border-transparent bg-accent text-on-accent enabled:hover:bg-accent-hover enabled:active:bg-accent",
+  secondary: "border-outline text-text enabled:hover:bg-hover enabled:active:bg-selected",
   ghost,
-  destructive: "bg-error text-on-status",
+  destructive: "border-transparent bg-error text-on-status",
 };
 
 type ButtonProps = Omit<ComponentProps<"button">, "className"> & {
@@ -40,7 +42,7 @@ export function Button({
         if (loading) event.preventDefault();
         else onClick?.(event);
       }}
-      className={`ui-strong relative inline-flex h-control shrink-0 items-center justify-center overflow-hidden whitespace-nowrap rounded-sm px-3 transition-colors disabled:text-text-disabled ${variants[variant]}`}
+      className={`ui-strong relative inline-flex h-control shrink-0 items-center justify-center overflow-hidden whitespace-nowrap rounded-sm border px-3 transition-colors disabled:text-text-disabled ${variants[variant]}`}
     >
       {/* The hidden label keeps the button's width while "Working…" shows over it. */}
       <span
@@ -73,7 +75,7 @@ export function IconButton({ icon, label, shortcut, type = "button", ...props }:
           type={type}
           aria-label={label}
           aria-describedby={describedBy}
-          className={`inline-flex size-control-compact shrink-0 items-center justify-center rounded-sm transition-colors disabled:text-text-disabled ${ghost}`}
+          className={`inline-flex size-control-compact shrink-0 items-center justify-center rounded-sm border transition-colors disabled:text-text-disabled ${ghost}`}
         >
           <Icon name={icon} />
         </button>
