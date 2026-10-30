@@ -176,6 +176,30 @@ describe("FileTree", () => {
     expect(row("North")).toHaveFocus();
   });
 
+  it("closes a Shift+F10 menu on a press on its own row and returns focus to the row", () => {
+    const { onToggle } = renderTree();
+
+    focusRow("North");
+    press("F10", { shiftKey: true });
+    fireEvent.pointerDown(row("North"));
+    fireEvent.click(row("North"));
+
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(row("North")).toHaveFocus();
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it("opens a Shift+F10 menu above a row near the bottom instead of covering it", () => {
+    renderTree();
+    // jsdom's viewport is 768 pixels tall, so the menu does not fit below this row.
+    vi.spyOn(row("North"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 740, 200, 24));
+
+    focusRow("North");
+    press("F10", { shiftKey: true });
+
+    expect(Number.parseFloat(screen.getByRole("menu").style.top)).toBeLessThan(740);
+  });
+
   it("opens the caller's empty-space items on a right-click outside the rows", () => {
     const { contextMenuItems } = renderTree();
 
