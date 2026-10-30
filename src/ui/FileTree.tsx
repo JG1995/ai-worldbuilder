@@ -14,7 +14,7 @@ import { Button, IconButton } from "./Button";
 import { Icon } from "./Icon";
 import { Menu, MenuButton, type MenuItem } from "./Menu";
 import { TextInput } from "./TextInput";
-import { type Point, usePopoverPosition } from "./Tooltip";
+import { type Point, type Rect, usePopoverPosition } from "./Tooltip";
 
 export type TreeEntry = {
   path: string;
@@ -113,7 +113,7 @@ const TreeRow = memo(function TreeRow({
       style={{ paddingLeft: indent(level) }}
       className={`ui relative flex h-tree-row cursor-default select-none items-center gap-1 pr-2 transition-colors focus-visible:-outline-offset-2 ${
         selected
-          ? "bg-selected text-text before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-accent"
+          ? "bg-selected text-text before:absolute before:inset-y-0 before:left-0 before:border-accent before:border-l-2"
           : "text-text-muted hover:bg-hover hover:text-text"
       }`}
     >
@@ -225,7 +225,7 @@ function NameTooltip({ anchor }: { anchor: Element }) {
   );
 }
 
-type ContextMenuState = { at: Point | Element; target: TreeEntry | null };
+type ContextMenuState = { at: Point | Rect; target: TreeEntry | null };
 
 /**
  * The world's file tree: a header with the world name and actions, then the visible entries as a
@@ -333,10 +333,12 @@ export function FileTree({
       case "Enter":
         activate(entry, false);
         break;
-      case "ContextMenu":
+      case "ContextMenu": {
         hideTooltip();
-        setContextMenu({ at: row, target: entry });
+        // The row's rectangle, not the row itself, so a press on the row closes the menu.
+        setContextMenu({ at: row.getBoundingClientRect(), target: entry });
         break;
+      }
       default:
         return;
     }
