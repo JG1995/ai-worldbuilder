@@ -66,6 +66,12 @@
    */
   --level-2-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 
+  /*
+   * Alias: the welcome screen's ground is selected in dark mode and page in light mode. Outside
+   * the colour namespace, so the colour roles stay exactly DESIGN.md's. Use it as bg-(--welcome-ground).
+   */
+  --welcome-ground: var(--color-selected);
+
   /* Layers, back to front, in steps of 10. Use them as z-(--z-…). */
   --z-menu: 20;
   --z-dialog: 30;
@@ -87,8 +93,17 @@
 
   --spacing-control: 32px;
   --spacing-control-compact: 28px;
+  --spacing-tab-strip: 36px;
+  --spacing-tree-row: 28px;
+  --spacing-sidebar: 264px;
+  --spacing-3xl: 48px;
+  --spacing-reading-measure: 72ch;
+  --spacing-page-x: 48px;
+  --spacing-page-x-narrow: 24px;
 
   --breakpoint-wide: 960px;
+  /* The page view's padding narrows when its pane, not the window, is under 960px. */
+  --container-wide: 960px;
 }
 
 :root {
@@ -124,6 +139,7 @@
     --color-input: var(--color-page);
 
     --level-2-shadow: 0 8px 24px rgba(19, 29, 36, 0.12);
+    --welcome-ground: var(--color-page);
   }
 }
 
