@@ -1,0 +1,237 @@
+/* The only stylesheet with design values. Every value comes from .wiki/DESIGN.md. */
+@import "tailwindcss";
+@import "@fontsource/darker-grotesque/500.css";
+@import "@fontsource/darker-grotesque/700.css";
+@import "@fontsource/hanken-grotesk/400.css";
+@import "@fontsource/hanken-grotesk/500.css";
+@import "@fontsource/hanken-grotesk/700.css";
+
+@font-face {
+  font-family: "Material Symbols Sharp";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("../assets/icons/material-symbols-sharp.woff2") format("woff2");
+}
+
+/*
+ * Light mode applies when the OS asks for it and the showcase has not forced dark mode, or when
+ * the showcase forces light mode. Production code never sets data-theme.
+ */
+@custom-variant light {
+  @media (prefers-color-scheme: light) {
+    &:where(:root:not([data-theme="dark"]), :root:not([data-theme="dark"]) *) {
+      @slot;
+    }
+  }
+  &:where(:root[data-theme="light"], :root[data-theme="light"] *) {
+    @slot;
+  }
+}
+
+/* Dark values are the default; light values override them below. */
+@theme static {
+  --*: initial;
+
+  --spacing: 4px;
+
+  --color-window: #091016;
+  --color-page: #131d24;
+  --color-raised: #232d34;
+  --color-hover: #232d34;
+  --color-selected: #30383e;
+  --color-divider: #38434b;
+  --color-outline: #7e8991;
+  --color-text: #f1f3f5;
+  --color-text-muted: #9ba3a8;
+  --color-text-disabled: #6b747c;
+  --color-accent: #9edfe0;
+  --color-accent-hover: #c1edee;
+  --color-on-accent: #091016;
+  --color-selection: #2e4f4f;
+  --color-success: #3fc6a0;
+  --color-warning: #e59b37;
+  --color-error: #fe8477;
+  --color-info: #66b2fd;
+  --color-on-status: #091016;
+  --color-diff-added: #073025;
+  --color-diff-removed: #471713;
+
+  --font-display: "Darker Grotesque", system-ui, sans-serif;
+  --font-text: "Hanken Grotesk", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", "DejaVu Sans Mono", monospace;
+  --font-icon: "Material Symbols Sharp";
+
+  --radius-none: 0;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+
+  --spacing-control: 32px;
+  --spacing-control-compact: 28px;
+
+  --breakpoint-wide: 960px;
+}
+
+:root {
+  color-scheme: dark;
+  --icon-grade: -25;
+
+  @variant light {
+    color-scheme: light;
+    --icon-grade: 0;
+
+    --color-window: #f1f3f5;
+    --color-page: #ffffff;
+    --color-raised: #ffffff;
+    --color-hover: #e4e7e9;
+    --color-selected: #dde1e4;
+    --color-divider: #e4e7e9;
+    --color-outline: #6b747c;
+    --color-text: #131d24;
+    --color-text-muted: #4d575e;
+    --color-text-disabled: #9ba3a8;
+    --color-accent: #487374;
+    --color-accent-hover: #395f5f;
+    --color-on-accent: #ffffff;
+    --color-selection: #dff6f6;
+    --color-success: #08795e;
+    --color-warning: #8f5a06;
+    --color-error: #b4312b;
+    --color-info: #196aaf;
+    --color-on-status: #ffffff;
+    --color-diff-added: #d6f8eb;
+    --color-diff-removed: #ffe9e6;
+  }
+}
+
+/* Type roles. Darker Grotesque appears only in page-title, world-name and label-caps. */
+@utility page-title {
+  font-family: var(--font-display);
+  font-size: 40px;
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+}
+
+@utility world-name {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+@utility label-caps {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+@utility heading-4 {
+  font-family: var(--font-text);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+@utility body {
+  font-family: var(--font-text);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.65;
+}
+
+@utility ui {
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+@utility ui-strong {
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+@utility ui-small {
+  font-family: var(--font-text);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+@utility mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+/* Icon glyphs: unfilled, weight 400 and optical size 20 are fixed in the font subset. */
+@utility icon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  font-family: var(--font-icon);
+  font-size: 16px;
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  direction: ltr;
+  font-variation-settings: "GRAD" var(--icon-grade);
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer base {
+  body {
+    @apply ui bg-window text-text;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  ::selection {
+    background-color: var(--color-selection);
+  }
+
+  /* Chromium ignores these pseudo-elements once scrollbar-width or scrollbar-color is set. */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-divider);
+  }
+
+  ::-webkit-scrollbar-thumb:hover,
+  ::-webkit-scrollbar-thumb:active {
+    background-color: var(--color-outline);
+  }
+}
+
+/* Outside any layer, so it wins over the transition and animation utilities. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition-duration: 0s;
+    animation-duration: 0s;
+  }
+}
