@@ -73,14 +73,16 @@
   --welcome-ground: var(--color-selected);
 
   /* Layers, back to front, in steps of 10. Use them as z-(--z-…). */
+  --z-overlay: 10;
   --z-menu: 20;
   --z-dialog: 30;
   --z-toast: 40;
 
-  /* transition-colors uses the hover and selection timing; menus and dialogs fade in. */
+  /* transition-colors uses the hover and selection timing; menus and dialogs fade, overlays slide. */
   --default-transition-duration: 100ms;
   --default-transition-timing-function: ease-out;
   --duration-fade: 120ms;
+  --duration-slide: 160ms;
 
   --font-display: "Darker Grotesque", system-ui, sans-serif;
   --font-text: "Hanken Grotesk", system-ui, sans-serif;

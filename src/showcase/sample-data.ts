@@ -2,6 +2,7 @@
 // keeps this module out of production builds.
 
 import type { TreeEntry } from "../ui/FileTree";
+import type { Tab } from "../ui/TabStrip";
 import type { RecentWorld } from "../ui/WelcomeScreen";
 
 export const sampleWorldName = "Saltmere";
@@ -145,3 +146,20 @@ export const samplePageParagraphs = [
   "Saltmere is a harbour town built on the bones of an older one. At low tide the roofs of the drowned quarter show above the mud, and the guild sends its apprentices out to read the marks cut into the slates.",
   "The tide archive keeps every chart the harbour guild ever drew, and none of them agree. Archivist Ŵyn says that is the point: the sea keeps moving, and so does the town.",
 ];
+
+export const sampleTabs: Tab[] = [
+  { id: "saltmere", label: "Saltmere" },
+  { id: "thorr", label: "Þórr" },
+  { id: "customs-house", label: "Customs house" },
+];
+
+export const sampleLongTabs: Tab[] = [
+  { id: "tide-charts", label: "Tide charts that the harbour guild drew, and none of them agree" },
+  { id: "overview", label: "World overview and the rules of the drowned coast" },
+  { id: "wyn", label: "Archivist Ŵyn" },
+];
+
+export const sampleManyTabs: Tab[] = Array.from({ length: 24 }, (_, i) => ({
+  id: `session-${i + 1}`,
+  label: `Session ${i + 1}`,
+}));
