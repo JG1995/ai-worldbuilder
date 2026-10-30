@@ -56,6 +56,25 @@
   --color-on-status: #091016;
   --color-diff-added: #073025;
   --color-diff-removed: #471713;
+  --color-backdrop: rgba(0, 0, 0, 0.5);
+  /* Alias: text inputs fill with raised in dark mode and page in light mode. */
+  --color-input: var(--color-raised);
+
+  /*
+   * Outside the shadow namespace on purpose: Tailwind would inline a shadow-* value into its
+   * utility, so the light override would never apply. Use it as shadow-(--level-2-shadow).
+   */
+  --level-2-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Layers, back to front, in steps of 10. Use them as z-(--z-…). */
+  --z-menu: 20;
+  --z-dialog: 30;
+  --z-toast: 40;
+
+  /* transition-colors uses the hover and selection timing; menus and dialogs fade in. */
+  --default-transition-duration: 100ms;
+  --default-transition-timing-function: ease-out;
+  --duration-fade: 120ms;
 
   --font-display: "Darker Grotesque", system-ui, sans-serif;
   --font-text: "Hanken Grotesk", system-ui, sans-serif;
@@ -101,6 +120,10 @@
     --color-on-status: #ffffff;
     --color-diff-added: #d6f8eb;
     --color-diff-removed: #ffe9e6;
+    --color-backdrop: rgba(19, 29, 36, 0.3);
+    --color-input: var(--color-page);
+
+    --level-2-shadow: 0 8px 24px rgba(19, 29, 36, 0.12);
   }
 }
 
@@ -196,13 +219,24 @@
     @apply ui bg-window text-text;
   }
 
+  /*
+   * Every element keeps the ring's colour, so transition-colors, which includes outline-color,
+   * never fades the ring in from the text colour.
+   */
+  *,
+  ::before,
+  ::after {
+    outline-color: var(--color-accent);
+  }
+
   :focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline-width: 2px;
+    outline-style: solid;
     outline-offset: 2px;
   }
 
   :focus:not(:focus-visible) {
-    outline: none;
+    outline-style: none;
   }
 
   ::selection {
