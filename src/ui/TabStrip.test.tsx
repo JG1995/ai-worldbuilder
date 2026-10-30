@@ -62,6 +62,23 @@ describe("TabStrip", () => {
     expect(onActivate.mock.calls).toEqual([[expected]]);
   });
 
+  it("ignores Ctrl+Tab while focus is inside a modal dialog", () => {
+    const { onActivate } = renderStrip();
+    render(
+      <div role="dialog" aria-modal="true" aria-label="Delete">
+        <button type="button">Cancel</button>
+      </div>,
+    );
+    act(() => screen.getByRole("button", { name: "Cancel" }).focus());
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Cancel" }), {
+      key: "Tab",
+      ctrlKey: true,
+    });
+
+    expect(onActivate).not.toHaveBeenCalled();
+  });
+
   it("moves focus with Left and Right without activating, and activates with Enter", () => {
     const { onActivate } = renderStrip();
 

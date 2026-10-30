@@ -200,6 +200,7 @@ export function Shell({
         }`}
       >
         {tree}
+        {/* Its transparent border becomes a visible line in Windows contrast themes. */}
         {/* biome-ignore lint/a11y/useSemanticElements: a focusable window splitter; <hr> cannot take focus or a value. */}
         <div
           role="separator"
@@ -218,7 +219,7 @@ export function Shell({
             drag.current = null;
           }}
           onKeyDown={resizeByKey}
-          className="absolute inset-y-0 right-0 w-1 cursor-col-resize transition-colors hover:bg-outline focus-visible:outline-offset-0 active:bg-outline"
+          className="absolute inset-y-0 right-0 w-1 cursor-col-resize border-transparent border-r transition-colors hover:bg-outline focus-visible:outline-offset-0 active:bg-outline"
         />
       </aside>
       <div ref={pageColumn} className="relative flex min-w-0 flex-1 flex-col">

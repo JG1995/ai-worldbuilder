@@ -152,6 +152,41 @@ test("Ctrl+Tab reaches the tab strip in the browser preview", async ({ page }) =
   await expect(tabs.last()).toHaveAttribute("aria-selected", "true");
 });
 
+test("under forced colours the shell's markers and lines stay visible as borders", async ({
+  page,
+}) => {
+  await openSampleWorld(page, 1280);
+  await page.emulateMedia({ forcedColors: "active" });
+  const border = (locator: Locator, side: "Top" | "Right" | "Bottom" | "Left", pseudo = "") =>
+    locator.evaluate(
+      (element, { side, pseudo }) => {
+        const style = getComputedStyle(element, pseudo || null);
+        return {
+          style: style.getPropertyValue(`border-${side.toLowerCase()}-style`),
+          width: Number.parseFloat(style.getPropertyValue(`border-${side.toLowerCase()}-width`)),
+        };
+      },
+      { side, pseudo },
+    );
+  const expectVisible = async (found: Promise<{ style: string; width: number }>) => {
+    const { style, width } = await found;
+    expect(style).not.toBe("none");
+    expect(width).toBeGreaterThanOrEqual(1);
+  };
+
+  const tabs = page.getByRole("tab");
+  await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
+  await expectVisible(border(tabs.first().locator(".."), "Top", "::before"));
+  const inactive = tabs.nth(1).locator("..");
+  for (const pseudo of ["", "::before"]) {
+    expect((await border(inactive, "Top", pseudo)).width).toBe(0);
+  }
+  await expectVisible(border(page.getByRole("treeitem", { selected: true }), "Left", "::before"));
+  await expectVisible(border(page.getByRole("tablist").locator("../.."), "Bottom", "::before"));
+  await expectVisible(border(page.getByRole("separator", { name: "File tree width" }), "Right"));
+  await expectVisible(border(treePane(page).getByRole("button", { name: "New page" }), "Top"));
+});
+
 test("a toast pushed while a dialog is open shows above the dialog", async ({ page }) => {
   await page.clock.install();
   await openSampleWorld(page, 1280);

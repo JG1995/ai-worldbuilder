@@ -70,7 +70,8 @@ export function TabStrip({ tabs, activeId, onActivate, onClose, leading }: TabSt
 
   const cycle = useEffectEvent((event: globalThis.KeyboardEvent) => {
     if (event.key !== "Tab" || !(event.ctrlKey || event.metaKey) || event.defaultPrevented) return;
-    if (tabs.length === 0) return;
+    // An open dialog keeps the page behind it unchanged until it closes.
+    if (tabs.length === 0 || document.activeElement?.closest('[aria-modal="true"]')) return;
     event.preventDefault();
     const index = tabs.findIndex((tab) => tab.id === activeId);
     const step = event.shiftKey ? -1 : 1;
@@ -141,7 +142,8 @@ export function TabStrip({ tabs, activeId, onActivate, onClose, leading }: TabSt
   }
 
   return (
-    <div className="flex h-tab-strip shrink-0 bg-window shadow-[inset_0_-1px_var(--color-divider)]">
+    // The bottom line is a border, so Windows contrast themes keep it; positioned tabs paint over it.
+    <div className="relative flex h-tab-strip shrink-0 bg-window before:absolute before:inset-x-0 before:bottom-0 before:border-divider before:border-b">
       {leading && <div className="flex shrink-0 items-center px-1">{leading}</div>}
       <div
         ref={scroller}
@@ -183,7 +185,7 @@ export function TabStrip({ tabs, activeId, onActivate, onClose, leading }: TabSt
                 onPointerLeave={hideTooltip}
                 className={`group relative flex h-full max-w-[200px] shrink-0 items-center transition-colors ${
                   active
-                    ? "bg-page text-text before:absolute before:inset-x-0 before:top-0 before:h-0.5 before:bg-accent"
+                    ? "bg-page text-text before:absolute before:inset-x-0 before:top-0 before:border-accent before:border-t-2"
                     : "text-text-muted focus-within:text-text hover:text-text"
                 }`}
               >
