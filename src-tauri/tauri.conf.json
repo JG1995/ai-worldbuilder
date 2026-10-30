@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "Grimoire.md",
-        "width": 800,
-        "height": 600,
+        "width": 1280,
+        "height": 800,
         "minWidth": 720,
         "minHeight": 480
       }
@@ -42,6 +42,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../src/assets/licenses/darker-grotesque-OFL.txt": "licenses/darker-grotesque-OFL.txt",
+      "../src/assets/licenses/hanken-grotesk-OFL.txt": "licenses/hanken-grotesk-OFL.txt",
+      "../src/assets/licenses/material-symbols-LICENSE.txt": "licenses/material-symbols-LICENSE.txt"
+    }
   }
 }
