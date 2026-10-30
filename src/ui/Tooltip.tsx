@@ -14,7 +14,7 @@ const viewportMargin = 8;
 const anchorGap = 4;
 
 type Box = { width: number; height: number };
-type Rect = { left: number; right: number; top: number; bottom: number };
+export type Rect = { left: number; right: number; top: number; bottom: number };
 export type Point = { x: number; y: number };
 
 /**
@@ -35,8 +35,10 @@ export function placeInViewport(
   return { left, top };
 }
 
-function rectOf(anchor: Element | Point): Rect {
+function rectOf(anchor: Element | Point | Rect): Rect {
   if (anchor instanceof Element) return anchor.getBoundingClientRect();
+  // A `DOMRect` also has `x` and `y`, so a rectangle must be told apart before a point.
+  if ("bottom" in anchor) return anchor;
   return { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
 }
 
@@ -46,7 +48,7 @@ function rectOf(anchor: Element | Point): Rect {
  */
 export function usePopoverPosition(
   popover: RefObject<HTMLElement | null>,
-  anchor: Element | Point | null,
+  anchor: Element | Point | Rect | null,
   align: "start" | "center",
 ): CSSProperties {
   const [position, setPosition] = useState({ left: 0, top: 0 });

@@ -221,3 +221,31 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
     expect(await duration(dialog.locator(".."))).toBe(expected);
   });
 }
+
+test("every button variant keeps a visible border and its height under forced colours", async ({
+  page,
+}) => {
+  await openShowcase(page);
+  const section = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Buttons", exact: true }),
+  });
+  const buttons = [
+    section.getByRole("button", { name: "Open world…" }).first(),
+    section.getByRole("button", { name: "New page" }).first(),
+    section.getByRole("button", { name: 'Delete "Saltmere"' }).first(),
+    section.getByRole("button", { name: "Close tab" }),
+  ];
+  const height = async (button: Locator) => (await button.boundingBox())?.height;
+  const normalHeights = await Promise.all(buttons.map(height));
+
+  await page.emulateMedia({ forcedColors: "active" });
+  for (const [index, button] of buttons.entries()) {
+    const border = await button.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { style: style.borderTopStyle, width: Number.parseFloat(style.borderTopWidth) };
+    });
+    expect(border.style).not.toBe("none");
+    expect(border.width).toBeGreaterThanOrEqual(1);
+    expect(await height(button)).toBe(normalHeights[index]);
+  }
+});

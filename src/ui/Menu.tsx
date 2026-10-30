@@ -2,7 +2,7 @@ import { Fragment, type KeyboardEvent, useEffect, useEffectEvent, useRef, useSta
 import { createPortal } from "react-dom";
 import { IconButton } from "./Button";
 import type { IconName } from "./Icon";
-import { type Point, usePopoverPosition } from "./Tooltip";
+import { type Point, type Rect, usePopoverPosition } from "./Tooltip";
 
 export type MenuItem = {
   id: string;
@@ -16,8 +16,11 @@ export type MenuItem = {
 type MenuProps = {
   label: string;
   items: MenuItem[];
-  /** A pointer position, or the element to open below. */
-  at: Point | Element;
+  /**
+   * A pointer position, or the element or rectangle to open below. Only an element anchor lets a
+   * press on it through, so its own handler can toggle the menu.
+   */
+  at: Point | Element | Rect;
   onSelect: (id: string) => void;
   onClose: () => void;
 };
