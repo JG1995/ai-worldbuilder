@@ -52,11 +52,13 @@ describe("identity and window", () => {
     expect(tauriConf.identifier).toBe("io.github.jg1995.grimoire");
   });
 
-  it("opens one main window titled Grimoire.md with a 720 × 480 minimum", () => {
+  it("opens one main window titled Grimoire.md at 1280 × 800 with a 720 × 480 minimum", () => {
     expect(tauriConf.app.windows).toEqual([
       expect.objectContaining({
         label: "main",
         title: "Grimoire.md",
+        width: 1280,
+        height: 800,
         minWidth: 720,
         minHeight: 480,
       }),
@@ -67,6 +69,35 @@ describe("identity and window", () => {
     expect(tauriConf.version).toBe("../package.json");
     const cargoVersion = cargoToml.match(/^\[package\][^[]*^version = "([^"]+)"/m)?.[1];
     expect(cargoVersion).toBe(packageJson.version);
+  });
+});
+
+describe("bundled licence texts", () => {
+  const licences = {
+    "darker-grotesque-OFL.txt": [
+      "SIL Open Font License, Version 1.1",
+      "Copyright 2019 The Darker Grotesque Project Authors",
+    ],
+    "hanken-grotesk-OFL.txt": [
+      "SIL Open Font License, Version 1.1",
+      "Copyright 2021 The Hanken Grotesk Project Authors",
+    ],
+    "material-symbols-LICENSE.txt": ["Apache License", "Version 2.0"],
+  };
+
+  it("ships exactly the three licence texts under licenses/", () => {
+    expect(tauriConf.bundle.resources).toEqual(
+      Object.fromEntries(
+        Object.keys(licences).map((file) => [`../src/assets/licenses/${file}`, `licenses/${file}`]),
+      ),
+    );
+  });
+
+  it.each(Object.entries(licences))("keeps %s with its licence text", (file, phrases) => {
+    const text = readText(`src/assets/licenses/${file}`);
+    for (const phrase of phrases) {
+      expect(text).toContain(phrase);
+    }
   });
 });
 
