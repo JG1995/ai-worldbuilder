@@ -2,8 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// The colour roles in .wiki/DESIGN.md's frontmatter. CI cannot read .wiki/, so this table is the
-// copy the stylesheet is checked against; update both together.
+// The colour roles in .wiki/DESIGN.md's frontmatter, then the dialog backdrop from its Dialogs
+// section and the input fill alias from its Inputs section. CI cannot read .wiki/, so these
+// tables are the copy the stylesheet is checked against; update both together.
 const designColours = {
   window: { dark: "#091016", light: "#f1f3f5" },
   page: { dark: "#131d24", light: "#ffffff" },
@@ -26,6 +27,14 @@ const designColours = {
   "on-status": { dark: "#091016", light: "#ffffff" },
   "diff-added": { dark: "#073025", light: "#d6f8eb" },
   "diff-removed": { dark: "#471713", light: "#ffe9e6" },
+  backdrop: { dark: "rgba(0, 0, 0, 0.5)", light: "rgba(19, 29, 36, 0.3)" },
+  input: { dark: "var(--color-raised)", light: "var(--color-page)" },
+};
+
+// The level 2 shadow from DESIGN.md's Elevation & Depth section.
+const level2Shadow = {
+  dark: "0 8px 24px rgba(0, 0, 0, 0.5)",
+  light: "0 8px 24px rgba(19, 29, 36, 0.12)",
 };
 
 const srcDir = join(import.meta.dirname, "../src");
@@ -65,6 +74,12 @@ describe("theme.css", () => {
 
   it("overrides every colour role with its DESIGN.md light value in light mode", () => {
     expect(colourTokens(blockAfter(theme, "@variant light"))).toEqual(expected("light"));
+  });
+
+  it("defines the DESIGN.md level 2 shadow in both modes", () => {
+    const shadow = (block: string) => block.match(/--level-2-shadow:\s*([^;]+);/)?.[1];
+    expect(shadow(blockAfter(theme, "@theme static"))).toBe(level2Shadow.dark);
+    expect(shadow(blockAfter(theme, "@variant light"))).toBe(level2Shadow.light);
   });
 });
 

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ControlsSections } from "./ControlsSections";
 import { FoundationSections } from "./FoundationSections";
 
 type Mode = "os" | "dark" | "light";
@@ -47,6 +48,7 @@ export function Showcase() {
       </header>
       <main className="px-6">
         <FoundationSections />
+        <ControlsSections />
       </main>
     </div>
   );
