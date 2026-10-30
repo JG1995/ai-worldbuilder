@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ControlsSections } from "./ControlsSections";
 import { FoundationSections } from "./FoundationSections";
+import { SurfaceSections } from "./SurfaceSections";
 
 type Mode = "os" | "dark" | "light";
 
@@ -49,6 +50,7 @@ export function Showcase() {
       <main className="px-6">
         <FoundationSections />
         <ControlsSections />
+        <SurfaceSections />
       </main>
     </div>
   );
