@@ -48,7 +48,8 @@ export function Dialog({ title, children, actions, onCancel, initialFocus }: Dia
     if (event.key !== "Tab" || !panel.current) return;
     const controls = [...panel.current.querySelectorAll<HTMLElement>(focusable)];
     const edge = event.shiftKey ? controls[0] : controls.at(-1);
-    if (document.activeElement === edge) {
+    // A click on the dialog's own content focuses the panel itself.
+    if (document.activeElement === edge || document.activeElement === panel.current) {
       event.preventDefault();
       (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
     }
@@ -66,6 +67,7 @@ export function Dialog({ title, children, actions, onCancel, initialFocus }: Dia
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         onKeyDown={trapFocus}
         className="flex w-[440px] max-w-full flex-col gap-4 rounded-md border border-divider bg-raised p-6 text-text shadow-(--level-2-shadow)"
       >

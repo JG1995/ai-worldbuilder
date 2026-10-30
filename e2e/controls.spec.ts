@@ -51,6 +51,140 @@ test("Tab and Shift+Tab cycle inside an open dialog", async ({ page }) => {
   await expect(remove).toBeFocused();
 });
 
+test("a click on the dialog's own content keeps focus, Tab and Escape in the dialog", async ({
+  page,
+}) => {
+  await openShowcase(page);
+  const opener = page.getByRole("button", { name: "Delete page…" });
+  const dialog = await openDeleteDialog(page);
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  const remove = dialog.getByRole("button", { name: 'Delete "Saltmere"' });
+  const inDialog = () => dialog.evaluate((element) => element.contains(document.activeElement));
+
+  await dialog.getByRole("heading").click();
+  expect(await dialog.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await page.keyboard.press("Shift+Tab");
+  await expect(remove).toBeFocused();
+
+  // The bottom padding, below the buttons.
+  const box = await dialog.boundingBox();
+  if (!box) throw new Error("The dialog has no box.");
+  await page.mouse.click(box.x + 8, box.y + box.height - 4);
+  await page.keyboard.press("Tab");
+  await expect(cancel).toBeFocused();
+
+  await page.mouse.click(box.x + 8, box.y + box.height - 4);
+  expect(await inDialog()).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
+test("a click outside a menu closes it and returns focus to its opener", async ({ page }) => {
+  await openShowcase(page);
+  const row = page.getByRole("button", { name: "Saltmere", exact: true });
+  const menuButton = page.getByRole("button", { name: "World actions" });
+  const blank = page.getByRole("heading", { name: "Menu", exact: true });
+
+  await row.click({ button: "right" });
+  await expect(page.getByRole("menu", { name: "Page actions" })).toBeVisible();
+  await blank.click();
+  await expect(page.getByRole("menu")).toBeHidden();
+  await expect(row).toBeFocused();
+
+  await menuButton.click();
+  await expect(page.getByRole("menu", { name: "World actions" })).toBeVisible();
+  await blank.click();
+  await expect(page.getByRole("menu")).toBeHidden();
+  await expect(menuButton).toBeFocused();
+});
+
+test("a click outside a menu only closes it, and a right-click outside still opens a menu", async ({
+  page,
+}) => {
+  await openShowcase(page);
+  const row = page.getByRole("button", { name: "Saltmere", exact: true });
+  const menuButton = page.getByRole("button", { name: "World actions" });
+  const deletePage = page.getByRole("button", { name: "Delete page…" });
+  const dialog = page.getByRole("dialog");
+
+  await row.click({ button: "right" });
+  await deletePage.click();
+  await expect(page.getByRole("menu")).toBeHidden();
+  await expect(dialog).toBeHidden();
+  await expect(row).toBeFocused();
+
+  await deletePage.click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(deletePage).toBeFocused();
+
+  await row.click({ button: "right" });
+  await menuButton.click();
+  await expect(page.getByRole("menu")).toBeHidden();
+  await expect(row).toBeFocused();
+
+  // A press released somewhere else leaves the next click working.
+  await row.click({ button: "right" });
+  const box = await deletePage.boundingBox();
+  if (!box) throw new Error("The button has no box.");
+  await page.mouse.move(box.x + 4, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x - 40, box.y + 4);
+  await page.mouse.up();
+  await expect(page.getByRole("menu")).toBeHidden();
+  await deletePage.click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await menuButton.click();
+  await row.click({ button: "right" });
+  await expect(page.getByRole("menu", { name: "Page actions" })).toBeVisible();
+});
+
+test("a click on a menu item activates it, and the menu button toggles its menu", async ({
+  page,
+}) => {
+  await openShowcase(page);
+  const menuButton = page.getByRole("button", { name: "World actions" });
+  const menu = page.getByRole("menu", { name: "World actions" });
+
+  await menuButton.click();
+  await menu.getByRole("menuitem", { name: "New folder" }).click();
+  await expect(menu).toBeHidden();
+  await expect(page.getByText("Chosen: new-folder")).toBeVisible();
+  await expect(menuButton).toBeFocused();
+
+  await menuButton.click();
+  await expect(menu).toBeVisible();
+  await menuButton.click();
+  await expect(menu).toBeHidden();
+  await expect(menuButton).toBeFocused();
+});
+
+test("a click on a menu's padding or divider keeps it open and working", async ({ page }) => {
+  await openShowcase(page);
+  const row = page.getByRole("button", { name: "Saltmere", exact: true });
+  await row.click({ button: "right" });
+  const menu = page.getByRole("menu", { name: "Page actions" });
+  const item = (name: string) => menu.getByRole("menuitem", { name: new RegExp(`^${name}`) });
+  await expect(item("Open in new tab")).toBeFocused();
+
+  await menu.click({ position: { x: 20, y: 2 } });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await expect(item("Rename")).toBeFocused();
+
+  await menu.locator("hr").click();
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await expect(item("Reveal in file manager")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(row).toBeFocused();
+});
+
 test("a toast pushed while a dialog is open is in front of the backdrop", async ({ page }) => {
   await openShowcase(page);
   await openDeleteDialog(page);
