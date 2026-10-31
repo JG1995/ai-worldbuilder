@@ -36,6 +36,9 @@ const defaults: Record<string, Handler> = {
     text: `# ${pageNameOf(String(path))}\n`,
     version: `version of ${String(path)}`,
   }),
+  page_write: ({ path, text }) => ({
+    version: `version of ${String(path)} saved as ${String(text)}`,
+  }),
 };
 
 /** Mocks the core. Returns the calls it receives, in order. */

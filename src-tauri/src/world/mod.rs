@@ -1,9 +1,10 @@
-//! The `world` area: the open world and the commands that browse and read it.
+//! The `world` area: the open world and the commands that browse, read and save it.
 
 mod dialog;
 mod page;
 mod paths;
 mod tree;
+mod write;
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::{AppError, ErrorKind, guard};
 use page::PageText;
 use tree::TreeEntry;
+use write::PageVersion;
 
 const APP_TITLE: &str = "Grimoire.md";
 /// The file tree's default width in pixels, as in `src/ui/Shell.tsx`.
@@ -92,11 +94,16 @@ impl WorldState {
         page::read(&paths::existing_page(&self.root()?, path)?)
     }
 
+    /// Holds the world lock for the whole write, so writes never overlap.
+    fn write_page(&self, path: &str, text: &str, version: &str) -> Result<PageVersion, AppError> {
+        let world = self.lock();
+        let world = world.as_ref().ok_or_else(no_world)?;
+        write::write_page(&world.root, path, text, version)
+    }
+
     fn root(&self) -> Result<PathBuf, AppError> {
         let world = self.lock();
-        let world = world
-            .as_ref()
-            .ok_or_else(|| AppError::new(ErrorKind::NoWorld, "No world is open."))?;
+        let world = world.as_ref().ok_or_else(no_world)?;
         Ok(world.root.clone())
     }
 
@@ -140,6 +147,22 @@ pub async fn world_tree(state: State<'_, WorldState>) -> Result<Vec<TreeEntry>, 
 #[tauri::command]
 pub async fn page_read(state: State<'_, WorldState>, path: String) -> Result<PageText, AppError> {
     guard(|| state.read_page(&path))
+}
+
+/// Saves the editor's text to a page if the page still has the bytes of `version`, and returns the
+/// version of the bytes it now has.
+#[tauri::command]
+pub async fn page_write(
+    state: State<'_, WorldState>,
+    path: String,
+    text: String,
+    version: String,
+) -> Result<PageVersion, AppError> {
+    guard(|| state.write_page(&path, &text, &version))
+}
+
+fn no_world() -> AppError {
+    AppError::new(ErrorKind::NoWorld, "No world is open.")
 }
 
 /// The core sets the title, because `core:default` does not let the webview do it. A title that
@@ -211,6 +234,34 @@ mod tests {
         assert_eq!(
             state.read_page("Places/Saltmere.md").unwrap_err().kind,
             ErrorKind::NoWorld
+        );
+        assert_eq!(
+            state
+                .write_page("Places/Saltmere.md", "# Saltmere\n", "any")
+                .unwrap_err()
+                .kind,
+            ErrorKind::NoWorld
+        );
+    }
+
+    #[test]
+    fn a_page_read_from_the_open_world_saves_with_its_version() {
+        let state = WorldState::default();
+        let world = world();
+        state.open(world.path().to_path_buf()).unwrap();
+        let page = state.read_page("Places/Saltmere.md").unwrap();
+
+        let saved = state
+            .write_page("Places/Saltmere.md", "# Saltmere harbour\n", &page.version)
+            .unwrap();
+
+        assert_eq!(
+            fs::read(world.path().join("Places/Saltmere.md")).unwrap(),
+            "\u{feff}# Saltmere harbour\r\n".as_bytes()
+        );
+        assert_eq!(
+            saved.version,
+            state.read_page("Places/Saltmere.md").unwrap().version
         );
     }
 

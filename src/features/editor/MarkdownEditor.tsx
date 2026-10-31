@@ -1,4 +1,4 @@
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import {
@@ -10,7 +10,7 @@ import {
 } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 const monoClass = "cm-mono";
@@ -77,29 +77,60 @@ export function createPageState(text: string, label: string) {
   });
 }
 
+/** Replaces the whole document with `text` as one step that undo reverts on its own. */
+export function replaceDocument(editor: EditorView, text: string) {
+  editor.dispatch({
+    changes: { from: 0, to: editor.state.doc.length, insert: text },
+    annotations: isolateHistory.of("full"),
+  });
+}
+
 type MarkdownEditorProps = {
   /** From `createPageState`. The editor starts from it when it mounts. */
   state: EditorState;
   readOnly: boolean;
+  /** Holds the running editor while it is mounted, for changes such as `replaceDocument`. */
+  viewRef?: RefObject<EditorView | null>;
+  /** Receives the editor's state after every change to its text. */
+  onChange?: (state: EditorState) => void;
   /** Receives the editor's last state when it unmounts, so the page can resume where it was. */
   onUnmount?: (state: EditorState) => void;
 };
 
 /** A plain CodeMirror editor for one page's Markdown, with the syntax visible. */
-export function MarkdownEditor({ state, readOnly, onUnmount }: MarkdownEditorProps) {
+export function MarkdownEditor({
+  state,
+  readOnly,
+  viewRef,
+  onChange,
+  onUnmount,
+}: MarkdownEditorProps) {
   const parent = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
   // Only the state at mount counts: a later one, such as the state this editor reported when
   // React remounted it, must not replace the running editor.
   const [initialState] = useState(state);
+  const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const applyReadOnly = useEffectEvent((editor: EditorView) => setReadOnly(editor, readOnly));
+  const share = useEffectEvent((editor: EditorView | null) => {
+    if (viewRef) viewRef.current = editor;
+  });
 
   useEffect(() => {
-    const editor = new EditorView({ state: initialState, parent: parent.current ?? undefined });
+    const editor = new EditorView({
+      state: initialState,
+      parent: parent.current ?? undefined,
+      dispatchTransactions: (transactions, target) => {
+        target.update(transactions);
+        if (transactions.some((transaction) => transaction.docChanged)) reportChange(target.state);
+      },
+    });
     view.current = editor;
+    share(editor);
     applyReadOnly(editor);
     return () => {
+      share(null);
       reportUnmount(editor.state);
       editor.destroy();
       view.current = null;

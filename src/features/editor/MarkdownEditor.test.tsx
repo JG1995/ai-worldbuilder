@@ -73,6 +73,24 @@ it("passes the nonce of the style element in the document head to CodeMirror", (
   }
 });
 
+it("reports each change to its text, and nothing for other updates", () => {
+  const changes: string[] = [];
+  render(
+    <MarkdownEditor
+      state={createPageState("# Kesh", "Kesh Tor")}
+      readOnly={false}
+      onChange={(state) => changes.push(state.doc.toString())}
+    />,
+  );
+  const view = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Kesh Tor" }));
+  if (!view) throw new Error("No editor");
+
+  view.dispatch({ selection: { anchor: 2 } });
+  view.dispatch({ changes: { from: 6, insert: " Tor" }, userEvent: "input.type" });
+
+  expect(changes).toEqual(["# Kesh Tor"]);
+});
+
 it("reports its last state when it unmounts", () => {
   const state = createPageState(page, "Kesh Tor");
   let last: unknown;
