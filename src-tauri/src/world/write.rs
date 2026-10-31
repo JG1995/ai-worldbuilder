@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use super::{page, paths};
+use super::{names, page, paths};
 use crate::error::{AppError, ErrorKind};
 
 /// How often a rename that Windows refuses because another program holds the page is tried again,
@@ -80,6 +80,75 @@ fn write_page_with(
     Ok(PageVersion {
         version: page::version_of(&bytes),
     })
+}
+
+/// A page or folder the user created, by its path relative to the world.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct NewEntry {
+    pub path: String,
+}
+
+/// Creates an empty page `{name}.md` in the existing folder `folder` of the world at `root`, or
+/// at its top level when `folder` is `None`. It never replaces an entry. The caller holds the
+/// world lock, so writes do not overlap.
+pub fn create_page(root: &Path, folder: Option<&str>, name: &str) -> Result<NewEntry, AppError> {
+    let file_name = format!("{name}.md");
+    let path = new_entry_path(&paths::existing_folder(root, folder)?, name, &file_name)?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(creation_error)?;
+    Ok(new_entry(folder, &file_name))
+}
+
+/// Creates an empty folder `name` as `create_page` creates a page.
+pub fn create_folder(root: &Path, folder: Option<&str>, name: &str) -> Result<NewEntry, AppError> {
+    let path = new_entry_path(&paths::existing_folder(root, folder)?, name, name)?;
+    fs::create_dir(&path).map_err(creation_error)?;
+    Ok(new_entry(folder, name))
+}
+
+/// Creates the empty folder of a new world, `name`, in `location`, a folder the user picked or the
+/// default one, and returns its path.
+pub fn create_world(location: &Path, name: &str) -> Result<PathBuf, AppError> {
+    let path = new_entry_path(location, name, name)?;
+    fs::create_dir(&path).map_err(creation_error)?;
+    Ok(path)
+}
+
+/// The path of a new entry `file_name` in `parent`, once `name` passes the naming rules and no
+/// entry in `parent` has `file_name` in any letter case.
+fn new_entry_path(parent: &Path, name: &str, file_name: &str) -> Result<PathBuf, AppError> {
+    names::check_name(name)?;
+    if names::exists_case_insensitive(parent, file_name)? {
+        return Err(exists());
+    }
+    Ok(parent.join(file_name))
+}
+
+fn new_entry(folder: Option<&str>, file_name: &str) -> NewEntry {
+    let path = folder.map_or_else(
+        || file_name.to_owned(),
+        |folder| format!("{folder}/{file_name}"),
+    );
+    NewEntry { path }
+}
+
+/// An entry that appeared between the clash check and the creation is still a clash.
+fn creation_error(error: io::Error) -> AppError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        exists()
+    } else {
+        error.into()
+    }
+}
+
+fn exists() -> AppError {
+    AppError::new(
+        ErrorKind::Exists,
+        "Something with this name already exists here. Letter case does not count.",
+    )
 }
 
 /// A hidden file beside `page`, which the tree does not list: `.{file name}.{process}-{number}.tmp`.
@@ -290,6 +359,108 @@ mod tests {
         let error = write_page(world.path(), "../Page.md", "two\n", &version).unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::InvalidPath);
+    }
+
+    #[test]
+    fn a_new_page_is_an_empty_file_and_a_new_folder_an_empty_folder() {
+        let world = tempfile::tempdir().unwrap();
+        fs::create_dir(world.path().join("Places")).unwrap();
+
+        let page = create_page(world.path(), Some("Places"), "Kesh Tor").unwrap();
+        let folder = create_folder(world.path(), None, "Factions").unwrap();
+
+        assert_eq!(page.path, "Places/Kesh Tor.md");
+        assert_eq!(
+            fs::read(world.path().join("Places/Kesh Tor.md")).unwrap(),
+            b""
+        );
+        assert_eq!(folder.path, "Factions");
+        assert_eq!(
+            fs::read_dir(world.path().join("Factions")).unwrap().count(),
+            0
+        );
+        assert_eq!(entries(&world), ["Factions", "Places"]);
+    }
+
+    #[test]
+    fn a_clash_in_any_letter_case_creates_nothing_and_keeps_the_entry() {
+        let world = tempfile::tempdir().unwrap();
+        fs::write(world.path().join("kesh tor.MD"), b"kept").unwrap();
+        fs::write(world.path().join(".factions"), b"hidden").unwrap();
+
+        let page = create_page(world.path(), None, "Kesh Tor").unwrap_err();
+        let folder = create_folder(world.path(), None, "Kesh tor.md").unwrap_err();
+
+        assert_eq!(page.kind, ErrorKind::Exists);
+        assert_eq!(folder.kind, ErrorKind::Exists);
+        assert_eq!(fs::read(world.path().join("kesh tor.MD")).unwrap(), b"kept");
+        assert_eq!(entries(&world), [".factions", "kesh tor.MD"]);
+    }
+
+    #[test]
+    fn a_name_that_breaks_a_rule_creates_nothing() {
+        let world = tempfile::tempdir().unwrap();
+
+        let page = create_page(world.path(), None, "../Escape").unwrap_err();
+        let folder = create_folder(world.path(), None, "Act/2").unwrap_err();
+
+        assert_eq!(page.kind, ErrorKind::InvalidName);
+        assert_eq!(folder.kind, ErrorKind::InvalidName);
+        assert!(entries(&world).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_through_a_link_is_refused_and_nothing_is_created_behind_it() {
+        let world = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
+
+        let page = create_page(world.path(), Some("Elsewhere"), "Secret").unwrap_err();
+        let folder = create_folder(world.path(), Some("Elsewhere"), "Secret").unwrap_err();
+
+        assert_eq!(page.kind, ErrorKind::InvalidPath);
+        assert_eq!(folder.kind, ErrorKind::InvalidPath);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    /// A dangling link at the new name: creating through it would write outside the world.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_new_name_is_a_clash_and_is_not_followed() {
+        let world = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("Planted.md"),
+            world.path().join("Planted.md"),
+        )
+        .unwrap();
+
+        let error = create_page(world.path(), None, "Planted").unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Exists);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_new_world_is_an_empty_folder_at_the_location_and_a_clash_creates_nothing() {
+        let location = tempfile::tempdir().unwrap();
+        fs::write(location.path().join("glass steppe"), b"a file").unwrap();
+
+        let root = create_world(location.path(), "Saltmere").unwrap();
+        let clash = create_world(location.path(), "Glass Steppe").unwrap_err();
+        let invalid = create_world(location.path(), "Saltmere: Two").unwrap_err();
+
+        assert_eq!(root, location.path().join("Saltmere"));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(clash.kind, ErrorKind::Exists);
+        assert_eq!(invalid.kind, ErrorKind::InvalidName);
+        let mut names: Vec<_> = fs::read_dir(location.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Saltmere", "glass steppe"]);
     }
 
     #[cfg(unix)]

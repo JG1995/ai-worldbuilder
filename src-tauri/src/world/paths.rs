@@ -41,6 +41,21 @@ pub fn existing_page(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
     Ok(path)
 }
 
+/// The absolute path of the existing folder at `relative` inside `root`, or of the root itself
+/// when `relative` is `None`, that is to hold a new entry. The caller adds the entry's name only
+/// after `names::check_name` has accepted it, which keeps it one plain segment.
+pub fn existing_folder(root: &Path, relative: Option<&str>) -> Result<PathBuf, AppError> {
+    let Some(relative) = relative else {
+        check_root(root)?;
+        return Ok(root.to_path_buf());
+    };
+    let (path, metadata) = walk(root, &segments(relative)?)?;
+    if !metadata.is_dir() {
+        return Err(not_found());
+    }
+    Ok(path)
+}
+
 /// Checks that the world's folder still exists. It may be a link, because the user picked it.
 pub fn check_root(root: &Path) -> Result<(), AppError> {
     match fs::metadata(root) {
@@ -255,6 +270,52 @@ mod tests {
                 kind_of(existing_page(world.path(), path)),
                 ErrorKind::InvalidPath,
                 "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_for_a_new_entry_must_be_an_existing_folder_inside_the_world() {
+        let world = world();
+
+        assert_eq!(existing_folder(world.path(), None).unwrap(), world.path());
+        assert_eq!(
+            existing_folder(world.path(), Some("Places")).unwrap(),
+            world.path().join("Places")
+        );
+        for (folder, kind) in [
+            ("Places/Saltmere.md", ErrorKind::NotFound),
+            ("Nowhere", ErrorKind::NotFound),
+            ("", ErrorKind::InvalidPath),
+            ("../Places", ErrorKind::InvalidPath),
+            (".obsidian", ErrorKind::InvalidPath),
+        ] {
+            assert_eq!(
+                kind_of(existing_folder(world.path(), Some(folder))),
+                kind,
+                "{folder:?}"
+            );
+        }
+        assert_eq!(
+            kind_of(existing_folder(&world.path().join("gone"), None)),
+            ErrorKind::WorldMissing
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_for_a_new_entry_through_a_link_is_refused_on_unix() {
+        let world = world();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
+        std::os::unix::fs::symlink(world.path().join("Places"), world.path().join("Linked"))
+            .unwrap();
+
+        for folder in ["Elsewhere", "Linked"] {
+            assert_eq!(
+                kind_of(existing_folder(world.path(), Some(folder))),
+                ErrorKind::InvalidPath,
+                "{folder:?}"
             );
         }
     }

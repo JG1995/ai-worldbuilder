@@ -11,6 +11,11 @@ pub fn run() {
             world::world_tree,
             world::page_read,
             world::page_write,
+            world::page_create,
+            world::folder_create,
+            world::world_new_location,
+            world::world_new_browse,
+            world::world_create,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

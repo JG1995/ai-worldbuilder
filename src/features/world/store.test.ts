@@ -113,6 +113,71 @@ describe("closing tabs", () => {
   });
 });
 
+describe("new entries", () => {
+  it("go in the right-clicked folder, then the selected folder, then the active page's, then the top level", () => {
+    openWorld();
+    expect(store().newEntryFolder()).toBeNull();
+
+    store().openPage("Places/Coast/Cliffs.md", { newTab: false });
+    expect(store().newEntryFolder()).toBe("Places/Coast");
+
+    store().toggleFolder("Factions", true);
+    expect(store().newEntryFolder()).toBe("Factions");
+    expect(store().newEntryFolder("Characters")).toBe("Characters");
+
+    // A folder stays selected only until another page becomes active.
+    store().openPage("Overview.md", { newTab: true });
+    expect(store().newEntryFolder()).toBeNull();
+  });
+
+  it("select a toggled or created folder until another page becomes active", () => {
+    openWorld(["A.md", "B.md"], "A.md");
+
+    store().toggleFolder("Places", false);
+    expect(store().selectedFolder).toBe("Places");
+
+    store().closeTab("B.md");
+    expect(store().selectedFolder).toBe("Places");
+
+    store().folderCreated("Places/Coast");
+    expect(store().selectedFolder).toBe("Places/Coast");
+    expect([...store().expanded].sort()).toEqual(["Places", "Places/Coast"]);
+
+    store().closeTab("A.md");
+    expect(store().selectedFolder).toBeNull();
+  });
+
+  it("open the name input in its expanded folder and keep it open with an error", () => {
+    openWorld();
+
+    store().startNaming("page", "Places/Coast");
+    store().setNameError("Names cannot be empty.");
+
+    expect(store().nameInput).toEqual({
+      kind: "page",
+      folder: "Places/Coast",
+      error: "Names cannot be empty.",
+    });
+    expect([...store().expanded].sort()).toEqual(["Places", "Places/Coast"]);
+  });
+
+  it("open a created page in a new tab, selected, and remember it until its editor shows", () => {
+    openWorld(["A.md"], "A.md");
+    store().toggleFolder("Places", true);
+    store().startNaming("page", "Places");
+
+    store().pageCreated("Places/Kesh Tor.md");
+
+    expect(store().nameInput).toBeNull();
+    expect(store().tabs).toEqual(["A.md", "Places/Kesh Tor.md"]);
+    expect(store().active).toBe("Places/Kesh Tor.md");
+    expect(store().selectedFolder).toBeNull();
+    expect(store().createdPage).toBe("Places/Kesh Tor.md");
+    store().createdPageShown();
+    expect(store().createdPage).toBeNull();
+  });
+});
+
 describe("page results", () => {
   it("are ignored for a page that is no longer open", () => {
     openWorld(["A.md"], "A.md");

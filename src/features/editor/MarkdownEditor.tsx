@@ -89,6 +89,8 @@ type MarkdownEditorProps = {
   /** From `createPageState`. The editor starts from it when it mounts. */
   state: EditorState;
   readOnly: boolean;
+  /** Puts the cursor in the editor when it mounts. Later changes do nothing. */
+  autoFocus?: boolean;
   /** Holds the running editor while it is mounted, for changes such as `replaceDocument`. */
   viewRef?: RefObject<EditorView | null>;
   /** Receives the editor's state after every change to its text. */
@@ -101,6 +103,7 @@ type MarkdownEditorProps = {
 export function MarkdownEditor({
   state,
   readOnly,
+  autoFocus = false,
   viewRef,
   onChange,
   onUnmount,
@@ -110,6 +113,7 @@ export function MarkdownEditor({
   // Only the state at mount counts: a later one, such as the state this editor reported when
   // React remounted it, must not replace the running editor.
   const [initialState] = useState(state);
+  const [focusAtMount] = useState(autoFocus);
   const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const applyReadOnly = useEffectEvent((editor: EditorView) => setReadOnly(editor, readOnly));
@@ -129,13 +133,14 @@ export function MarkdownEditor({
     view.current = editor;
     share(editor);
     applyReadOnly(editor);
+    if (focusAtMount) editor.focus();
     return () => {
       share(null);
       reportUnmount(editor.state);
       editor.destroy();
       view.current = null;
     };
-  }, [initialState]);
+  }, [initialState, focusAtMount]);
 
   useEffect(() => {
     if (view.current) setReadOnly(view.current, readOnly);

@@ -15,6 +15,8 @@ pub enum ErrorKind {
     WorldMissing,
     Io,
     Conflict,
+    InvalidName,
+    Exists,
 }
 
 /// The error every command returns, serialized as `{ kind, message }`.

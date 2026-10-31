@@ -231,6 +231,17 @@ describe("FileTree", () => {
     expect(input).toHaveFocus();
   });
 
+  it("shows the caller's shortcuts in the New page and New folder tooltips", () => {
+    renderTree({ newPageShortcut: "Ctrl+N", newFolderShortcut: "Ctrl+Shift+N" });
+
+    expect(screen.getByRole("button", { name: "New page" })).toHaveAccessibleDescription(
+      "New page Ctrl+N",
+    );
+    expect(screen.getByRole("button", { name: "New folder" })).toHaveAccessibleDescription(
+      "New folder Ctrl+Shift+N",
+    );
+  });
+
   it("shows the empty state with a New page button when the world has no entries", () => {
     const { onNewPage } = renderTree({ entries: [] });
 
