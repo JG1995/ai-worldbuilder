@@ -142,7 +142,9 @@ describe("New world", () => {
     // Later in the document on the same layer, so it shows over the New world dialog.
     const newWorld = screen.getByRole("dialog", { name: "New world" });
     expect(newWorld.compareDocumentPosition(asked) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(asked).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    await waitFor(() =>
+      expect(within(asked).getByRole("button", { name: "Cancel" })).toHaveFocus(),
+    );
     fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
 
     await waitFor(() =>
