@@ -25,6 +25,8 @@ const excludeShowcase: Plugin = {
 export default defineConfig(() => ({
   plugins: [react(), tailwindcss(), excludeShowcase],
 
+  resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
+
   // Emit every font and image as a file: the production CSP blocks inlined data: URLs.
   build: { assetsInlineLimit: 0 },
 

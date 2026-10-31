@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
-import "../ui/theme.css";
+import "@/ui/theme.css";
 import { SampleWorldScreen } from "./SampleWorldScreen";
 import { Showcase } from "./Showcase";
 

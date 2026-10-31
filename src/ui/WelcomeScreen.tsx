@@ -1,15 +1,8 @@
 import { useId } from "react";
+import type { RecentWorld } from "@/types/api";
 import { Button } from "./Button";
 import { Icon } from "./Icon";
 import { StackedLockup } from "./StackedLockup";
-
-export type RecentWorld = {
-  id: string;
-  name: string;
-  path: string;
-  /** The caller found no folder at `path`. */
-  missing: boolean;
-};
 
 type WelcomeScreenProps = {
   recentWorlds: RecentWorld[];

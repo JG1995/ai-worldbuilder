@@ -1,8 +1,9 @@
 import { type ReactNode, useRef, useState } from "react";
-import { Button } from "../../ui/Button";
-import { Dialog } from "../../ui/Dialog";
-import { missingReason, type SaveResult } from "./saving";
-import { pageNameOf, useWorldStore } from "./store";
+import { Button } from "@/ui/Button";
+import { Dialog } from "@/ui/Dialog";
+import { missingReason, type SaveResult } from "../logic/saving";
+import { useWorldStore } from "../stores/world-store";
+import { pageNameOf } from "../utils/paths";
 
 type Choice = "try-again" | "discard" | "cancel";
 

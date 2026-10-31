@@ -1,10 +1,10 @@
 import { useEffect, useId, useState } from "react";
-import type { IpcError } from "../../lib/ipc";
-import { Button } from "../../ui/Button";
-import { Dialog } from "../../ui/Dialog";
-import { Icon } from "../../ui/Icon";
-import { TextInput } from "../../ui/TextInput";
-import { worldNewBrowse, worldNewLocation } from "./commands";
+import type { IpcError } from "@/lib/ipc";
+import { Button } from "@/ui/Button";
+import { Dialog } from "@/ui/Dialog";
+import { Icon } from "@/ui/Icon";
+import { TextInput } from "@/ui/TextInput";
+import { worldNewBrowse, worldNewLocation } from "../api/commands";
 
 type NewWorldDialogProps = {
   /**

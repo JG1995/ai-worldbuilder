@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
-import { World } from "../features/world/World";
+import { World } from "@/features/world/components/World";
 
 // Commands answer from the local core: a failure is reported at once rather than retried, and
 // results change only when the application asks again, not when the window regains focus.

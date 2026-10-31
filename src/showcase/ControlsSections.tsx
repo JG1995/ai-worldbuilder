@@ -1,12 +1,12 @@
 import { type FormEvent, type ReactNode, useId, useRef, useState } from "react";
-import { Button, type ButtonVariant, IconButton } from "../ui/Button";
-import { Dialog } from "../ui/Dialog";
-import { Icon } from "../ui/Icon";
-import { Menu, MenuButton, type MenuItem } from "../ui/Menu";
-import { Notice } from "../ui/Notice";
-import { TextInput } from "../ui/TextInput";
-import { type Toast, ToastRegion } from "../ui/Toast";
-import { type Point, Tooltip } from "../ui/Tooltip";
+import { Button, type ButtonVariant, IconButton } from "@/ui/Button";
+import { Dialog } from "@/ui/Dialog";
+import { Icon } from "@/ui/Icon";
+import { Menu, MenuButton, type MenuItem } from "@/ui/Menu";
+import { Notice } from "@/ui/Notice";
+import { TextInput } from "@/ui/TextInput";
+import { type Toast, ToastRegion } from "@/ui/Toast";
+import { type Point, Tooltip } from "@/ui/Tooltip";
 
 // Every name, label and message here is sample data. The build guard in vite.config.ts keeps this
 // module out of production builds.

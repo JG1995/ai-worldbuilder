@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createPageState } from "../editor/MarkdownEditor";
-import { PageSaver } from "./saving";
-import { type PageStatus, useWorldStore, workspaceSaveDelay } from "./store";
-import { mockWorldIpc } from "./test-ipc";
+import { createPageState } from "@/ui/MarkdownEditor";
+import { mockWorldIpc } from "../api/test-ipc";
+import { PageSaver } from "../logic/saving";
+import { type PageStatus, useWorldStore, workspaceSaveDelay } from "./world-store";
 
 const store = () => useWorldStore.getState();
 

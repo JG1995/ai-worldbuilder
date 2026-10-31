@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { Icon, type IconName } from "../ui/Icon";
-import { glyphs } from "../ui/icon-glyphs";
-import { StackedLockup } from "../ui/StackedLockup";
+import { Icon, type IconName } from "@/ui/Icon";
+import { glyphs } from "@/ui/icon-glyphs";
+import { StackedLockup } from "@/ui/StackedLockup";
 import {
   sampleBody,
   sampleCode,

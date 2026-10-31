@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { IpcError } from "../../lib/ipc";
-import type { PageText } from "./commands";
+import { IpcError } from "@/lib/ipc";
+import type { PageText } from "@/types/api";
 import { autosaveDelay, isReadOnlyNotice, PageSaver, type SaveNotice } from "./saving";
 
 type Write = { text: string; version: string };
@@ -361,11 +361,7 @@ describe("outside changes", () => {
     edited.saver.changed("# Kesh\nmine");
 
     expect(await edited.check()).toEqual({ kind: "notice" });
-    expect(await unedited.check()).toEqual({
-      kind: "unreadable",
-      status: "not_utf8",
-      message: "The page is not UTF-8 text.",
-    });
+    expect(await unedited.check()).toEqual({ kind: "unreadable", error: notUtf8 });
 
     expect(edited.lastNotice()).toEqual({
       kind: "not_utf8",

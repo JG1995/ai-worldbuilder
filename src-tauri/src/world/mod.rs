@@ -5,6 +5,7 @@ mod dialog;
 mod names;
 mod page;
 mod paths;
+mod recent;
 mod tree;
 mod watch;
 mod write;
@@ -17,8 +18,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
-use crate::recent::{Recent, RecentWorld, Workspace};
 use page::{DiffLine, PageText};
+use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
 pub use watch::{EventSink, WorldEvent};
 use write::{NewEntry, OwnWrites, PageVersion};
@@ -85,9 +86,9 @@ pub struct WorldOpened {
 }
 
 impl WorldState {
-    /// Takes the recent worlds loaded at launch.
-    pub fn set_recent(&self, recent: Recent) {
-        self.lock().recent = recent;
+    /// Loads the recent worlds kept in the app data folder, at launch.
+    pub fn load_recent(&self, app_data: &Path) {
+        self.lock().recent = Recent::load(app_data);
     }
 
     /// Takes where the watcher sends its events, once, at launch.
@@ -326,7 +327,7 @@ pub async fn world_open(
     };
     guard(|| {
         let opened = state.open(folder)?;
-        set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
+        set_title(&app, Some(&opened.name));
         Ok(Some(opened))
     })
 }
@@ -335,7 +336,7 @@ pub async fn world_open(
 pub async fn world_close(app: AppHandle, state: State<'_, WorldState>) -> Result<(), AppError> {
     guard(|| {
         state.close();
-        set_title(&app, APP_TITLE);
+        set_title(&app, None);
         Ok(())
     })
 }
@@ -446,7 +447,7 @@ pub async fn world_create(
 ) -> Result<WorldOpened, AppError> {
     guard(|| {
         let opened = state.create(&name, || standard_folder(&app))?;
-        set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
+        set_title(&app, Some(&opened.name));
         Ok(opened)
     })
 }
@@ -475,7 +476,7 @@ pub async fn world_open_recent(
 ) -> Result<WorldOpened, AppError> {
     guard(|| {
         let opened = state.open_recent(&id)?;
-        set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
+        set_title(&app, Some(&opened.name));
         Ok(opened)
     })
 }
@@ -490,7 +491,7 @@ pub async fn world_restore(
     guard(|| {
         let opened = state.restore();
         if let Some(opened) = &opened {
-            set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
+            set_title(&app, Some(&opened.name));
         }
         Ok(opened)
     })
@@ -566,11 +567,16 @@ fn no_world() -> AppError {
     AppError::new(ErrorKind::NoWorld, "No world is open.")
 }
 
-/// The core sets the title, because `core:default` does not let the webview do it. A title that
-/// cannot be set changes nothing else, so the command still succeeds.
-fn set_title(app: &AppHandle, title: &str) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(title);
+/// Shows the open world's name in the window title, or only the application's name when no world
+/// is open. The core sets the title, because `core:default` does not let the webview do it. A title
+/// that cannot be set changes nothing else, so the command still succeeds.
+fn set_title(app: &AppHandle, world: Option<&str>) {
+    let title = world.map_or_else(
+        || APP_TITLE.to_owned(),
+        |name| format!("{name} — {APP_TITLE}"),
+    );
+    if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW) {
+        let _ = window.set_title(&title);
     }
 }
 
@@ -897,7 +903,7 @@ mod tests {
     /// A world state that keeps its recent worlds in `app_data`, as at launch.
     fn launched(app_data: &TempDir) -> WorldState {
         let state = WorldState::default();
-        state.set_recent(Recent::load(app_data.path()));
+        state.load_recent(app_data.path());
         state
     }
 

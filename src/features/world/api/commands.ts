@@ -1,28 +1,12 @@
-import { invokeCommand } from "../../lib/ipc";
-import type { TreeEntry } from "../../ui/FileTree";
-import type { RecentWorld } from "../../ui/WelcomeScreen";
-
-/** The tabs, expanded folders and tree width a world opens with. Paths are relative to the world. */
-export type Workspace = {
-  tabs: string[];
-  active: string | null;
-  expanded: string[];
-  treeWidth: number;
-};
-
-export type WorldOpened = {
-  name: string;
-  /** Increases with every open, so one opening can be told from the next. */
-  session: number;
-  workspace: Workspace;
-};
-
-export type PageText = {
-  /** With `\n` line endings and no byte-order mark. */
-  text: string;
-  /** An opaque token for the page's bytes on disk. */
-  version: string;
-};
+import { invokeCommand } from "@/lib/ipc";
+import type {
+  DiffLine,
+  PageText,
+  RecentWorld,
+  TreeEntry,
+  Workspace,
+  WorldOpened,
+} from "@/types/api";
 
 /** Shows the folder dialog and opens the picked folder; null when the user cancels. */
 export const worldOpen = () => invokeCommand<WorldOpened | null>("world_open");
@@ -43,13 +27,6 @@ export const pageRead = (path: string) => invokeCommand<PageText>("page_read", {
  */
 export const pageWrite = (path: string, text: string, version: string) =>
   invokeCommand<{ version: string }>("page_write", { path, text, version });
-
-/** One line of a page on disk compared with the editor's text. */
-export type DiffLine = {
-  /** `added`: only in the editor's text; `removed`: only on disk. */
-  kind: "same" | "added" | "removed";
-  text: string;
-};
 
 /** Compares the page on disk with the editor's text, line by line. */
 export const pageCompare = (path: string, text: string) =>
@@ -108,16 +85,3 @@ export const appClose = () => invokeCommand<null>("app_close");
 
 /** The core asks the interface to save and then call `appClose`: the user closed the window. */
 export const closeRequestedEvent = "app:close-requested";
-
-/**
- * The watcher's events. Each carries the session of the opening it belongs to, so events from a
- * world that is no longer open can be told apart.
- */
-export type WorldEvents = {
-  /** Entries were created, removed or renamed (`tree`), or the pages at `pages` changed on disk. */
-  "world:changed": { session: number; tree: boolean; pages: string[] };
-  /** The world's folder is gone. */
-  "world:missing": { session: number };
-  /** The watcher could not start or stopped working. */
-  "world:watch-failed": { session: number; message: string };
-};

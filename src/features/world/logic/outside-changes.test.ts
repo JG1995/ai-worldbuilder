@@ -5,11 +5,11 @@ import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PageText, WorldEvents, WorldOpened } from "./commands";
+import type { PageText, WorldEvents, WorldOpened } from "@/types/api";
+import { mockWorldIpc, testWorld } from "../api/test-ipc";
+import { World } from "../components/World";
+import { useWorldStore } from "../stores/world-store";
 import { reloadToast } from "./outside-changes";
-import { useWorldStore } from "./store";
-import { mockWorldIpc, testWorld } from "./test-ipc";
-import { World } from "./World";
 
 const overview = "Overview.md";
 const keshTor = "Places/Kesh Tor.md";

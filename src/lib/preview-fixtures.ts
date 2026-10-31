@@ -2,9 +2,7 @@
 // `ipc.ts` loads this module behind `import.meta.env.DEV`, and `tools/check-dist.mjs` fails the
 // check if the marker below, which every version token carries, appears in a production bundle.
 import type { InvokeArgs } from "@tauri-apps/api/core";
-import type { DiffLine, PageText, WorldOpened } from "../features/world/commands";
-import type { TreeEntry } from "../ui/FileTree";
-import type { RecentWorld } from "../ui/WelcomeScreen";
+import type { DiffLine, PageText, RecentWorld, TreeEntry, WorldOpened } from "@/types/api";
 
 const previewMarker = "0.0.0-preview.sample-data";
 

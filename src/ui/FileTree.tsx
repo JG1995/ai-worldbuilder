@@ -10,18 +10,12 @@ import {
   useRef,
   useState,
 } from "react";
+import type { TreeEntry } from "@/types/api";
 import { Button, IconButton } from "./Button";
 import { Icon } from "./Icon";
 import { Menu, MenuButton, type MenuItem } from "./Menu";
 import { TextInput } from "./TextInput";
 import { type Point, type Rect, usePopoverPosition } from "./Tooltip";
-
-export type TreeEntry = {
-  path: string;
-  name: string;
-  kind: "folder" | "page";
-  children?: TreeEntry[];
-};
 
 /** A request for an inline name input at the top of a folder. */
 export type TreeNameInput = {

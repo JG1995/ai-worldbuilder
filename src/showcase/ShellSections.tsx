@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from "react";
-import { Button } from "../ui/Button";
-import { type Tab, TabStrip } from "../ui/TabStrip";
+import { Button } from "@/ui/Button";
+import { type Tab, TabStrip } from "@/ui/TabStrip";
 import { sampleLongTabs, sampleManyTabs, sampleTabs } from "./sample-data";
 
 // Every label here is sample data. The build guard in vite.config.ts keeps this module out of
