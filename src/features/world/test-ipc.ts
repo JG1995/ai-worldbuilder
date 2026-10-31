@@ -28,6 +28,9 @@ export const testTree: TreeEntry[] = [
   { path: "Overview.md", name: "Overview", kind: "page" },
 ];
 
+/** The default location for a new world. */
+export const testLocation = "/home/tester/Documents";
+
 const defaults: Record<string, Handler> = {
   world_open: () => testWorld,
   world_close: () => null,
@@ -39,7 +42,16 @@ const defaults: Record<string, Handler> = {
   page_write: ({ path, text }) => ({
     version: `version of ${String(path)} saved as ${String(text)}`,
   }),
+  page_create: ({ folder, name }) => ({ path: entryPath(folder, `${String(name)}.md`) }),
+  folder_create: ({ folder, name }) => ({ path: entryPath(folder, String(name)) }),
+  world_new_location: () => ({ location: testLocation }),
+  world_new_browse: () => null,
+  world_create: ({ name }): WorldOpened => ({ ...testWorld, name: String(name), session: 2 }),
 };
+
+function entryPath(folder: unknown, name: string) {
+  return folder === null ? name : `${String(folder)}/${name}`;
+}
 
 /** Mocks the core. Returns the calls it receives, in order. */
 export function mockWorldIpc(overrides: Record<string, Handler> = {}) {

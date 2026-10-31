@@ -24,10 +24,19 @@ type PageTabProps = {
 export function PageTab({ path, session, onClose }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
-  const { setPage, setEditor, setNotice } = useWorldStore.getState();
+  // Only a page the user just created takes focus, so opening any other page leaves focus where
+  // it was.
+  const justCreated = useWorldStore((store) => store.createdPage === path);
+  const { setPage, setEditor, setNotice, createdPageShown } = useWorldStore.getState();
   const view = useRef<EditorView>(null);
   const title = pageNameOf(path);
   const loading = page?.status === "loading";
+  const ready = page?.status === "ready";
+
+  // The editor has focused itself as it mounted, which runs before this effect.
+  useEffect(() => {
+    if (ready && justCreated) createdPageShown();
+  }, [ready, justCreated, createdPageShown]);
 
   useEffect(() => {
     if (!loading) return;
@@ -90,6 +99,7 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
         <MarkdownEditor
           state={page.editor}
           readOnly={changingWorld || isReadOnlyNotice(notice)}
+          autoFocus={justCreated}
           viewRef={view}
           onChange={(editor) => saver.changed(editor.doc)}
           onUnmount={(editor) => setEditor(session, path, editor)}

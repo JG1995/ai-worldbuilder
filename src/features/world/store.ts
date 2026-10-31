@@ -1,5 +1,6 @@
 import type { EditorState } from "@codemirror/state";
 import { create } from "zustand";
+import type { TreeNameInput } from "../../ui/FileTree";
 import { defaultTreeWidth } from "../../ui/Shell";
 import type { WorldOpened } from "./commands";
 import type { PageSaver, SaveNotice, SaveResult } from "./saving";
@@ -18,8 +19,17 @@ type WorldStore = {
   world: { name: string; session: number } | null;
   /** Open pages' paths, in tab order. */
   tabs: string[];
-  /** The active tab's path; the tree selects its row. */
+  /** The active tab's path; the tree selects its row unless a folder is selected. */
   active: string | null;
+  /**
+   * A folder the user toggled or created, which the tree selects in place of the active page's
+   * row until another page becomes active.
+   */
+  selectedFolder: string | null;
+  /** The tree's inline name input for a new page or folder, while it is open. */
+  nameInput: TreeNameInput | null;
+  /** A page just created, whose editor takes focus when it first shows. */
+  createdPage: string | null;
   expanded: ReadonlySet<string>;
   treeWidth: number;
   treeOverlayOpen: boolean;
@@ -37,7 +47,23 @@ type WorldStore = {
   openPage: (path: string, options: { newTab: boolean }) => void;
   activate: (path: string) => void;
   closeTab: (path: string) => void;
+  /** Expands or collapses a folder, and selects it. */
   toggleFolder: (path: string, open: boolean) => void;
+  /**
+   * The folder a new page or folder goes in: the right-clicked folder, then the selected folder,
+   * then the folder that holds the active page, then the world's top level (null).
+   */
+  newEntryFolder: (rightClicked?: string) => string | null;
+  /** Opens the name input in `folder`, which expands with the folders above it. */
+  startNaming: (kind: TreeNameInput["kind"], folder: string | null) => void;
+  setNameError: (error: string) => void;
+  cancelNaming: () => void;
+  /** Closes the name input and opens the new page in a new tab. */
+  pageCreated: (path: string) => void;
+  /** Closes the name input, and expands and selects the new folder. */
+  folderCreated: (path: string) => void;
+  /** Forgets that a page was just created, once its editor has taken focus. */
+  createdPageShown: () => void;
   setTreeWidth: (width: number) => void;
   setTreeOverlayOpen: (open: boolean) => void;
   /**
@@ -58,6 +84,9 @@ const closedWorld = {
   world: null,
   tabs: [],
   active: null,
+  selectedFolder: null,
+  nameInput: null,
+  createdPage: null,
   expanded: new Set<string>(),
   treeWidth: defaultTreeWidth,
   treeOverlayOpen: false,
@@ -69,12 +98,25 @@ export function pageNameOf(path: string) {
   return (path.split("/").at(-1) ?? path).replace(/\.md$/i, "");
 }
 
+/** The folder that holds `path`, or null at the world's top level. */
+function parentOf(path: string) {
+  const end = path.lastIndexOf("/");
+  return end === -1 ? null : path.slice(0, end);
+}
+
 /** `expanded` with every folder above `path` added. */
 function withAncestors(expanded: ReadonlySet<string>, path: string | null) {
   const segments = path?.split("/") ?? [];
   const ancestors = segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
   if (ancestors.every((folder) => expanded.has(folder))) return expanded;
   return new Set([...expanded, ...ancestors]);
+}
+
+/** `expanded` with `folder` and every folder above it added. */
+function withFolder(expanded: ReadonlySet<string>, folder: string | null) {
+  const next = withAncestors(expanded, folder);
+  if (folder === null || next.has(folder)) return next;
+  return new Set([...next, folder]);
 }
 
 /** `pages` without `path`, whose saver stops: the page has saved or the user discarded its edits. */
@@ -130,10 +172,16 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
   },
 
   activate: (path) =>
-    set(({ expanded }) => ({ active: path, expanded: withAncestors(expanded, path) })),
+    set(({ expanded, createdPage }) => ({
+      active: path,
+      selectedFolder: null,
+      // A created page left before its editor showed no longer takes focus when it shows.
+      createdPage: createdPage === path ? createdPage : null,
+      expanded: withAncestors(expanded, path),
+    })),
 
   closeTab: (path) =>
-    set(({ tabs, active, pages, expanded }) => {
+    set(({ tabs, active, pages, expanded, selectedFolder }) => {
       const index = tabs.indexOf(path);
       if (index === -1) return {};
       const rest = tabs.filter((tab) => tab !== path);
@@ -141,6 +189,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       return {
         tabs: rest,
         active: next,
+        selectedFolder: next === active ? selectedFolder : null,
         expanded: withAncestors(expanded, next),
         pages: without(pages, path),
       };
@@ -151,8 +200,38 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       const next = new Set(expanded);
       if (open) next.add(path);
       else next.delete(path);
-      return { expanded: next };
+      return { expanded: next, selectedFolder: path };
     }),
+
+  newEntryFolder: (rightClicked) => {
+    const { selectedFolder, active } = get();
+    return rightClicked ?? selectedFolder ?? (active === null ? null : parentOf(active));
+  },
+
+  startNaming: (kind, folder) =>
+    set(({ expanded }) => ({
+      nameInput: { kind, folder },
+      expanded: withFolder(expanded, folder),
+    })),
+
+  setNameError: (error) =>
+    set(({ nameInput }) => (nameInput ? { nameInput: { ...nameInput, error } } : {})),
+
+  cancelNaming: () => set({ nameInput: null }),
+
+  pageCreated: (path) => {
+    set({ nameInput: null, createdPage: path });
+    get().openPage(path, { newTab: true });
+  },
+
+  folderCreated: (path) =>
+    set(({ expanded }) => ({
+      nameInput: null,
+      selectedFolder: path,
+      expanded: withFolder(expanded, path),
+    })),
+
+  createdPageShown: () => set({ createdPage: null }),
 
   setTreeWidth: (treeWidth) => set({ treeWidth }),
 

@@ -4,12 +4,13 @@ import type { IpcError } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { WelcomeScreen } from "../../ui/WelcomeScreen";
-import { worldClose, worldOpen, worldTreeKey } from "./commands";
+import { type WorldOpened, worldClose, worldCreate, worldOpen, worldTreeKey } from "./commands";
 import { useSaveConfirmation } from "./FailedSaveDialog";
+import { NewWorldDialog } from "./NewWorldDialog";
 import { useWorldStore } from "./store";
 import { WorldScreen } from "./WorldScreen";
 
-// New world and recent worlds arrive in later packages; until then their controls do nothing.
+// Recent worlds arrive in a later package; until then their controls do nothing.
 const notYet = () => {};
 
 type Failure = { title: string; message: string };
@@ -24,6 +25,7 @@ export function World() {
   const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const [failure, setFailure] = useState<Failure | null>(null);
+  const [newWorldOpen, setNewWorldOpen] = useState(false);
   const { confirmSaved, failedSaveDialog } = useSaveConfirmation();
 
   /** Saves every open page in tab order. False when the user cancels on a page that cannot save. */
@@ -56,17 +58,38 @@ export function World() {
     }
   }
 
+  function show(result: WorldOpened) {
+    queryClient.removeQueries({ queryKey: worldTreeKey });
+    opened(result);
+  }
+
   const openWorld = () =>
     changeWorld(async () => {
       try {
         const result = await worldOpen();
-        if (!result) return;
-        queryClient.removeQueries({ queryKey: worldTreeKey });
-        opened(result);
+        if (result) show(result);
       } catch (error) {
         setFailure({ title: "The folder cannot be opened", message: (error as IpcError).message });
       }
     });
+
+  /**
+   * The New world dialog's Create: once every page has saved, the core creates and opens the
+   * world. Resolves to the core's error, which the dialog shows, or to null.
+   */
+  async function createWorld(name: string) {
+    let failure: IpcError | null = null;
+    await changeWorld(async () => {
+      try {
+        const result = await worldCreate(name);
+        setNewWorldOpen(false);
+        show(result);
+      } catch (error) {
+        failure = error as IpcError;
+      }
+    });
+    return failure;
+  }
 
   const closeWorld = () =>
     changeWorld(async () => {
@@ -91,6 +114,7 @@ export function World() {
           session={world.session}
           worldName={world.name}
           onOpenWorld={openWorld}
+          onNewWorld={() => setNewWorldOpen(true)}
           onCloseWorld={closeWorld}
         />
       ) : (
@@ -98,7 +122,7 @@ export function World() {
           <WelcomeScreen
             recentWorlds={[]}
             onOpenWorld={openWorld}
-            onNewWorld={notYet}
+            onNewWorld={() => setNewWorldOpen(true)}
             onChooseRecent={notYet}
             onRemoveRecent={notYet}
           />
@@ -122,6 +146,10 @@ export function World() {
           {failure.message}
         </Dialog>
       )}
+      {newWorldOpen && (
+        <NewWorldDialog onCreate={createWorld} onCancel={() => setNewWorldOpen(false)} />
+      )}
+      {/* It opens after the New world dialog, so its portal comes later and shows over that one. */}
       {failedSaveDialog}
     </div>
   );

@@ -48,6 +48,9 @@ type FileTreeProps = {
   onToggle: (path: string, expanded: boolean) => void;
   onNewPage: () => void;
   onNewFolder: () => void;
+  /** Shown in the New page and New folder buttons' tooltips. */
+  newPageShortcut?: string;
+  newFolderShortcut?: string;
   onNameSubmit: (name: string) => void;
   onNameCancel: () => void;
 };
@@ -246,6 +249,8 @@ export function FileTree({
   onToggle,
   onNewPage,
   onNewFolder,
+  newPageShortcut,
+  newFolderShortcut,
   onNameSubmit,
   onNameCancel,
 }: FileTreeProps) {
@@ -404,8 +409,18 @@ export function FileTree({
     <div className="flex h-full min-h-0 flex-col bg-window">
       <div className="flex h-tab-strip shrink-0 items-center gap-1 pr-1 pl-3">
         <h2 className="world-name min-w-0 flex-1 truncate text-text">{worldName}</h2>
-        <IconButton icon="note_add" label="New page" onClick={onNewPage} />
-        <IconButton icon="create_new_folder" label="New folder" onClick={onNewFolder} />
+        <IconButton
+          icon="note_add"
+          label="New page"
+          shortcut={newPageShortcut}
+          onClick={onNewPage}
+        />
+        <IconButton
+          icon="create_new_folder"
+          label="New folder"
+          shortcut={newFolderShortcut}
+          onClick={onNewFolder}
+        />
         <MenuButton
           icon="more_horiz"
           label="World menu"

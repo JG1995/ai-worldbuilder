@@ -42,3 +42,23 @@ export const pageRead = (path: string) => invokeCommand<PageText>("page_read", {
  */
 export const pageWrite = (path: string, text: string, version: string) =>
   invokeCommand<{ version: string }>("page_write", { path, text, version });
+
+/**
+ * Creates an empty page `{name}.md` in `folder`, or at the world's top level when it is null, and
+ * returns its path. Rejects with `invalid_name` or `exists`, whose message names the broken rule.
+ */
+export const pageCreate = (folder: string | null, name: string) =>
+  invokeCommand<{ path: string }>("page_create", { folder, name });
+
+/** Creates an empty folder as `pageCreate` creates a page. */
+export const folderCreate = (folder: string | null, name: string) =>
+  invokeCommand<{ path: string }>("folder_create", { folder, name });
+
+/** Forgets any location picked before and returns the default one for a new world, to show. */
+export const worldNewLocation = () => invokeCommand<{ location: string }>("world_new_location");
+
+/** Shows the folder dialog for the new world's location; null when the user cancels. */
+export const worldNewBrowse = () => invokeCommand<{ location: string } | null>("world_new_browse");
+
+/** Creates an empty folder `name` at the new world's location and opens it as the world. */
+export const worldCreate = (name: string) => invokeCommand<WorldOpened>("world_create", { name });

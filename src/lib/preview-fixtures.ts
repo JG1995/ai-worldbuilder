@@ -52,22 +52,37 @@ Use \`inline code\` for dice notation such as \`3d6\`.
 /** The page whose saves always fail, so the failed-save notice and dialog can be seen. */
 const lockedPage = "Locations/Locked chronicle.md";
 
-/** How often each page has been saved in this preview session; its version names the count. */
-const saves: Record<string, number> = {};
+/** A preview world: its pages, the folders created in it, and how often each page was saved. */
+type PreviewWorld = {
+  name: string;
+  pages: Record<string, SamplePage>;
+  folders: Set<string>;
+  saves: Record<string, number>;
+};
 
-const versionOf = (path: string) => `${previewMarker}:${path}:${(saves[path] ?? 0) + 1}`;
+const emptyWorld = (name: string): PreviewWorld => ({
+  name,
+  pages: {},
+  folders: new Set(),
+  saves: {},
+});
+
+const sampleWorld: PreviewWorld = { ...emptyWorld("The Glass Steppe"), pages: samplePages };
+
+const versionOf = (world: PreviewWorld, path: string) =>
+  `${previewMarker}:${path}:${(world.saves[path] ?? 0) + 1}`;
 
 const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-/** The tree of `paths`, folders first and then by name, as the core sorts it. */
-function treeOf(paths: string[]): TreeEntry[] {
+/** The tree of a world's pages and folders, folders first and then by name, as the core sorts it. */
+function treeOf(world: PreviewWorld): TreeEntry[] {
   const root: TreeEntry[] = [];
-  for (const path of paths) {
+  const add = (path: string, kind: TreeEntry["kind"]) => {
     const segments = path.split("/");
     let level = root;
     segments.forEach((segment, index) => {
       const entryPath = segments.slice(0, index + 1).join("/");
-      if (index === segments.length - 1) {
+      if (index === segments.length - 1 && kind === "page") {
         level.push({ path: entryPath, name: segment.replace(/\.md$/i, ""), kind: "page" });
         return;
       }
@@ -78,7 +93,9 @@ function treeOf(paths: string[]): TreeEntry[] {
       }
       level = folder.children ?? [];
     });
-  }
+  };
+  for (const folder of world.folders) add(folder, "folder");
+  for (const page of Object.keys(world.pages)) add(page, "page");
   const sort = (entries: TreeEntry[]): TreeEntry[] =>
     entries
       .map((entry) => (entry.children ? { ...entry, children: sort(entry.children) } : entry))
@@ -89,18 +106,72 @@ function treeOf(paths: string[]): TreeEntry[] {
   return sort(root);
 }
 
-let open = false;
+/** The names of the entries directly in `folder`, or at the top level when it is null. */
+function namesIn(world: PreviewWorld, folder: string | null) {
+  const prefix = folder === null ? "" : `${folder}/`;
+  return [...Object.keys(world.pages), ...world.folders]
+    .filter((path) => path.startsWith(prefix))
+    .map((path) => path.slice(prefix.length).split("/")[0]);
+}
+
+const forbiddenCharacters = /[/\\:*?"<>|\p{Cc}]/u;
+
+/**
+ * A short copy of the core's naming rules (`src-tauri/src/world/names.rs`), enough to show their
+ * errors in the preview. The core is the authority.
+ */
+function checkName(name: string) {
+  const rule =
+    name === ""
+      ? "Names cannot be empty."
+      : name.startsWith(".")
+        ? "Names cannot start with a dot."
+        : name.startsWith(" ") || name.endsWith(" ")
+          ? "Names cannot start or end with a space."
+          : name.endsWith(".")
+            ? "Names cannot end with a dot."
+            : forbiddenCharacters.test(name)
+              ? 'Names cannot contain / \\ : * ? " < > | or control characters, which some systems forbid.'
+              : /[[\]#^]/.test(name)
+                ? "Names cannot contain [ ] # or ^, which break wiki links."
+                : /^(con|prn|aux|nul|com[1-9]|lpt[1-9]) *$/i.test(name.split(".")[0])
+                  ? "Windows reserves CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9, even with an extension."
+                  : null;
+  if (rule) throw { kind: "invalid_name", message: rule };
+}
+
+function checkFree(names: string[], fileName: string) {
+  if (names.some((name) => name.toLowerCase() === fileName.toLowerCase())) {
+    throw {
+      kind: "exists",
+      message: "Something with this name already exists here. Letter case does not count.",
+    };
+  }
+}
+
+let world: PreviewWorld | null = null;
 let session = 0;
 
 function requireWorld() {
-  if (!open) throw { kind: "no_world", message: "No world is open." };
+  if (!world) throw { kind: "no_world", message: "No world is open." };
+  return world;
+}
+
+function opened(next: PreviewWorld): WorldOpened {
+  world = next;
+  session += 1;
+  return {
+    name: next.name,
+    session,
+    workspace: { tabs: [], active: null, expanded: [], treeWidth: 264 },
+  };
 }
 
 /** The text of the page at `args.path`, throwing like the core for a missing or non-UTF-8 page. */
 function pageText(args: InvokeArgs | undefined) {
-  requireWorld();
+  const open = requireWorld();
   const path = String((args as { path?: unknown } | undefined)?.path);
-  const page = samplePages[path];
+  const page = open.pages[path];
   if (page === undefined) {
     throw { kind: "not_found", message: "The page or folder does not exist." };
   }
@@ -110,48 +181,81 @@ function pageText(args: InvokeArgs | undefined) {
       message: "The page is not UTF-8 text, so it cannot be edited here. It has not been changed.",
     };
   }
-  return { path, text: page };
+  return { open, path, text: page };
 }
+
+/** Creates an empty page or folder like the core, refusing names that break a rule or clash. */
+function createEntry(args: InvokeArgs | undefined, kind: TreeEntry["kind"]) {
+  const open = requireWorld();
+  const { folder, name } = args as { folder: string | null; name: string };
+  const isFolder = (path: string) =>
+    open.folders.has(path) || Object.keys(open.pages).some((page) => page.startsWith(`${path}/`));
+  if (folder !== null && !isFolder(folder)) {
+    throw { kind: "not_found", message: "The page or folder does not exist." };
+  }
+  checkName(name);
+  const fileName = kind === "page" ? `${name}.md` : name;
+  checkFree(namesIn(open, folder), fileName);
+  const path = folder === null ? fileName : `${folder}/${fileName}`;
+  if (kind === "page") open.pages[path] = "";
+  else open.folders.add(path);
+  return { path };
+}
+
+// The preview has no folder dialog: Browse… switches to the other sample location.
+const previewLocations = ["/home/preview/Documents", "/home/preview/Campaigns"];
+let newLocation = previewLocations[0];
+/** The worlds created in each location this session, by name. */
+const createdWorlds: Record<string, string[]> = {};
 
 /** Sample command results: values, or functions of the arguments that throw like the core. */
 export const previewFixtures: Record<string, unknown> = {
   // Opens the sample world at once: the preview has no folder dialog.
-  world_open: (): WorldOpened => {
-    open = true;
-    session += 1;
-    return {
-      name: "The Glass Steppe",
-      session,
-      workspace: { tabs: [], active: null, expanded: [], treeWidth: 264 },
-    };
-  },
+  world_open: (): WorldOpened => opened(sampleWorld),
   world_close: () => {
-    open = false;
+    world = null;
     return null;
   },
-  world_tree: (): TreeEntry[] => {
-    requireWorld();
-    return treeOf(Object.keys(samplePages));
-  },
+  world_tree: (): TreeEntry[] => treeOf(requireWorld()),
   page_read: (args?: InvokeArgs): PageText => {
-    const { path, text } = pageText(args);
-    return { text, version: versionOf(path) };
+    const { open, path, text } = pageText(args);
+    return { text, version: versionOf(open, path) };
   },
   // Keeps saved text for as long as the preview page stays loaded.
   page_write: (args?: InvokeArgs): { version: string } => {
-    const { path, text } = pageText(args);
+    const { open, path, text } = pageText(args);
     const { text: edited, version } = args as { text: string; version: string };
-    if (version !== versionOf(path)) {
+    if (version !== versionOf(open, path)) {
       throw {
         kind: "conflict",
         message: "The page changed on disk since it was last read or saved.",
       };
     }
-    if (path === lockedPage) throw { kind: "io", message: "Another program is using the file." };
-    if (edited !== text) {
-      samplePages[path] = edited;
-      saves[path] = (saves[path] ?? 0) + 1;
+    if (open === sampleWorld && path === lockedPage) {
+      throw { kind: "io", message: "Another program is using the file." };
     }
-    return { version: versionOf(path) };
+    if (edited !== text) {
+      open.pages[path] = edited;
+      open.saves[path] = (open.saves[path] ?? 0) + 1;
+    }
+    return { version: versionOf(open, path) };
+  },
+  page_create: (args?: InvokeArgs) => createEntry(args, "page"),
+  folder_create: (args?: InvokeArgs) => createEntry(args, "folder"),
+  world_new_location: () => {
+    newLocation = previewLocations[0];
+    return { location: newLocation };
+  },
+  world_new_browse: () => {
+    newLocation = previewLocations[1];
+    return { location: newLocation };
+  },
+  world_create: (args?: InvokeArgs): WorldOpened => {
+    const { name } = args as { name: string };
+    checkName(name);
+    const created = createdWorlds[newLocation] ?? [];
+    checkFree(created, name);
+    createdWorlds[newLocation] = [...created, name];
+    return opened(emptyWorld(name));
   },
 };

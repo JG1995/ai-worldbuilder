@@ -174,3 +174,59 @@ test("a page that cannot be saved shows the failed-save notice, and closing it a
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(tab(page, "Locked chronicle")).toBeVisible();
 });
+
+test("Ctrl+N creates a page and opens it with the cursor in its editor", async ({ page }) => {
+  await openSampleWorld(page);
+  await row(page, "Characters").click();
+
+  await page.keyboard.press("Control+n");
+  await page.getByRole("textbox", { name: "New page name" }).fill("The ferryman");
+  await page.keyboard.press("Enter");
+
+  await expect(tab(page, "The ferryman")).toHaveAttribute("aria-selected", "true");
+  await expect(row(page, "The ferryman")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("textbox", { name: "The ferryman" })).toBeFocused();
+  await page.keyboard.type("Rows by night.");
+  await page.keyboard.press("Control+s");
+  await expect
+    .poll(() => storedText(page, "Characters/The ferryman.md"), { timeout: 500 })
+    .toBe("Rows by night.");
+});
+
+test("Ctrl+Shift+N creates a folder, and a name that breaks a rule shows the rule", async ({
+  page,
+}) => {
+  await openSampleWorld(page);
+
+  await page.keyboard.press("Control+Shift+n");
+  const input = page.getByRole("textbox", { name: "New folder name" });
+  await input.fill("Maps #2");
+  await page.keyboard.press("Enter");
+  await expect(input).toHaveAccessibleDescription(
+    "Names cannot contain [ ] # or ^, which break wiki links.",
+  );
+
+  await input.fill("Maps");
+  await page.keyboard.press("Enter");
+
+  await expect(input).toHaveCount(0);
+  await expect(row(page, "Maps")).toHaveAttribute("aria-selected", "true");
+  await expect(row(page, "Maps")).toHaveAttribute("aria-expanded", "true");
+});
+
+test("New world… from the welcome screen opens a new empty world", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "New world…" }).click();
+  const dialog = page.getByRole("dialog", { name: "New world" });
+  await expect(dialog.getByRole("group", { name: "Location" })).toContainText(
+    "/home/preview/Documents",
+  );
+  await dialog.getByRole("textbox", { name: "Name" }).fill("Saltmere");
+  await dialog.getByRole("button", { name: "Create" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Saltmere" })).toBeVisible();
+  await expect(page.getByText("This world has no pages yet.")).toBeVisible();
+});
