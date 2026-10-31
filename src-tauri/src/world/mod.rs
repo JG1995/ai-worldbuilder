@@ -1,4 +1,5 @@
-//! The `world` area: the open world and the commands that browse, read, save and create in it.
+//! The `world` area: the open world and the commands that browse, read, save and create in it,
+//! and that open recent worlds and keep their workspaces.
 
 mod dialog;
 mod names;
@@ -15,15 +16,19 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
+use crate::recent::{Recent, RecentWorld, Workspace};
 use page::PageText;
 use tree::TreeEntry;
 use write::{NewEntry, PageVersion};
 
 const APP_TITLE: &str = "Grimoire.md";
-/// The file tree's default width in pixels, as in `src/ui/Shell.tsx`.
-const DEFAULT_TREE_WIDTH: u32 = 264;
+/// The limits on a workspace from the interface: the tree width range of `src/ui/Shell.tsx`, and
+/// more tabs and expanded folders than anyone opens.
+const TREE_WIDTHS: (u32, u32) = (200, 420);
+const MAX_TABS: usize = 100;
+const MAX_EXPANDED: usize = 5_000;
 
-/// The open world, if any, and what New world needs, managed by Tauri.
+/// The open world, if any, the recent worlds, and what New world needs, managed by Tauri.
 #[derive(Default)]
 pub struct WorldState {
     inner: Mutex<Inner>,
@@ -35,14 +40,17 @@ struct Inner {
     /// The session of the latest opening. It changes together with `world`, under one lock, so a
     /// session number always names the world it was given with.
     session: u64,
-    /// The folder of the world opened most recently in this session, open or not.
-    last_opened: Option<PathBuf>,
+    /// The recent worlds. They change under the same lock as `world`, so the list and the open
+    /// world always agree.
+    recent: Recent,
     /// The folder New world creates its folder in, once the user has picked one with Browse….
     new_location: Option<PathBuf>,
 }
 
 struct OpenWorld {
     root: PathBuf,
+    /// Its entry in the recent list, which holds its workspace; `None` when it cannot be stored.
+    recent_id: Option<String>,
 }
 
 /// Where New world will create its folder, as a path to show.
@@ -60,46 +68,94 @@ pub struct WorldOpened {
     workspace: Workspace,
 }
 
-/// The open tabs, expanded folders and tree width to show. Nothing is stored yet, so a world
-/// always opens with none and the default width.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Workspace {
-    tabs: Vec<String>,
-    active: Option<String>,
-    expanded: Vec<String>,
-    tree_width: u32,
-}
-
 impl WorldState {
-    /// Opens the folder at `root`, replacing the open world, unless the folder cannot be read.
+    /// Takes the recent worlds loaded at launch.
+    pub fn set_recent(&self, recent: Recent) {
+        self.lock().recent = recent;
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.lock().world.is_some()
+    }
+
+    /// Opens the folder at `root`, replacing the open world, unless the folder cannot be read. The
+    /// world moves to the top of the recent list and opens with its stored workspace.
     fn open(&self, root: PathBuf) -> Result<WorldOpened, AppError> {
         fs::read_dir(&root)?;
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let session = {
+        let (session, stored) = {
             let mut inner = self.lock();
             inner.session += 1;
-            inner.last_opened = Some(root.clone());
-            inner.world = Some(OpenWorld { root });
-            inner.session
+            let recent_id = inner.recent.opened(&root, &name);
+            let stored = recent_id
+                .as_deref()
+                .and_then(|id| inner.recent.workspace(id));
+            inner.world = Some(OpenWorld {
+                root: root.clone(),
+                recent_id,
+            });
+            (inner.session, stored)
         };
         Ok(WorldOpened {
             name,
             session,
-            workspace: Workspace {
-                tabs: Vec::new(),
-                active: None,
-                expanded: Vec::new(),
-                tree_width: DEFAULT_TREE_WIDTH,
-            },
+            workspace: stored.map_or_else(Workspace::default, |stored| existing_in(&root, stored)),
         })
     }
 
+    /// Opens a world from the recent list: `not_found` for an id that is not in it, and
+    /// `world_missing` when its folder is gone.
+    fn open_recent(&self, id: &str) -> Result<WorldOpened, AppError> {
+        let root = self.lock().recent.path_of(id).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::NotFound,
+                "This world is no longer in the recent list.",
+            )
+        })?;
+        paths::check_root(&root)?;
+        self.open(root)
+    }
+
+    /// Opens the world that was open when the application last closed, if its folder is there.
+    fn restore(&self) -> Option<WorldOpened> {
+        let root = self.lock().recent.last_open()?;
+        // A folder that is gone or cannot be read leaves the welcome screen, which marks it.
+        self.open(root).ok()
+    }
+
+    /// The recent worlds, without the open one.
+    fn recent_list(&self) -> Vec<RecentWorld> {
+        let inner = self.lock();
+        let open = inner
+            .world
+            .as_ref()
+            .and_then(|world| world.recent_id.as_deref());
+        inner.recent.list(open)
+    }
+
+    fn remove_recent(&self, id: &str) {
+        self.lock().recent.remove(id);
+    }
+
+    /// Stores the open world's workspace, within the limits on input from the interface.
+    fn save_workspace(&self, workspace: Workspace) -> Result<(), AppError> {
+        let workspace = limited(workspace)?;
+        let mut inner = self.lock();
+        let world = inner.world.as_ref().ok_or_else(no_world)?;
+        if let Some(id) = world.recent_id.clone() {
+            inner.recent.set_workspace(&id, workspace);
+        }
+        Ok(())
+    }
+
+    /// Closes the world. The next launch then starts on the welcome screen.
     fn close(&self) {
-        self.lock().world = None;
+        let mut inner = self.lock();
+        inner.world = None;
+        inner.recent.closed();
     }
 
     /// The folder that holds the open world, where the folder dialog starts.
@@ -118,18 +174,18 @@ impl WorldState {
     }
 
     /// Where New world creates its folder: the folder picked with Browse…, otherwise the parent of
-    /// the world opened most recently in this session, otherwise `fallback`, the user's Documents
-    /// or home folder.
+    /// the most recently opened recent world, otherwise `fallback`, the user's Documents or home
+    /// folder.
     fn new_location(
         &self,
         fallback: impl FnOnce() -> Option<PathBuf>,
     ) -> Result<PathBuf, AppError> {
         let picked_or_recent = {
             let inner = self.lock();
-            inner.new_location.clone().or_else(|| {
-                let last = inner.last_opened.as_ref()?;
-                last.parent().map(PathBuf::from)
-            })
+            inner
+                .new_location
+                .clone()
+                .or_else(|| inner.recent.latest_parent())
         };
         picked_or_recent.or_else(fallback).ok_or_else(|| {
             AppError::new(
@@ -296,6 +352,105 @@ pub async fn world_create(
         set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
         Ok(opened)
     })
+}
+
+/// The recent worlds, most recently opened first, without the open world.
+#[tauri::command]
+pub async fn recent_list(state: State<'_, WorldState>) -> Result<Vec<RecentWorld>, AppError> {
+    guard(|| Ok(state.recent_list()))
+}
+
+/// Removes a world from the recent list. Nothing in its folder changes.
+#[tauri::command]
+pub async fn recent_remove(state: State<'_, WorldState>, id: String) -> Result<(), AppError> {
+    guard(|| {
+        state.remove_recent(&id);
+        Ok(())
+    })
+}
+
+/// Opens a world from the recent list, by its id, so the interface never names a folder.
+#[tauri::command]
+pub async fn world_open_recent(
+    app: AppHandle,
+    state: State<'_, WorldState>,
+    id: String,
+) -> Result<WorldOpened, AppError> {
+    guard(|| {
+        let opened = state.open_recent(&id)?;
+        set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
+        Ok(opened)
+    })
+}
+
+/// Opens the world that was open when the application last closed, or returns `null` when there
+/// is none or its folder is gone.
+#[tauri::command]
+pub async fn world_restore(
+    app: AppHandle,
+    state: State<'_, WorldState>,
+) -> Result<Option<WorldOpened>, AppError> {
+    guard(|| {
+        let opened = state.restore();
+        if let Some(opened) = &opened {
+            set_title(&app, &format!("{} — {APP_TITLE}", opened.name));
+        }
+        Ok(opened)
+    })
+}
+
+/// Stores the open world's tabs, expanded folders and tree width for its next opening.
+#[tauri::command]
+pub async fn workspace_save(
+    state: State<'_, WorldState>,
+    workspace: Workspace,
+) -> Result<(), AppError> {
+    guard(|| state.save_workspace(workspace))
+}
+
+/// The stored workspace with only the tabs that are still pages and the expanded paths that are
+/// still folders in the world at `root`. A gone active tab gives way to the first tab left.
+fn existing_in(root: &Path, stored: Workspace) -> Workspace {
+    let tabs: Vec<String> = stored
+        .tabs
+        .into_iter()
+        .filter(|tab| paths::existing_page(root, tab).is_ok())
+        .collect();
+    let active = stored
+        .active
+        .filter(|active| tabs.contains(active))
+        .or_else(|| tabs.first().cloned());
+    let expanded = stored
+        .expanded
+        .into_iter()
+        .filter(|folder| paths::existing_folder(root, Some(folder)).is_ok())
+        .collect();
+    Workspace {
+        tabs,
+        active,
+        expanded,
+        tree_width: stored.tree_width.clamp(TREE_WIDTHS.0, TREE_WIDTHS.1),
+    }
+}
+
+/// A workspace from the interface, refused when any path is not a relative path that confinement
+/// accepts lexically, and otherwise clamped and truncated to the limits.
+fn limited(mut workspace: Workspace) -> Result<Workspace, AppError> {
+    let mut all_paths = workspace
+        .tabs
+        .iter()
+        .chain(&workspace.expanded)
+        .chain(&workspace.active);
+    if !all_paths.all(|path| path.split('/').all(paths::is_allowed_name)) {
+        return Err(AppError::new(
+            ErrorKind::InvalidPath,
+            "The workspace names a path that is not a valid page or folder path in this world.",
+        ));
+    }
+    workspace.tabs.truncate(MAX_TABS);
+    workspace.expanded.truncate(MAX_EXPANDED);
+    workspace.tree_width = workspace.tree_width.clamp(TREE_WIDTHS.0, TREE_WIDTHS.1);
+    Ok(workspace)
 }
 
 /// The user's Documents folder, or their home folder when there is none.
@@ -527,5 +682,178 @@ mod tests {
         assert_eq!(page.text, "# Saltmere\n");
         assert_eq!(snapshot(world.path()), before);
         assert_eq!(fs::read_dir(world.path()).unwrap().count(), 2);
+    }
+
+    /// A world state that keeps its recent worlds in `app_data`, as at launch.
+    fn launched(app_data: &TempDir) -> WorldState {
+        let state = WorldState::default();
+        state.set_recent(Recent::load(app_data.path()));
+        state
+    }
+
+    fn workspace(tabs: &[&str], active: Option<&str>, expanded: &[&str]) -> Workspace {
+        Workspace {
+            tabs: tabs.iter().map(|tab| tab.to_string()).collect(),
+            active: active.map(str::to_owned),
+            expanded: expanded.iter().map(|folder| folder.to_string()).collect(),
+            tree_width: 300,
+        }
+    }
+
+    #[test]
+    fn a_relaunch_restores_the_last_world_with_its_workspace_minus_what_is_gone() {
+        let app_data = tempfile::tempdir().unwrap();
+        let world = world();
+        fs::create_dir(world.path().join("Factions")).unwrap();
+        fs::write(world.path().join("Overview.md"), "# Overview\n").unwrap();
+        fs::write(world.path().join("Gone.md"), "# Gone\n").unwrap();
+        let state = launched(&app_data);
+        state.open(world.path().to_path_buf()).unwrap();
+        state
+            .save_workspace(workspace(
+                &["Overview.md", "Gone.md", "Places/Saltmere.md"],
+                Some("Places/Saltmere.md"),
+                &["Places", "Factions"],
+            ))
+            .unwrap();
+        // The application closes with the world open; then the page and a folder go.
+        fs::remove_file(world.path().join("Gone.md")).unwrap();
+        fs::remove_dir(world.path().join("Factions")).unwrap();
+
+        let relaunched = launched(&app_data);
+        let restored = relaunched.restore().unwrap();
+
+        assert_eq!(relaunched.root().unwrap(), world.path());
+        assert_eq!(
+            restored.workspace,
+            workspace(
+                &["Overview.md", "Places/Saltmere.md"],
+                Some("Places/Saltmere.md"),
+                &["Places"],
+            )
+        );
+    }
+
+    #[test]
+    fn a_gone_active_tab_gives_way_to_the_first_tab_left() {
+        let world = world();
+        fs::write(world.path().join("Overview.md"), "# Overview\n").unwrap();
+        let stored = workspace(&["Places/Saltmere.md", "Overview.md"], Some("Gone.md"), &[]);
+
+        let kept = existing_in(world.path(), stored);
+
+        assert_eq!(kept.active.as_deref(), Some("Places/Saltmere.md"));
+    }
+
+    #[test]
+    fn nothing_is_restored_after_close_world_or_when_the_folder_is_gone() {
+        let app_data = tempfile::tempdir().unwrap();
+        let world = world();
+        let state = launched(&app_data);
+        state.open(world.path().to_path_buf()).unwrap();
+        state.close();
+        assert!(launched(&app_data).restore().is_none());
+
+        state.open(world.path().to_path_buf()).unwrap();
+        let gone = world.path().to_path_buf();
+        drop(world);
+
+        let relaunched = launched(&app_data);
+        assert!(relaunched.restore().is_none());
+        assert!(!relaunched.is_open());
+        assert_eq!(
+            serde_json::to_value(relaunched.recent_list()).unwrap()[0]["missing"],
+            true
+        );
+        assert!(!gone.exists());
+    }
+
+    #[test]
+    fn a_recent_world_opens_by_id_unless_it_is_unknown_or_its_folder_is_gone() {
+        let state = WorldState::default();
+        let first = world();
+        let second = world();
+        state.open(first.path().to_path_buf()).unwrap();
+        state.open(second.path().to_path_buf()).unwrap();
+        let listed = serde_json::to_value(state.recent_list()).unwrap();
+        // The open world is left out of the list.
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        let first_id = listed[0]["id"].as_str().unwrap().to_owned();
+
+        let opened = state.open_recent(&first_id).unwrap();
+        assert_eq!(opened.session, 3);
+        assert_eq!(state.root().unwrap(), first.path());
+
+        assert_eq!(
+            state.open_recent("unknown").unwrap_err().kind,
+            ErrorKind::NotFound
+        );
+        let second_id = serde_json::to_value(state.recent_list()).unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        drop(second);
+        assert_eq!(
+            state.open_recent(&second_id).unwrap_err().kind,
+            ErrorKind::WorldMissing
+        );
+        assert_eq!(state.root().unwrap(), first.path());
+    }
+
+    #[test]
+    fn a_workspace_with_a_path_outside_the_world_is_refused() {
+        let state = WorldState::default();
+        let world = world();
+        assert_eq!(
+            state.save_workspace(Workspace::default()).unwrap_err().kind,
+            ErrorKind::NoWorld
+        );
+        let opened = state.open(world.path().to_path_buf()).unwrap();
+        state
+            .save_workspace(workspace(&["Places/Saltmere.md"], None, &[]))
+            .unwrap();
+
+        for refused in [
+            workspace(&["../outside.md"], None, &[]),
+            workspace(&["/etc/passwd.md"], None, &[]),
+            workspace(&[], Some("Places/../../outside.md"), &[]),
+            workspace(&[], None, &[".obsidian"]),
+            workspace(&[], None, &[""]),
+        ] {
+            assert_eq!(
+                state.save_workspace(refused).unwrap_err().kind,
+                ErrorKind::InvalidPath
+            );
+        }
+        // The stored workspace is the last accepted one.
+        let reopened = state.open(world.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.workspace.tabs, ["Places/Saltmere.md"]);
+        assert_eq!(reopened.session, opened.session + 1);
+    }
+
+    #[test]
+    fn a_workspace_is_clamped_and_truncated_to_the_limits() {
+        let pages: Vec<String> = (0..150).map(|number| format!("Page {number}.md")).collect();
+        let folders: Vec<String> = (0..6_000)
+            .map(|number| format!("Folder {number}"))
+            .collect();
+        let wide = Workspace {
+            tabs: pages.clone(),
+            active: None,
+            expanded: folders.clone(),
+            tree_width: 9_000,
+        };
+
+        let kept = limited(wide).unwrap();
+        let narrow = limited(Workspace {
+            tree_width: 10,
+            ..Workspace::default()
+        })
+        .unwrap();
+
+        assert_eq!(kept.tabs, pages[..100]);
+        assert_eq!(kept.expanded, folders[..5_000]);
+        assert_eq!(kept.tree_width, 420);
+        assert_eq!(narrow.tree_width, 200);
     }
 }

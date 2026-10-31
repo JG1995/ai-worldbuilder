@@ -39,9 +39,10 @@ describe("permissions", () => {
     expect(capability.permissions).toEqual(["core:default"]);
   });
 
-  it("configures no Tauri plugins", () => {
+  it("uses only the single-instance plugin, which gives the webview no API, and configures none", () => {
     expect(tauriConf.plugins ?? {}).toEqual({});
-    expect(cargoToml).not.toMatch(/^tauri-plugin-/m);
+    expect(cargoToml.match(/^tauri-plugin-[\w-]+/gm)).toEqual(["tauri-plugin-single-instance"]);
+    expect(cargoToml).not.toMatch(/tauri-plugin-(fs|dialog|shell)\b/);
   });
 });
 

@@ -1,6 +1,7 @@
+import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { describe, expect, it, vi } from "vitest";
-import { invokeCommand } from "./ipc";
+import { invokeCommand, listenEvent } from "./ipc";
 
 vi.mock("./preview-fixtures", () => ({
   previewFixtures: {
@@ -15,7 +16,7 @@ vi.mock("./preview-fixtures", () => ({
 function mockTauri(handler: Parameters<typeof mockIPC>[0]) {
   // `isTauri()` reads `globalThis.isTauri`, which the real runtime sets and `mockIPC` does not.
   vi.stubGlobal("isTauri", true);
-  mockIPC(handler);
+  mockIPC(handler, { shouldMockEvents: true });
 }
 
 describe("invokeCommand inside Tauri", () => {
@@ -75,5 +76,19 @@ describe("invokeCommand in the browser preview", () => {
       kind: "ipc",
       message: expect.stringContaining("world_create"),
     });
+  });
+});
+
+describe("listenEvent", () => {
+  it("passes each event's payload to the handler until it stops listening", async () => {
+    mockTauri(() => null);
+    const handler = vi.fn();
+
+    const unlisten = await listenEvent("world:changed", handler);
+    await emit("world:changed", { session: 1 });
+    unlisten();
+    await emit("world:changed", { session: 2 });
+
+    expect(handler.mock.calls).toEqual([[{ session: 1 }]]);
   });
 });

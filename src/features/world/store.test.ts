@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPageState } from "../editor/MarkdownEditor";
 import { PageSaver } from "./saving";
-import { type PageStatus, useWorldStore } from "./store";
+import { type PageStatus, useWorldStore, workspaceSaveDelay } from "./store";
+import { mockWorldIpc } from "./test-ipc";
 
 const store = () => useWorldStore.getState();
 
@@ -232,5 +233,55 @@ describe("savers", () => {
     store().closed();
 
     expect(second.dispose).toHaveBeenCalled();
+  });
+});
+
+describe("the workspace", () => {
+  const saves = (calls: { command: string; args?: unknown }[]) =>
+    calls.filter(({ command }) => command === "workspace_save").map(({ args }) => args);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    return () => vi.useRealTimers();
+  });
+
+  it("saves once, half a second after tabs, expanded folders and the tree width stop changing", async () => {
+    const calls = mockWorldIpc();
+    openWorld(["A.md"], "A.md");
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+    // Opening a world is not a change to save.
+    expect(saves(calls)).toEqual([]);
+
+    store().openPage("Places/B.md", { newTab: true });
+    store().toggleFolder("Places", false);
+    store().setTreeWidth(300);
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay - 1);
+    expect(saves(calls)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(saves(calls)).toEqual([
+      {
+        workspace: {
+          tabs: ["A.md", "Places/B.md"],
+          active: "Places/B.md",
+          expanded: [],
+          treeWidth: 300,
+        },
+      },
+    ]);
+  });
+
+  it("saves nothing for a world that closed or changed before the delay ended", async () => {
+    const calls = mockWorldIpc();
+    openWorld();
+    store().setTreeWidth(300);
+    store().closed();
+    openWorld([], null, 2);
+    store().setTreeWidth(320);
+    openWorld([], null, 3);
+
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+
+    expect(saves(calls)).toEqual([]);
   });
 });

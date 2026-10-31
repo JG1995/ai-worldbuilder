@@ -17,7 +17,8 @@ function renderWorld() {
   );
 }
 
-const openWorldButton = () => screen.getByRole("button", { name: "Open world…" });
+// The welcome screen shows once the core has found no world to reopen.
+const openWorldButton = () => screen.findByRole("button", { name: "Open world…" });
 const tree = () => screen.findByRole("tree", { name: testWorld.name });
 
 async function chooseFromWorldMenu(item: string) {
@@ -44,7 +45,7 @@ describe("opening and closing a world", () => {
     mockWorldIpc();
     renderWorld();
 
-    fireEvent.click(openWorldButton());
+    fireEvent.click(await openWorldButton());
 
     const entries = await tree();
     expect(screen.getByRole("heading", { name: testWorld.name })).toBeInTheDocument();
@@ -57,11 +58,16 @@ describe("opening and closing a world", () => {
     const calls = mockWorldIpc({ world_open: () => null });
     renderWorld();
 
-    await act(async () => fireEvent.click(openWorldButton()));
+    const button = await openWorldButton();
+    await act(async () => fireEvent.click(button));
 
-    expect(openWorldButton()).toBeInTheDocument();
+    expect(await openWorldButton()).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(calls.map(({ command }) => command)).toEqual(["world_open"]);
+    expect(calls.map(({ command }) => command)).toEqual([
+      "world_restore",
+      "recent_list",
+      "world_open",
+    ]);
   });
 
   it("explains a folder that cannot be opened and keeps the open world", async () => {
@@ -73,7 +79,7 @@ describe("opening and closing a world", () => {
       },
     });
     renderWorld();
-    fireEvent.click(openWorldButton());
+    fireEvent.click(await openWorldButton());
     await tree();
     fail = true;
 
@@ -89,7 +95,7 @@ describe("opening and closing a world", () => {
   it("returns to the welcome screen on Close world", async () => {
     const calls = mockWorldIpc();
     renderWorld();
-    fireEvent.click(openWorldButton());
+    fireEvent.click(await openWorldButton());
     await tree();
 
     await chooseFromWorldMenu("Close world");
@@ -103,7 +109,7 @@ describe("opening and closing a world", () => {
 describe("pages that cannot be shown", () => {
   async function openPage(name: string) {
     renderWorld();
-    fireEvent.click(openWorldButton());
+    fireEvent.click(await openWorldButton());
     fireEvent.click(within(await tree()).getByRole("treeitem", { name }));
   }
 
@@ -154,7 +160,7 @@ describe("pages that cannot be shown", () => {
 /** Opens the test world and its Overview page, and returns the page's editor. */
 async function openOverview() {
   renderWorld();
-  fireEvent.click(openWorldButton());
+  fireEvent.click(await openWorldButton());
   fireEvent.click(within(await tree()).getByRole("treeitem", { name: "Overview" }));
   return screen.findByRole("textbox", { name: "Overview" });
 }
@@ -333,14 +339,20 @@ describe("changing worlds", () => {
     expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument();
   });
 
-  it("saves pages before Close world", async () => {
+  it("saves pages and the workspace before Close world, then lists the recent worlds again", async () => {
     const calls = mockWorldIpc();
     typeAtEnd(await openOverview(), "More");
 
     await chooseFromWorldMenu("Close world");
 
     expect(await screen.findByRole("button", { name: "Open world…" })).toBeInTheDocument();
-    expect(commandsOf(calls).slice(-2)).toEqual(["page_write", "world_close"]);
+    const commands = commandsOf(calls);
+    expect(commands.slice(commands.indexOf("page_write"))).toEqual([
+      "page_write",
+      "workspace_save",
+      "world_close",
+      "recent_list",
+    ]);
   });
 
   /** A test world whose second Open world… waits for `pick` to answer the folder dialog. */

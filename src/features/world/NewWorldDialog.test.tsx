@@ -90,7 +90,7 @@ function typeAtEnd(textbox: HTMLElement, text: string) {
 /** Opens the test world, types in its Overview page, and starts New world… from the world menu. */
 async function editThenStartNewWorld() {
   renderWorld();
-  fireEvent.click(screen.getByRole("button", { name: "Open world…" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));
   fireEvent.click(await screen.findByRole("treeitem", { name: "Overview" }));
   typeAtEnd(await screen.findByRole("textbox", { name: "Overview" }), "More");
   fireEvent.click(screen.getByRole("button", { name: "World menu" }));
@@ -104,7 +104,7 @@ describe("New world", () => {
     const calls = mockWorldIpc({ world_tree: () => [] });
     renderWorld();
 
-    fireEvent.click(screen.getByRole("button", { name: "New world…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New world…" }));
     await screen.findByRole("dialog", { name: "New world" });
     typeName("Saltmere");
     create();

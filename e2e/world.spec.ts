@@ -230,3 +230,30 @@ test("New world… from the welcome screen opens a new empty world", async ({ pa
   await expect(page.getByRole("heading", { name: "Saltmere" })).toBeVisible();
   await expect(page.getByText("This world has no pages yet.")).toBeVisible();
 });
+
+test("recent worlds open from the welcome screen, and the world menu lists the others", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  const recent = page.getByRole("region", { name: "Recent worlds" });
+
+  await recent.getByRole("button", { name: /The Sunken Archive/ }).click();
+  const missing = page.getByRole("dialog", { name: "The world cannot be opened" });
+  await expect(missing).toContainText("The world's folder cannot be found.");
+  await missing.getByRole("button", { name: "OK" }).click();
+
+  await recent.getByRole("button", { name: /Ashfall Reaches/ }).click();
+  await expect(page.getByRole("heading", { name: "Ashfall Reaches" })).toBeVisible();
+
+  await page.getByRole("button", { name: "World menu" }).click();
+  await expect(page.getByRole("menuitem")).toHaveText([
+    worldName,
+    "The Sunken Archive",
+    "Open world…",
+    "New world…",
+    "Close world",
+  ]);
+  await page.getByRole("menuitem", { name: worldName }).click();
+  await expect(page.getByRole("tree", { name: worldName })).toBeVisible();
+});

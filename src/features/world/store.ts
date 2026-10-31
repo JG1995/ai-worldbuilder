@@ -2,7 +2,7 @@ import type { EditorState } from "@codemirror/state";
 import { create } from "zustand";
 import type { TreeNameInput } from "../../ui/FileTree";
 import { defaultTreeWidth } from "../../ui/Shell";
-import type { WorldOpened } from "./commands";
+import { type Workspace, type WorldOpened, workspaceSave } from "./commands";
 import type { PageSaver, SaveNotice, SaveResult } from "./saving";
 
 /**
@@ -92,6 +92,9 @@ const closedWorld = {
   treeOverlayOpen: false,
   pages: {},
 };
+
+/** How long after the tabs, the expanded folders or the tree width change the workspace saves. */
+export const workspaceSaveDelay = 500;
 
 /** The page name shown for a path: its last segment without the `.md` extension. */
 export function pageNameOf(path: string) {
@@ -267,3 +270,51 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     };
   },
 }));
+
+let workspaceTimer: ReturnType<typeof setTimeout> | undefined;
+/** The latest workspace save; each one starts after the one before has settled. */
+let workspaceSaving: Promise<void> = Promise.resolve();
+
+function cancelWorkspaceSave() {
+  clearTimeout(workspaceTimer);
+  workspaceTimer = undefined;
+}
+
+/**
+ * Saves the open world's workspace now, instead of after the delay, and resolves once it and every
+ * save before it have settled, so none can reach the core after the world changes. A workspace
+ * that cannot be saved only means the world's next opening shows an older one, so a failure
+ * changes nothing.
+ */
+export function saveWorkspace(): Promise<void> {
+  cancelWorkspaceSave();
+  const { world, tabs, active, expanded, treeWidth } = useWorldStore.getState();
+  if (world) {
+    const workspace: Workspace = { tabs, active, expanded: [...expanded], treeWidth };
+    workspaceSaving = workspaceSaving.then(() =>
+      workspaceSave(workspace).then(
+        () => {},
+        () => {},
+      ),
+    );
+  }
+  return workspaceSaving;
+}
+
+// The workspace saves a moment after the user changes it. Opening or closing a world is no such
+// change, and nothing is scheduled while the world changes: that change saves the workspace first,
+// and a save scheduled during it could reach the core after it has opened the next world.
+useWorldStore.subscribe((state, previous) => {
+  if (state.world === null || state.world !== previous.world) {
+    cancelWorkspaceSave();
+    return;
+  }
+  const changed =
+    state.tabs !== previous.tabs ||
+    state.active !== previous.active ||
+    state.expanded !== previous.expanded ||
+    state.treeWidth !== previous.treeWidth;
+  if (!changed || state.changingWorld) return;
+  cancelWorkspaceSave();
+  workspaceTimer = setTimeout(() => void saveWorkspace(), workspaceSaveDelay);
+});

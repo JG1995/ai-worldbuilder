@@ -7,6 +7,7 @@ import { Notice } from "../../ui/Notice";
 import { NoPageOpen } from "../../ui/PageView";
 import { Shell } from "../../ui/Shell";
 import { TabStrip } from "../../ui/TabStrip";
+import type { RecentWorld } from "../../ui/WelcomeScreen";
 import { folderCreate, pageCreate, worldTree, worldTreeKey } from "./commands";
 import { useSaveConfirmation } from "./FailedSaveDialog";
 import { PageTab } from "./PageTab";
@@ -15,7 +16,10 @@ import { pageNameOf, useWorldStore } from "./store";
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
 
-const worldMenuItems: MenuItem[] = [
+/** World menu items for recent worlds carry the world's id after this prefix. */
+const recentItemPrefix = "recent:";
+
+const worldActionItems: MenuItem[] = [
   { id: "open-world", label: "Open world…" },
   { id: "new-world", label: "New world…" },
   { id: "close-world", label: "Close world" },
@@ -30,6 +34,9 @@ type WorldScreenProps = {
   /** The open world's session, which keys its tree and its pages' results. */
   session: number;
   worldName: string;
+  /** The recent worlds without the open one, which the world menu lists first. */
+  recentWorlds: RecentWorld[];
+  onOpenRecent: (id: string) => void;
   onOpenWorld: () => void;
   onNewWorld: () => void;
   onCloseWorld: () => void;
@@ -42,6 +49,8 @@ type WorldScreenProps = {
 export function WorldScreen({
   session,
   worldName,
+  recentWorlds,
+  onOpenRecent,
   onOpenWorld,
   onNewWorld,
   onCloseWorld,
@@ -193,8 +202,14 @@ export function WorldScreen({
     else if (id === "open-new-tab" && target) void openFromTree(target.path, { newTab: true });
   }
 
+  const worldMenuItems: MenuItem[] = [
+    ...recentWorlds.map((world) => ({ id: `${recentItemPrefix}${world.id}`, label: world.name })),
+    ...worldActionItems,
+  ];
+
   function onWorldMenuSelect(id: string) {
-    if (id === "open-world") onOpenWorld();
+    if (id.startsWith(recentItemPrefix)) onOpenRecent(id.slice(recentItemPrefix.length));
+    else if (id === "open-world") onOpenWorld();
     else if (id === "new-world") onNewWorld();
     else onCloseWorld();
   }

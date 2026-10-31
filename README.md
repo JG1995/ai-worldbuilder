@@ -33,13 +33,23 @@ Build Windows installers from a separate clone of the repository on the Windows 
 ## Commands
 
 - `pnpm install` installs dependencies.
-- `pnpm dev` runs the interface alone in a browser preview, answering Rust commands with development-only sample data. It starts on the welcome screen, where Open world… opens a sample world at once, without a folder dialog.
+- `pnpm dev` runs the interface alone in a browser preview, answering Rust commands with development-only sample data. It starts on the welcome screen, where Open world… opens a sample world at once, without a folder dialog. The welcome screen lists sample recent worlds, one of them with a missing folder.
 - `pnpm tauri dev` runs the desktop application in development mode.
 - `pnpm check` runs every check: Biome, `tsc`, secretlint, the production build and its check for sample data, the showcase and inlined assets, Vitest, the Playwright tests, `cargo fmt --check`, `cargo clippy` and `cargo test`. It stops at the first failing check.
 - `pnpm icons` rebuilds the bundled icon font and `src/ui/icon-glyphs.ts` from the names in `src/ui/icon-names.json`. It needs [pipx](https://pipx.pypa.io/) and network access, because it fetches fonttools from PyPI.
 - `pnpm tauri build` builds unsigned installers for the current OS into `src-tauri/target/release/bundle/`.
 
 In development, `/showcase.html` on the dev server shows the design foundation: the colour, type, spacing and shape tokens, the icons and the logo, and every shared control and surface in its states, with a switch between the OS, dark and light colour modes. `/showcase.html#sample-world` shows the composed sample screen. In development builds, a Showcase link in the top right corner of the welcome screen opens it. Production builds never include it.
+
+## Application data
+
+The application keeps its own data in one file, `grimoire-data/worlds.json`, in the app data folder for `io.github.jg1995.grimoire`:
+
+- Linux: `~/.local/share/io.github.jg1995.grimoire/grimoire-data/worlds.json`
+- Windows: `%APPDATA%\io.github.jg1995.grimoire\grimoire-data\worlds.json`
+- macOS: `~/Library/Application Support/io.github.jg1995.grimoire/grimoire-data/worlds.json`
+
+The file holds the recent worlds, the world that was open when the application last closed, and each recent world's open tabs, expanded folders and file tree width. It never holds page text. If the file is deleted or cannot be read, the application starts with an empty recent list and replaces the file the next time it saves. On Linux, the webview keeps its own caches at the root of the same app data folder. The application writes nothing into a world folder except the pages and folders you create or edit.
 
 ## Continuous integration and releases
 

@@ -1,5 +1,6 @@
 import { invokeCommand } from "../../lib/ipc";
 import type { TreeEntry } from "../../ui/FileTree";
+import type { RecentWorld } from "../../ui/WelcomeScreen";
 
 /** The tabs, expanded folders and tree width a world opens with. Paths are relative to the world. */
 export type Workspace = {
@@ -62,3 +63,29 @@ export const worldNewBrowse = () => invokeCommand<{ location: string } | null>("
 
 /** Creates an empty folder `name` at the new world's location and opens it as the world. */
 export const worldCreate = (name: string) => invokeCommand<WorldOpened>("world_create", { name });
+
+/** The recent worlds, most recently opened first, without the open world. */
+export const recentList = () => invokeCommand<RecentWorld[]>("recent_list");
+
+/** The TanStack Query key of `recent_list` results. */
+export const recentListKey = ["recent_list"] as const;
+
+/** Removes a world from the recent list; nothing in its folder changes. */
+export const recentRemove = (id: string) => invokeCommand<null>("recent_remove", { id });
+
+/** Opens a recent world. Rejects with `world_missing` when its folder is gone. */
+export const worldOpenRecent = (id: string) =>
+  invokeCommand<WorldOpened>("world_open_recent", { id });
+
+/** Opens the world that was open when the application last closed; null when there is none. */
+export const worldRestore = () => invokeCommand<WorldOpened | null>("world_restore");
+
+/** Stores the open world's workspace for its next opening. */
+export const workspaceSave = (workspace: Workspace) =>
+  invokeCommand<null>("workspace_save", { workspace });
+
+/** Closes the window, once the open world has saved. */
+export const appClose = () => invokeCommand<null>("app_close");
+
+/** The core asks the interface to save and then call `appClose`: the user closed the window. */
+export const closeRequestedEvent = "app:close-requested";

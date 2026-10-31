@@ -1,4 +1,5 @@
 import { type InvokeArgs, invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 /** A failed command, in the `{ kind, message }` shape the Rust core returns. */
 export class IpcError extends Error {
@@ -36,6 +37,19 @@ export async function invokeCommand<T>(name: string, args?: InvokeArgs): Promise
   }
 
   throw new IpcError("ipc", `Command "${name}" is only available in the Grimoire.md app.`);
+}
+
+/**
+ * Calls `handler` with the payload of each event `name` the Rust core sends, and resolves to the
+ * function that stops listening. Outside Tauri no event ever arrives, so it listens to nothing.
+ */
+export async function listenEvent<T>(
+  name: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const unlisten = await listen<T>(name, (event) => handler(event.payload));
+  return () => void unlisten();
 }
 
 function toIpcError(rejection: unknown): IpcError {
