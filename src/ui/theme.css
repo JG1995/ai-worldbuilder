@@ -278,6 +278,38 @@
   }
 }
 
+/*
+ * The Markdown editor (src/features/editor/MarkdownEditor.tsx). Outside any layer, and with three
+ * classes, so these rules win over CodeMirror's own base theme, whose rules use two.
+ */
+.page-editor.cm-editor .cm-scroller {
+  font: inherit;
+  line-height: inherit;
+}
+
+.page-editor.cm-editor .cm-content {
+  padding: 0;
+  caret-color: var(--color-text);
+}
+
+.page-editor.cm-editor .cm-line {
+  padding: 0;
+}
+
+/* The caret shows where focus is; the editor draws no outline around itself. */
+.page-editor.cm-editor.cm-focused {
+  outline: none;
+}
+
+.page-editor.cm-editor ::selection {
+  background-color: var(--color-selection);
+}
+
+/* Code, and the lines of a leading frontmatter block. */
+.page-editor.cm-editor .cm-mono {
+  @apply mono;
+}
+
 /* Outside any layer, so it wins over the transition and animation utilities. */
 @media (prefers-reduced-motion: reduce) {
   *,
