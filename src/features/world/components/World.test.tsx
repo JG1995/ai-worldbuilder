@@ -196,7 +196,12 @@ describe("saving", () => {
     await waitFor(
       () =>
         expect(writesOf(calls)).toEqual([
-          { path: "Overview.md", text: "# Overview\nMore", version: "version of Overview.md" },
+          {
+            path: "Overview.md",
+            text: "# Overview\nMore",
+            version: "version of Overview.md",
+            keepMine: false,
+          },
         ]),
       atOnce,
     );
@@ -457,7 +462,7 @@ describe("changing worlds", () => {
     await waitFor(
       () =>
         expect(writesOf(calls)).toEqual([
-          { path: "Overview.md", text: "# World 1\nMore", version: "world 1" },
+          { path: "Overview.md", text: "# World 1\nMore", version: "world 1", keepMine: false },
         ]),
       atOnce,
     );

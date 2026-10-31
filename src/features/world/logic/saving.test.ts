@@ -25,17 +25,20 @@ function saverOf(
   } = {},
 ) {
   const writes: Write[] = [];
+  /** Each write's `keepMine` flag, in the order of `writes`. */
+  const keepMines: boolean[] = [];
   const notices: (SaveNotice | null)[] = [];
   let count = 0;
   const saver = new PageSaver("Page.md", page, {
     read: options.read ?? (() => Promise.reject(new IpcError("io", "unexpected read"))),
-    write: (_path, text, version) => {
+    write: (_path, text, version, keepMine) => {
       writes.push({ text, version });
+      keepMines.push(keepMine);
       return options.write?.({ text, version }) ?? Promise.resolve({ version: `v${++count}` });
     },
     notify: (notice) => notices.push(notice),
   });
-  return { saver, writes, notices, lastNotice: () => notices.at(-1) ?? null };
+  return { saver, writes, keepMines, notices, lastNotice: () => notices.at(-1) ?? null };
 }
 
 const page: PageText = { text: "# Kesh\n", version: "v0" };
@@ -395,7 +398,7 @@ describe("conflicts", () => {
 
   it("resolve with Keep mine, which writes the editor's text over the current version", async () => {
     let calls = 0;
-    const { saver, writes, lastNotice } = saverOf(page, {
+    const { saver, writes, keepMines, lastNotice } = saverOf(page, {
       write: () => (++calls === 1 ? changedOnDisk() : Promise.resolve({ version: "v2" })),
       read: () => Promise.resolve({ text: "# Kesh\ntheirs\n", version: "theirs" }),
     });
@@ -410,6 +413,8 @@ describe("conflicts", () => {
     saver.changed("# Kesh\nmine again");
     await vi.advanceTimersByTimeAsync(autosaveDelay);
     expect(writes.at(-1)).toEqual({ text: "# Kesh\nmine again", version: "v2" });
+    // Only Keep mine's write says so, not the flush before it or the autosave after it.
+    expect(keepMines).toEqual([false, true, false]);
   });
 
   it("resolve with Load theirs, which gives the current text to the editor and writes nothing", async () => {

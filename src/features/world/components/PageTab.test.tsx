@@ -99,11 +99,10 @@ describe("the conflict notice", () => {
     // The pressed button goes away with the notice, so focus moves to the editor.
     expect(textbox).toHaveFocus();
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
-    expect(writesOf(calls).at(-1)).toEqual({
-      path,
-      text: "# Overview\nMine",
-      version: "theirs",
-    });
+    expect(writesOf(calls)).toEqual([
+      { path, text: "# Overview\nMine", version: "mine", keepMine: false },
+      { path, text: "# Overview\nMine", version: "theirs", keepMine: true },
+    ]);
   });
 
   it("offers Load theirs, which replaces the text in one undoable step and writes nothing", async () => {
@@ -134,7 +133,12 @@ describe("the conflict notice", () => {
 
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(screen.queryByRole("region", { name: "Compare" })).not.toBeInTheDocument();
-    expect(writesOf(calls).at(-1)).toEqual({ path, text: "# Overview\nMine", version: "theirs" });
+    expect(writesOf(calls).at(-1)).toEqual({
+      path,
+      text: "# Overview\nMine",
+      version: "theirs",
+      keepMine: true,
+    });
   });
 
   it("moves focus to Compare's first action as it opens, and Back to editing returns it to the editor", async () => {

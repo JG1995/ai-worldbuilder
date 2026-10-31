@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use super::{names, page, paths};
 use crate::error::{AppError, ErrorKind};
+use crate::history::{Entry, Failure, History, Kind, Record, State};
 
 /// How often a rename that Windows refuses because another program holds the page is tried again,
 /// and how long to wait before each try.
@@ -66,6 +67,108 @@ impl OwnWrites {
     }
 }
 
+/// What became of a write's record in history.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recording {
+    /// Nothing was recorded: the opening has no history, or nothing was written.
+    Nothing,
+    Recorded,
+    /// The record failed, for the reason given; the write went ahead regardless.
+    Failed(String),
+}
+
+/// The history a write records itself in, with the time of the write in seconds since the Unix
+/// epoch. A failure to record never fails the write: it is kept for the caller, which shows that
+/// changes are not being recorded.
+pub struct Recorder<'a> {
+    history: Option<&'a mut History>,
+    now: u64,
+    outcome: Recording,
+}
+
+impl<'a> Recorder<'a> {
+    pub fn new(history: Option<&'a mut History>, now: u64) -> Self {
+        Self {
+            history,
+            now,
+            outcome: Recording::Nothing,
+        }
+    }
+
+    pub fn outcome(self) -> Recording {
+        self.outcome
+    }
+
+    /// Commits a pending record of a save of `path` from `before` to `after`, as Keep mine's when
+    /// `keep_mine` is set.
+    fn begin_save(
+        &mut self,
+        path: &str,
+        before: &[u8],
+        after: &[u8],
+        keep_mine: bool,
+    ) -> Option<Record> {
+        let now = self.now;
+        let history = self.history.as_deref_mut()?;
+        let result = if keep_mine {
+            let entry = Entry {
+                path: path.to_owned(),
+                before: State::Page(before.to_vec()),
+                after: State::Page(after.to_vec()),
+            };
+            history.begin(Kind::KeepMine, &[entry], now)
+        } else {
+            history.begin_save(path, before, after, now)
+        };
+        self.started(result)
+    }
+
+    fn begin(&mut self, kind: Kind, entries: &[Entry]) -> Option<Record> {
+        let now = self.now;
+        let result = self.history.as_deref_mut()?.begin(kind, entries, now);
+        self.started(result)
+    }
+
+    /// Records a write that is already done.
+    fn add(&mut self, kind: Kind, entry: Entry) {
+        let now = self.now;
+        let Some(history) = self.history.as_deref_mut() else {
+            return;
+        };
+        let result = history.add(kind, &[entry], now);
+        self.ended(result);
+    }
+
+    /// Completes `record` when its write happened, and abandons it when it did not.
+    fn finish(&mut self, record: Option<Record>, written: bool) {
+        let (Some(record), Some(history)) = (record, self.history.as_deref_mut()) else {
+            return;
+        };
+        if written {
+            let result = history.complete(record);
+            self.ended(result);
+        } else if let Err(failure) = history.abandon(record) {
+            self.failed(failure);
+        }
+    }
+
+    fn started(&mut self, result: Result<Record, Failure>) -> Option<Record> {
+        result.map_err(|failure| self.failed(failure)).ok()
+    }
+
+    fn ended(&mut self, result: Result<(), Failure>) {
+        match result {
+            Ok(()) if self.outcome == Recording::Nothing => self.outcome = Recording::Recorded,
+            Ok(()) => {}
+            Err(failure) => self.failed(failure),
+        }
+    }
+
+    fn failed(&mut self, failure: Failure) {
+        self.outcome = Recording::Failed(failure.into_reason());
+    }
+}
+
 /// The version of a page's bytes after a write.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -74,25 +177,43 @@ pub struct PageVersion {
 }
 
 /// Saves the editor's `text` to the page at `relative` inside `root`, if the page still has the
-/// bytes that `version` names. The caller holds the world lock, so writes do not overlap.
+/// bytes that `version` names, and records the save, as Keep mine's when `keep_mine` is set. The
+/// caller holds the world lock, so writes and their records do not overlap.
 pub fn write_page(
     root: &Path,
     own: &mut OwnWrites,
+    recorder: &mut Recorder,
     relative: &str,
     text: &str,
     version: &str,
+    keep_mine: bool,
 ) -> Result<PageVersion, AppError> {
-    write_page_with(root, own, relative, text, version, check_and_rename)
+    write_page_with(
+        root,
+        own,
+        recorder,
+        relative,
+        text,
+        version,
+        keep_mine,
+        check_and_rename,
+    )
 }
 
 /// `write_page`, with the step that puts the written temporary file in place given by the caller,
 /// so tests can change the page before the check or make the rename fail.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test seam adds one step to write_page's arguments"
+)]
 fn write_page_with(
     root: &Path,
     own: &mut OwnWrites,
+    recorder: &mut Recorder,
     relative: &str,
     text: &str,
     version: &str,
+    keep_mine: bool,
     put_in_place: impl FnOnce(&Path, &Path, &str) -> Result<(), AppError>,
 ) -> Result<PageVersion, AppError> {
     let page = paths::existing_page(root, relative)?;
@@ -112,18 +233,25 @@ fn write_page_with(
         });
     }
 
+    // The bytes the save replaces are in history before anything is written.
+    let record = recorder.begin_save(relative, &current, &bytes, keep_mine);
     let temporary = temporary_path(&page);
-    let file = OpenOptions::new()
+    let result = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temporary)?;
-    let result = write_temporary(file, &bytes, permissions)
+        .open(&temporary)
         .map_err(AppError::from)
-        .and_then(|()| put_in_place(&temporary, &page, version));
-    if result.is_err() {
-        // The failure being reported matters more than one that removing the file might add.
-        let _ = fs::remove_file(&temporary);
-    }
+        .and_then(|file| {
+            let result = write_temporary(file, &bytes, permissions)
+                .map_err(AppError::from)
+                .and_then(|()| put_in_place(&temporary, &page, version));
+            if result.is_err() {
+                // The failure being reported matters more than one that removing the file might add.
+                let _ = fs::remove_file(&temporary);
+            }
+            result
+        });
+    recorder.finish(record, result.is_ok());
     result?;
     own.page(relative, &bytes);
     Ok(PageVersion {
@@ -139,11 +267,12 @@ pub struct NewEntry {
 }
 
 /// Creates an empty page `{name}.md` in the existing folder `folder` of the world at `root`, or
-/// at its top level when `folder` is `None`. It never replaces an entry. The caller holds the
-/// world lock, so writes do not overlap.
+/// at its top level when `folder` is `None`, and records it once it exists, since it replaced
+/// nothing. It never replaces an entry. The caller holds the world lock, so writes do not overlap.
 pub fn create_page(
     root: &Path,
     own: &mut OwnWrites,
+    recorder: &mut Recorder,
     folder: Option<&str>,
     name: &str,
 ) -> Result<NewEntry, AppError> {
@@ -156,6 +285,14 @@ pub fn create_page(
         .map_err(creation_error)?;
     let entry = new_entry(folder, &file_name);
     own.page(&entry.path, b"");
+    recorder.add(
+        Kind::NewPage,
+        Entry {
+            path: entry.path.clone(),
+            before: State::Absent,
+            after: State::Page(Vec::new()),
+        },
+    );
     Ok(entry)
 }
 
@@ -163,6 +300,7 @@ pub fn create_page(
 pub fn create_folder(
     root: &Path,
     own: &mut OwnWrites,
+    recorder: &mut Recorder,
     folder: Option<&str>,
     name: &str,
 ) -> Result<NewEntry, AppError> {
@@ -170,21 +308,64 @@ pub fn create_folder(
     fs::create_dir(&path).map_err(creation_error)?;
     let entry = new_entry(folder, name);
     own.folder(&entry.path);
+    recorder.add(
+        Kind::NewFolder,
+        Entry {
+            path: entry.path.clone(),
+            before: State::Absent,
+            after: State::Folder,
+        },
+    );
     Ok(entry)
 }
 
 /// Writes a page that is gone back to its path, `relative` inside `root`, as UTF-8 with the
-/// editor's `\n` line endings, after creating each of its folders that is missing. It never
-/// replaces anything: an entry back at the page's path is a `conflict`. The caller holds the world
-/// lock, so writes do not overlap.
+/// editor's `\n` line endings, after creating each of its folders that is missing, and records the
+/// folders and the page before it creates any of them. It never replaces anything: an entry back
+/// at the page's path is a `conflict`. The caller holds the world lock, so writes do not overlap.
 pub fn restore_page(
     root: &Path,
     own: &mut OwnWrites,
+    recorder: &mut Recorder,
     relative: &str,
     text: &str,
 ) -> Result<PageVersion, AppError> {
     let (page, missing) = paths::restorable_page(root, relative)?;
-    for folder in &missing {
+    let bytes = text.as_bytes();
+    let folders = missing
+        .iter()
+        .filter_map(|folder| relative_to(root, folder));
+    let entries: Vec<Entry> = folders
+        .map(|path| Entry {
+            path,
+            before: State::Absent,
+            after: State::Folder,
+        })
+        .chain([Entry {
+            path: relative.to_owned(),
+            before: State::Absent,
+            after: State::Page(bytes.to_vec()),
+        }])
+        .collect();
+    let record = recorder.begin(Kind::RestoredMissing, &entries);
+    let result = create_restored(root, own, &page, &missing, bytes);
+    recorder.finish(record, result.is_ok());
+    result?;
+    own.page(relative, bytes);
+    Ok(PageVersion {
+        version: page::version_of(bytes),
+    })
+}
+
+/// Creates a restored page's `missing` folders, then the page itself at `page` with `bytes`.
+fn create_restored(
+    root: &Path,
+    own: &mut OwnWrites,
+    page: &Path,
+    missing: &[PathBuf],
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    for folder in missing {
         create_restored_folder(folder)?;
         if let Some(folder) = relative_to(root, folder) {
             own.folder(&folder);
@@ -193,21 +374,17 @@ pub fn restore_page(
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&page)
+        .open(page)
         .map_err(|error| match error.kind() {
             io::ErrorKind::AlreadyExists => paths::page_is_back(),
             _ => error.into(),
         })?;
-    let bytes = text.as_bytes();
     if let Err(error) = write_new_file(file, bytes) {
         // The file is the one this call created, so nothing of anyone else's is removed.
-        let _ = fs::remove_file(&page);
+        let _ = fs::remove_file(page);
         return Err(error.into());
     }
-    own.page(relative, bytes);
-    Ok(PageVersion {
-        version: page::version_of(bytes),
-    })
+    Ok(())
 }
 
 /// Creates one missing folder of a restored page. A folder that another program created meanwhile
@@ -368,6 +545,11 @@ mod tests {
         OwnWrites::default()
     }
 
+    /// A recorder without a history, for tests that do not look at it.
+    fn unrecorded() -> Recorder<'static> {
+        Recorder::new(None, 0)
+    }
+
     #[test]
     fn a_save_replaces_the_page_and_returns_the_version_of_its_new_bytes() {
         let (world, version) = world_with_page(b"\xef\xbb\xbf# Kesh\r\n\r\nOld line\r\n");
@@ -375,9 +557,11 @@ mod tests {
         let saved = write_page(
             world.path(),
             &mut own(),
+            &mut unrecorded(),
             "Page.md",
             "# Kesh\n\nNew line\n",
             &version,
+            false,
         )
         .unwrap();
 
@@ -402,8 +586,16 @@ mod tests {
             .set_modified(before)
             .unwrap();
 
-        let saved =
-            write_page(world.path(), &mut own(), "Page.md", "one\ntwo\n", &version).unwrap();
+        let saved = write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "one\ntwo\n",
+            &version,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(saved.version, version);
         assert_eq!(page_bytes(&world), b"one\r\ntwo\r\n");
@@ -418,9 +610,11 @@ mod tests {
         let error = write_page(
             world.path(),
             &mut own(),
+            &mut unrecorded(),
             "Page.md",
             "mine\n",
             &page::version_of(b"before\n"),
+            false,
         )
         .unwrap_err();
 
@@ -435,9 +629,11 @@ mod tests {
         let error = write_page_with(
             world.path(),
             &mut own(),
+            &mut unrecorded(),
             "Page.md",
             "mine\n",
             &version,
+            false,
             |temporary, page, version| {
                 assert!(temporary.exists());
                 fs::write(page, b"theirs\n").unwrap();
@@ -458,9 +654,11 @@ mod tests {
         let error = write_page_with(
             world.path(),
             &mut own(),
+            &mut unrecorded(),
             "Page.md",
             "two\n",
             &version,
+            false,
             |_, _, _| Err(io::Error::other("the rename failed").into()),
         )
         .unwrap_err();
@@ -476,7 +674,16 @@ mod tests {
         let (world, version) = world_with_page(b"one\n");
         fs::remove_file(world.path().join("Page.md")).unwrap();
 
-        let error = write_page(world.path(), &mut own(), "Page.md", "two\n", &version).unwrap_err();
+        let error = write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::NotFound);
         assert!(entries(&world).is_empty());
@@ -490,7 +697,16 @@ mod tests {
         permissions.set_readonly(true);
         fs::set_permissions(&path, permissions).unwrap();
 
-        let error = write_page(world.path(), &mut own(), "Page.md", "two\n", &version).unwrap_err();
+        let error = write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::Io);
         assert_eq!(error.message, "The page is read-only.");
@@ -502,8 +718,16 @@ mod tests {
     fn a_page_that_is_not_utf8_is_never_written() {
         let (world, version) = world_with_page(b"caf\xe9\n");
 
-        let error =
-            write_page(world.path(), &mut own(), "Page.md", "cafe\n", &version).unwrap_err();
+        let error = write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "cafe\n",
+            &version,
+            false,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::NotUtf8);
         assert_eq!(page_bytes(&world), b"caf\xe9\n");
@@ -514,8 +738,16 @@ mod tests {
     fn paths_outside_the_world_are_refused() {
         let (world, version) = world_with_page(b"one\n");
 
-        let error =
-            write_page(world.path(), &mut own(), "../Page.md", "two\n", &version).unwrap_err();
+        let error = write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "../Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::InvalidPath);
     }
@@ -525,8 +757,22 @@ mod tests {
         let world = tempfile::tempdir().unwrap();
         fs::create_dir(world.path().join("Places")).unwrap();
 
-        let page = create_page(world.path(), &mut own(), Some("Places"), "Kesh Tor").unwrap();
-        let folder = create_folder(world.path(), &mut own(), None, "Factions").unwrap();
+        let page = create_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            Some("Places"),
+            "Kesh Tor",
+        )
+        .unwrap();
+        let folder = create_folder(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            None,
+            "Factions",
+        )
+        .unwrap();
 
         assert_eq!(page.path, "Places/Kesh Tor.md");
         assert_eq!(
@@ -547,8 +793,22 @@ mod tests {
         fs::write(world.path().join("kesh tor.MD"), b"kept").unwrap();
         fs::write(world.path().join(".factions"), b"hidden").unwrap();
 
-        let page = create_page(world.path(), &mut own(), None, "Kesh Tor").unwrap_err();
-        let folder = create_folder(world.path(), &mut own(), None, "Kesh tor.md").unwrap_err();
+        let page = create_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            None,
+            "Kesh Tor",
+        )
+        .unwrap_err();
+        let folder = create_folder(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            None,
+            "Kesh tor.md",
+        )
+        .unwrap_err();
 
         assert_eq!(page.kind, ErrorKind::Exists);
         assert_eq!(folder.kind, ErrorKind::Exists);
@@ -560,8 +820,16 @@ mod tests {
     fn a_name_that_breaks_a_rule_creates_nothing() {
         let world = tempfile::tempdir().unwrap();
 
-        let page = create_page(world.path(), &mut own(), None, "../Escape").unwrap_err();
-        let folder = create_folder(world.path(), &mut own(), None, "Act/2").unwrap_err();
+        let page = create_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            None,
+            "../Escape",
+        )
+        .unwrap_err();
+        let folder =
+            create_folder(world.path(), &mut own(), &mut unrecorded(), None, "Act/2").unwrap_err();
 
         assert_eq!(page.kind, ErrorKind::InvalidName);
         assert_eq!(folder.kind, ErrorKind::InvalidName);
@@ -575,9 +843,22 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
 
-        let page = create_page(world.path(), &mut own(), Some("Elsewhere"), "Secret").unwrap_err();
-        let folder =
-            create_folder(world.path(), &mut own(), Some("Elsewhere"), "Secret").unwrap_err();
+        let page = create_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            Some("Elsewhere"),
+            "Secret",
+        )
+        .unwrap_err();
+        let folder = create_folder(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            Some("Elsewhere"),
+            "Secret",
+        )
+        .unwrap_err();
 
         assert_eq!(page.kind, ErrorKind::InvalidPath);
         assert_eq!(folder.kind, ErrorKind::InvalidPath);
@@ -596,7 +877,8 @@ mod tests {
         )
         .unwrap();
 
-        let error = create_page(world.path(), &mut own(), None, "Planted").unwrap_err();
+        let error =
+            create_page(world.path(), &mut own(), &mut unrecorded(), None, "Planted").unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::Exists);
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
@@ -631,7 +913,16 @@ mod tests {
         let path = world.path().join("Page.md");
         fs::set_permissions(&path, Permissions::from_mode(0o640)).unwrap();
 
-        write_page(world.path(), &mut own(), "Page.md", "two\n", &version).unwrap();
+        write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(page_bytes(&world), b"two\n");
         let mode = fs::metadata(&path).unwrap().permissions().mode();
@@ -645,17 +936,43 @@ mod tests {
         let mut own = own();
         assert!(!own.is_own(world.path(), "Page.md"));
 
-        let first = write_page(world.path(), &mut own, "Page.md", "two\n", &version).unwrap();
+        let first = write_page(
+            world.path(),
+            &mut own,
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap();
         assert!(own.is_own(world.path(), "Page.md"));
         // A second save before the watcher looks: the record holds the latest bytes.
-        write_page(world.path(), &mut own, "Page.md", "three\n", &first.version).unwrap();
+        write_page(
+            world.path(),
+            &mut own,
+            &mut unrecorded(),
+            "Page.md",
+            "three\n",
+            &first.version,
+            false,
+        )
+        .unwrap();
         assert!(own.is_own(world.path(), "Page.md"));
 
         fs::write(world.path().join("Page.md"), b"theirs\n").unwrap();
         assert!(!own.is_own(world.path(), "Page.md"));
 
-        let page = create_page(world.path(), &mut own, Some("Places"), "Kesh").unwrap();
-        let folder = create_folder(world.path(), &mut own, None, "Factions").unwrap();
+        let page = create_page(
+            world.path(),
+            &mut own,
+            &mut unrecorded(),
+            Some("Places"),
+            "Kesh",
+        )
+        .unwrap();
+        let folder =
+            create_folder(world.path(), &mut own, &mut unrecorded(), None, "Factions").unwrap();
         assert!(own.is_own(world.path(), &page.path));
         assert!(own.is_own(world.path(), &folder.path));
         fs::write(world.path().join(&page.path), b"typed elsewhere\n").unwrap();
@@ -666,8 +983,18 @@ mod tests {
     fn the_record_forgets_a_write_once_a_check_finds_it_gone() {
         let (world, version) = world_with_page(b"one\n");
         let mut own = own();
-        write_page(world.path(), &mut own, "Page.md", "two\n", &version).unwrap();
-        let folder = create_folder(world.path(), &mut own, None, "Factions").unwrap();
+        write_page(
+            world.path(),
+            &mut own,
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap();
+        let folder =
+            create_folder(world.path(), &mut own, &mut unrecorded(), None, "Factions").unwrap();
 
         fs::remove_file(world.path().join("Page.md")).unwrap();
         fs::remove_dir(world.path().join(&folder.path)).unwrap();
@@ -690,6 +1017,7 @@ mod tests {
         let restored = restore_page(
             world.path(),
             &mut own,
+            &mut unrecorded(),
             "Places/Coast/North/Kesh.md",
             "# Kesh\n\nMine\n",
         )
@@ -708,8 +1036,22 @@ mod tests {
         let (world, _) = world_with_page(b"theirs\n");
         fs::create_dir(world.path().join("Folder.md")).unwrap();
 
-        let file = restore_page(world.path(), &mut own(), "Page.md", "mine\n").unwrap_err();
-        let folder = restore_page(world.path(), &mut own(), "Folder.md", "mine\n").unwrap_err();
+        let file = restore_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "mine\n",
+        )
+        .unwrap_err();
+        let folder = restore_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Folder.md",
+            "mine\n",
+        )
+        .unwrap_err();
 
         assert_eq!(file.kind, ErrorKind::Conflict);
         assert_eq!(folder.kind, ErrorKind::Conflict);
@@ -724,12 +1066,287 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
 
-        let error =
-            restore_page(world.path(), &mut own(), "Elsewhere/New/Kesh.md", "mine\n").unwrap_err();
+        let error = restore_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Elsewhere/New/Kesh.md",
+            "mine\n",
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::InvalidPath);
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
         assert_eq!(entries(&world), ["Elsewhere"]);
+    }
+
+    mod recording {
+        use super::*;
+        use crate::history::testing::stored;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        /// The history of `world`, kept in `app_data`, opened with recovery reading the world.
+        fn history_of(app_data: &TempDir, world: &TempDir) -> History {
+            let root = world.path();
+            let on_disk = |path: &str| match fs::read(root.join(path)) {
+                Ok(bytes) => State::Page(bytes),
+                Err(_) if root.join(path).is_dir() => State::Folder,
+                Err(_) => State::Absent,
+            };
+            History::open(app_data.path(), root, 0, on_disk)
+                .history
+                .unwrap()
+        }
+
+        /// Each recorded change's kind and states, oldest first, and whether any is pending.
+        fn recorded(app_data: &TempDir, world: &TempDir) -> Vec<(String, Vec<Entry>)> {
+            let changes = stored(app_data.path(), world.path());
+            assert!(changes.iter().all(|change| !change.pending));
+            changes
+                .into_iter()
+                .map(|change| {
+                    let entries = change.entries.into_iter().map(|e| e.entry).collect();
+                    (change.kind, entries)
+                })
+                .collect()
+        }
+
+        fn entry(path: &str, before: State, after: State) -> Entry {
+            Entry {
+                path: path.to_owned(),
+                before,
+                after,
+            }
+        }
+
+        fn page(bytes: &[u8]) -> State {
+            State::Page(bytes.to_vec())
+        }
+
+        #[test]
+        fn every_write_records_its_kind_and_the_states_before_and_after() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, version) = world_with_page(b"one\r\n");
+            let mut history = history_of(&app_data, &world);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let own = &mut own();
+
+            let saved = write_page(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                "two\n",
+                &version,
+                false,
+            )
+            .unwrap();
+            write_page(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                "mine\n",
+                &saved.version,
+                true,
+            )
+            .unwrap();
+            create_page(world.path(), own, &mut recorder, None, "New").unwrap();
+            create_folder(world.path(), own, &mut recorder, None, "Factions").unwrap();
+            restore_page(
+                world.path(),
+                own,
+                &mut recorder,
+                "Places/Coast/Kesh.md",
+                "# Kesh\n",
+            )
+            .unwrap();
+
+            assert_eq!(recorder.outcome(), Recording::Recorded);
+            assert_eq!(
+                recorded(&app_data, &world),
+                [
+                    (
+                        "edit".to_owned(),
+                        vec![entry("Page.md", page(b"one\r\n"), page(b"two\r\n"))]
+                    ),
+                    (
+                        "keep_mine".to_owned(),
+                        vec![entry("Page.md", page(b"two\r\n"), page(b"mine\r\n"))]
+                    ),
+                    (
+                        "new_page".to_owned(),
+                        vec![entry("New.md", State::Absent, page(b""))]
+                    ),
+                    (
+                        "new_folder".to_owned(),
+                        vec![entry("Factions", State::Absent, State::Folder)]
+                    ),
+                    (
+                        "restored_missing".to_owned(),
+                        vec![
+                            entry("Places", State::Absent, State::Folder),
+                            entry("Places/Coast", State::Absent, State::Folder),
+                            entry("Places/Coast/Kesh.md", State::Absent, page(b"# Kesh\n")),
+                        ]
+                    ),
+                ]
+            );
+            // History lives in the app data folder only.
+            assert_eq!(entries(&world), ["Factions", "New.md", "Page.md", "Places"]);
+        }
+
+        #[test]
+        fn an_unchanged_save_and_a_failed_rename_record_nothing() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, version) = world_with_page(b"one\n");
+            let mut history = history_of(&app_data, &world);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+
+            write_page(
+                world.path(),
+                &mut own(),
+                &mut recorder,
+                "Page.md",
+                "one\n",
+                &version,
+                false,
+            )
+            .unwrap();
+            write_page_with(
+                world.path(),
+                &mut own(),
+                &mut recorder,
+                "Page.md",
+                "two\n",
+                &version,
+                false,
+                |_, _, _| Err(io::Error::other("the rename failed").into()),
+            )
+            .unwrap_err();
+
+            assert_eq!(recorder.outcome(), Recording::Nothing);
+            assert_eq!(page_bytes(&world), b"one\n");
+            assert!(recorded(&app_data, &world).is_empty());
+        }
+
+        /// A save that stops, as in a crash, just before or just after the page is replaced.
+        fn crash_during_a_save(world: &TempDir, history: &mut History, replace: bool) {
+            let version = page::version_of(&page_bytes(world));
+            let mut recorder = Recorder::new(Some(history), 100);
+            let crashed = catch_unwind(AssertUnwindSafe(|| {
+                write_page_with(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    "Page.md",
+                    "two\n",
+                    &version,
+                    false,
+                    |temporary, page, version| {
+                        if replace {
+                            check_and_rename(temporary, page, version).unwrap();
+                        }
+                        panic!("the application stops");
+                    },
+                )
+            }));
+            assert!(crashed.is_err());
+        }
+
+        #[test]
+        fn a_crash_after_the_replace_keeps_the_replaced_bytes_and_one_before_it_leaves_no_change() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, _) = world_with_page(b"one\n");
+            let mut history = history_of(&app_data, &world);
+            crash_during_a_save(&world, &mut history, false);
+            drop(history);
+
+            let mut reopened = history_of(&app_data, &world);
+            assert_eq!(page_bytes(&world), b"one\n");
+            assert!(recorded(&app_data, &world).is_empty());
+
+            crash_during_a_save(&world, &mut reopened, true);
+            drop(reopened);
+
+            history_of(&app_data, &world);
+            assert_eq!(page_bytes(&world), b"two\n");
+            assert_eq!(
+                recorded(&app_data, &world),
+                [(
+                    "edit".to_owned(),
+                    vec![entry("Page.md", page(b"one\n"), page(b"two\n"))]
+                )]
+            );
+        }
+
+        /// SQLite cannot create its rollback journal in a folder it cannot write, so every write
+        /// to the open database fails, until the folder can be written again.
+        #[cfg(unix)]
+        #[test]
+        fn writes_go_ahead_while_history_fails_and_are_recorded_again_once_it_works() {
+            use std::os::unix::fs::PermissionsExt;
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, version) = world_with_page(b"one\n");
+            let mut history = history_of(&app_data, &world);
+            let folder = crate::history::testing::file(app_data.path(), world.path())
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            fs::set_permissions(&folder, Permissions::from_mode(0o555)).unwrap();
+            let own = &mut own();
+
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let saved = write_page(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                "two\n",
+                &version,
+                false,
+            )
+            .unwrap();
+            assert!(matches!(recorder.outcome(), Recording::Failed(_)));
+            let mut recorder = Recorder::new(Some(&mut history), 110);
+            create_page(world.path(), own, &mut recorder, None, "New").unwrap();
+            assert!(matches!(recorder.outcome(), Recording::Failed(_)));
+            let mut recorder = Recorder::new(Some(&mut history), 120);
+            restore_page(world.path(), own, &mut recorder, "Gone/Kesh.md", "mine\n").unwrap();
+            let failed = recorder.outcome();
+
+            fs::set_permissions(&folder, Permissions::from_mode(0o755)).unwrap();
+            let mut recorder = Recorder::new(Some(&mut history), 130);
+            write_page(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                "three\n",
+                &saved.version,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(
+                failed,
+                Recording::Failed("The history database cannot be written.".to_owned())
+            );
+            assert_eq!(recorder.outcome(), Recording::Recorded);
+            assert_eq!(page_bytes(&world), b"three\n");
+            assert_eq!(fs::read(world.path().join("New.md")).unwrap(), b"");
+            assert_eq!(
+                fs::read(world.path().join("Gone/Kesh.md")).unwrap(),
+                b"mine\n"
+            );
+            assert_eq!(
+                recorded(&app_data, &world),
+                [(
+                    "edit".to_owned(),
+                    vec![entry("Page.md", page(b"two\n"), page(b"three\n"))]
+                )]
+            );
+        }
     }
 
     /// Another program holds the page open without sharing deletion, as an editor or a sync client
@@ -748,7 +1365,16 @@ mod tests {
             .open(&path)
             .unwrap();
 
-        let error = write_page(world.path(), &mut own(), "Page.md", "two\n", &version).unwrap_err();
+        let error = write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::Io);
         assert_eq!(page_bytes(&world), b"one\n");
@@ -759,7 +1385,16 @@ mod tests {
             thread::sleep(Duration::from_millis(150));
             drop(holder);
         });
-        write_page(world.path(), &mut own(), "Page.md", "two\n", &version).unwrap();
+        write_page(
+            world.path(),
+            &mut own(),
+            &mut unrecorded(),
+            "Page.md",
+            "two\n",
+            &version,
+            false,
+        )
+        .unwrap();
         release.join().unwrap();
         assert_eq!(page_bytes(&world), b"two\n");
         assert_eq!(entries(&world), ["Page.md"]);

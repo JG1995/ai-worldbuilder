@@ -27,9 +27,10 @@ export const pageRead = (path: string) => invokeCommand<PageText>("page_read", {
 /**
  * Saves the editor's text (with `\n` line endings) to a page whose bytes on disk still have
  * `version`, and returns the version of the bytes it now has. Rejects with `conflict` otherwise.
+ * `keepMine` is true for Keep mine, which history records as such.
  */
-export const pageWrite = (path: string, text: string, version: string) =>
-  invokeCommand<PageVersion>("page_write", { path, text, version });
+export const pageWrite = (path: string, text: string, version: string, keepMine: boolean) =>
+  invokeCommand<PageVersion>("page_write", { path, text, version, keepMine });
 
 /** Compares the page on disk with the editor's text, line by line. */
 export const pageCompare = (path: string, text: string) =>

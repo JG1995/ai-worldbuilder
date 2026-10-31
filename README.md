@@ -43,13 +43,17 @@ In development, `/showcase.html` on the dev server shows the design foundation: 
 
 ## Application data
 
-The application keeps its own data in one file, `grimoire-data/worlds.json`, in the app data folder for `io.github.jg1995.grimoire`:
+The application keeps its own data in the `grimoire-data` folder, in the app data folder for `io.github.jg1995.grimoire`:
 
-- Linux: `~/.local/share/io.github.jg1995.grimoire/grimoire-data/worlds.json`
-- Windows: `%APPDATA%\io.github.jg1995.grimoire\grimoire-data\worlds.json`
-- macOS: `~/Library/Application Support/io.github.jg1995.grimoire/grimoire-data/worlds.json`
+- Linux: `~/.local/share/io.github.jg1995.grimoire/grimoire-data/`
+- Windows: `%APPDATA%\io.github.jg1995.grimoire\grimoire-data\`
+- macOS: `~/Library/Application Support/io.github.jg1995.grimoire/grimoire-data/`
 
-The file holds the recent worlds, the world that was open when the application last closed, and each recent world's open tabs, expanded folders and file tree width. It never holds page text. If the file is deleted or cannot be read, the application starts with an empty recent list and replaces the file the next time it saves. On Linux, the webview keeps its own caches at the root of the same app data folder. The application writes nothing into a world folder except the pages and folders you create or edit.
+`worlds.json` holds the recent worlds, the world that was open when the application last closed, and each recent world's open tabs, expanded folders and file tree width. It never holds page text. If the file is deleted or cannot be read, the application starts with an empty recent list and replaces the file the next time it saves.
+
+`history/` holds one SQLite database per world, named by a hash of the world folder's path. It records every change the application makes to the world, with copies of the text of the pages it changed: the changes of the last 90 days, and at least the world's 100 most recent changes, whatever their age. Older changes are removed when the world opens. A world's history is kept when the world leaves the recent list, and it does not move with the world folder: a world opened from a new path starts an empty history. A damaged database is renamed with `.damaged-` and the time appended, and kept beside the new one.
+
+On Linux, the webview keeps its own caches at the root of the same app data folder. The application writes nothing into a world folder except the pages and folders you create or edit.
 
 ## Continuous integration and releases
 

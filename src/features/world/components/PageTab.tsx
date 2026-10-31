@@ -68,8 +68,8 @@ export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
         if (!current) return;
         const saver = new PageSaver(path, read, {
           read: (page) => reportingMissingWorld(session, pageRead(page)),
-          write: (page, text, version) =>
-            reportingMissingWorld(session, pageWrite(page, text, version)),
+          write: (page, text, version, keepMine) =>
+            reportingMissingWorld(session, pageWrite(page, text, version, keepMine)),
           notify: (notice) => setNotice(session, path, notice),
         });
         setPage(session, path, {
