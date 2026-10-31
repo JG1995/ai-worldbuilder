@@ -10,6 +10,7 @@ pub fn run() {
             world::world_close,
             world::world_tree,
             world::page_read,
+            world::page_write,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

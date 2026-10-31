@@ -40,12 +40,22 @@ Use \`inline code\` for dice notation such as \`3d6\`.
   "Factions/Glasswrights' Guild.md": "# Glasswrights' Guild\n\nThey mine the steppe for lenses.\n",
   "Factions/Riders of the Dun Sky.md": "# Riders of the Dun Sky\n\nNomads who never camp twice.\n",
   "Locations/Kesh Tor.md": "# Kesh Tor\n\nA basalt spire, the only shade for a day's ride.\n",
+  "Locations/Locked chronicle.md":
+    "# Locked chronicle\n\nIn the preview, another program holds this page open, so saving it always fails.\n",
   "Locations/Old trade ledger.md": { notUtf8: true },
   "Locations/The mirror lake.md": "# The mirror lake\n\nIts surface shows the sky of last night.\n",
   "Session notes/Session 1.md": "# Session 1\n\nThe party joins Venn's caravan.\n",
   "Session notes/Session 2.md": "# Session 2\n\nA glass storm strands the caravan at Kesh Tor.\n",
   "Session notes/Session 10.md": "# Session 10\n\nThe Guild's lens finally works.\n",
 };
+
+/** The page whose saves always fail, so the failed-save notice and dialog can be seen. */
+const lockedPage = "Locations/Locked chronicle.md";
+
+/** How often each page has been saved in this preview session; its version names the count. */
+const saves: Record<string, number> = {};
+
+const versionOf = (path: string) => `${previewMarker}:${path}:${(saves[path] ?? 0) + 1}`;
 
 const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -86,6 +96,23 @@ function requireWorld() {
   if (!open) throw { kind: "no_world", message: "No world is open." };
 }
 
+/** The text of the page at `args.path`, throwing like the core for a missing or non-UTF-8 page. */
+function pageText(args: InvokeArgs | undefined) {
+  requireWorld();
+  const path = String((args as { path?: unknown } | undefined)?.path);
+  const page = samplePages[path];
+  if (page === undefined) {
+    throw { kind: "not_found", message: "The page or folder does not exist." };
+  }
+  if (typeof page !== "string") {
+    throw {
+      kind: "not_utf8",
+      message: "The page is not UTF-8 text, so it cannot be edited here. It has not been changed.",
+    };
+  }
+  return { path, text: page };
+}
+
 /** Sample command results: values, or functions of the arguments that throw like the core. */
 export const previewFixtures: Record<string, unknown> = {
   // Opens the sample world at once: the preview has no folder dialog.
@@ -107,19 +134,24 @@ export const previewFixtures: Record<string, unknown> = {
     return treeOf(Object.keys(samplePages));
   },
   page_read: (args?: InvokeArgs): PageText => {
-    requireWorld();
-    const path = String((args as { path?: unknown } | undefined)?.path);
-    const page = samplePages[path];
-    if (page === undefined) {
-      throw { kind: "not_found", message: "The page or folder does not exist." };
-    }
-    if (typeof page !== "string") {
+    const { path, text } = pageText(args);
+    return { text, version: versionOf(path) };
+  },
+  // Keeps saved text for as long as the preview page stays loaded.
+  page_write: (args?: InvokeArgs): { version: string } => {
+    const { path, text } = pageText(args);
+    const { text: edited, version } = args as { text: string; version: string };
+    if (version !== versionOf(path)) {
       throw {
-        kind: "not_utf8",
-        message:
-          "The page is not UTF-8 text, so it cannot be edited here. It has not been changed.",
+        kind: "conflict",
+        message: "The page changed on disk since it was last read or saved.",
       };
     }
-    return { text: page, version: `${previewMarker}:${path}:1` };
+    if (path === lockedPage) throw { kind: "io", message: "Another program is using the file." };
+    if (edited !== text) {
+      samplePages[path] = edited;
+      saves[path] = (saves[path] ?? 0) + 1;
+    }
+    return { version: versionOf(path) };
   },
 };

@@ -14,6 +14,7 @@ pub enum ErrorKind {
     NotUtf8,
     WorldMissing,
     Io,
+    Conflict,
 }
 
 /// The error every command returns, serialized as `{ kind, message }`.

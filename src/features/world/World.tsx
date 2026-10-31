@@ -1,10 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import type { IpcError } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { WelcomeScreen } from "../../ui/WelcomeScreen";
 import { worldClose, worldOpen, worldTreeKey } from "./commands";
+import { useSaveConfirmation } from "./FailedSaveDialog";
 import { useWorldStore } from "./store";
 import { WorldScreen } from "./WorldScreen";
 
@@ -13,45 +14,77 @@ const notYet = () => {};
 
 type Failure = { title: string; message: string };
 
-/** The welcome screen or the open world, and the flows that open and close worlds. */
+/**
+ * The welcome screen or the open world, and the flows that open and close worlds. Before the world
+ * changes, every open page saves, with the failed-save dialog for each one that cannot.
+ */
 export function World() {
   const world = useWorldStore((store) => store.world);
-  const { opened, closed } = useWorldStore.getState();
+  const changingWorld = useWorldStore((store) => store.changingWorld);
+  const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const [failure, setFailure] = useState<Failure | null>(null);
-  const opening = useRef(false);
+  const { confirmSaved, failedSaveDialog } = useSaveConfirmation();
 
-  async function openWorld() {
-    // The core shows one folder dialog at a time.
-    if (opening.current) return;
-    opening.current = true;
+  /** Saves every open page in tab order. False when the user cancels on a page that cannot save. */
+  async function confirmAllSaved() {
+    for (const path of useWorldStore.getState().tabs) {
+      if (!(await confirmSaved(path))) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Runs `change` once every page has saved. One change runs at a time, and the world takes no
+   * edits until it ends, so none can be made after its page saved and then dropped with its
+   * editor. Autosave waits meanwhile, so no save meant for this world can reach the core after it
+   * has switched to another; the store's `opened` and `closed` then stop this world's savers.
+   */
+  async function changeWorld(change: () => Promise<void>) {
+    if (useWorldStore.getState().changingWorld) return;
+    setChangingWorld(true);
     try {
-      const result = await worldOpen();
-      if (!result) return;
-      queryClient.removeQueries({ queryKey: worldTreeKey });
-      opened(result);
-    } catch (error) {
-      setFailure({ title: "The folder cannot be opened", message: (error as IpcError).message });
+      if (!(await confirmAllSaved())) return;
+      const release = holdSaving();
+      try {
+        await change();
+      } finally {
+        release();
+      }
     } finally {
-      opening.current = false;
+      setChangingWorld(false);
     }
   }
 
-  async function closeWorld() {
-    try {
-      await worldClose();
-    } catch (error) {
-      setFailure({ title: "The world cannot be closed", message: (error as IpcError).message });
-      return;
-    }
-    closed();
-    queryClient.removeQueries({ queryKey: worldTreeKey });
-  }
+  const openWorld = () =>
+    changeWorld(async () => {
+      try {
+        const result = await worldOpen();
+        if (!result) return;
+        queryClient.removeQueries({ queryKey: worldTreeKey });
+        opened(result);
+      } catch (error) {
+        setFailure({ title: "The folder cannot be opened", message: (error as IpcError).message });
+      }
+    });
+
+  const closeWorld = () =>
+    changeWorld(async () => {
+      try {
+        await worldClose();
+      } catch (error) {
+        setFailure({ title: "The world cannot be closed", message: (error as IpcError).message });
+        return;
+      }
+      closed();
+      queryClient.removeQueries({ queryKey: worldTreeKey });
+    });
 
   const dismiss = () => setFailure(null);
 
   return (
-    <div className="h-screen">
+    // Dialogs render in portals outside this element, so they still take input while it is inert.
+    <div className="h-screen" inert={changingWorld}>
       {world ? (
         <WorldScreen
           key={world.session}
@@ -89,6 +122,7 @@ export function World() {
           {failure.message}
         </Dialog>
       )}
+      {failedSaveDialog}
     </div>
   );
 }

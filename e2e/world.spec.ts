@@ -100,3 +100,77 @@ test("Close world returns to the welcome screen", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Open world…" })).toBeVisible();
   await expect(page.getByRole("tree")).toHaveCount(0);
 });
+
+/** The preview world's stored text of a page, read from the fixture module the app itself loaded. */
+function storedText(page: Page, path: string) {
+  return page.evaluate(async (path) => {
+    const fixtures = "/src/lib/preview-fixtures.ts";
+    const { previewFixtures } = await import(/* @vite-ignore */ fixtures);
+    return previewFixtures.page_read({ path }).text as string;
+  }, path);
+}
+
+/** Closes a tab with its close button, which shows while the tab is hovered. */
+async function closeTab(page: Page, name: string) {
+  await tab(page, name).hover();
+  await page.getByRole("button", { name: `Close ${name}` }).click();
+}
+
+async function typeAtEnd(page: Page, editorName: string, text: string) {
+  await page.getByRole("textbox", { name: editorName }).click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type(text);
+}
+
+test("typed text saves within two seconds of a pause, and the page shows it again", async ({
+  page,
+}) => {
+  await openSampleWorld(page);
+  await row(page, "Characters").click();
+  await row(page, "Brother Ketil").click();
+
+  await typeAtEnd(page, "Brother Ketil", "\nSworn to silence.");
+
+  await expect
+    .poll(() => storedText(page, "Characters/Brother Ketil.md"), { timeout: 2000 })
+    .toContain("Sworn to silence.");
+  await closeTab(page, "Brother Ketil");
+  await row(page, "Brother Ketil").click();
+  await expect(page.getByRole("textbox", { name: "Brother Ketil" })).toContainText(
+    "Sworn to silence.",
+  );
+});
+
+test("Ctrl+S saves at once", async ({ page }) => {
+  await openSampleWorld(page);
+  await row(page, "Session notes").click();
+  await row(page, "Session 1").click();
+  await typeAtEnd(page, "Session 1", " They leave at dusk.");
+
+  await page.keyboard.press("Control+s");
+
+  // Well within the one-second autosave delay.
+  await expect
+    .poll(() => storedText(page, "Session notes/Session 1.md"), { timeout: 500 })
+    .toContain("They leave at dusk.");
+});
+
+test("a page that cannot be saved shows the failed-save notice, and closing it asks first", async ({
+  page,
+}) => {
+  await openSampleWorld(page);
+  await row(page, "Locations").click();
+  await row(page, "Locked chronicle").click();
+
+  await typeAtEnd(page, "Locked chronicle", " A new line.");
+
+  await expect(page.getByRole("alert")).toContainText(
+    "This page could not be saved: Another program is using the file.",
+  );
+  await closeTab(page, "Locked chronicle");
+  const dialog = page.getByRole("dialog", { name: '"Locked chronicle" could not be saved' });
+  await expect(dialog).toContainText("Another program is using the file.");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(tab(page, "Locked chronicle")).toBeVisible();
+});

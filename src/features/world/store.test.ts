@@ -1,14 +1,33 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { useWorldStore } from "./store";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPageState } from "../editor/MarkdownEditor";
+import { PageSaver } from "./saving";
+import { type PageStatus, useWorldStore } from "./store";
 
 const store = () => useWorldStore.getState();
 
-function openWorld(tabs: string[] = [], active: string | null = null) {
+function openWorld(tabs: string[] = [], active: string | null = null, session = 1) {
   store().opened({
     name: "Sample",
-    session: 1,
+    session,
     workspace: { tabs, active, expanded: [], treeWidth: 264 },
   });
+}
+
+/** A ready page whose saver writes nothing, with a spy on the saver's `dispose`. */
+function readyPage(text: string) {
+  const saver = new PageSaver(
+    "A.md",
+    { text, version: "v1" },
+    { read: vi.fn(), write: vi.fn(), notify: vi.fn() },
+  );
+  const dispose = vi.spyOn(saver, "dispose");
+  const page: PageStatus = {
+    status: "ready",
+    editor: createPageState(text, "A"),
+    saver,
+    notice: null,
+  };
+  return { page, dispose };
 }
 
 beforeEach(() => store().closed());
@@ -94,13 +113,59 @@ describe("closing tabs", () => {
   });
 });
 
-it("ignores a page result for a page that is no longer open", () => {
-  openWorld(["A.md"], "A.md");
+describe("page results", () => {
+  it("are ignored for a page that is no longer open", () => {
+    openWorld(["A.md"], "A.md");
 
-  store().setPage("Gone.md", { status: "not_utf8" });
-  store().setPage("A.md", { status: "read_error", message: "Permission denied." });
+    store().setPage(1, "Gone.md", { status: "not_utf8" });
+    store().setPage(1, "A.md", { status: "read_error", message: "Permission denied." });
 
-  expect(store().pages).toEqual({
-    "A.md": { status: "read_error", message: "Permission denied." },
+    expect(store().pages).toEqual({
+      "A.md": { status: "read_error", message: "Permission denied." },
+    });
+  });
+
+  it("are ignored when they come from another world with a page at the same path", () => {
+    openWorld(["A.md"], "A.md", 1);
+    const first = readyPage("first world");
+    store().setPage(1, "A.md", first.page);
+
+    openWorld(["A.md"], "A.md", 2);
+    // The first world's tab hands back its editor as it unmounts, and its saver reports.
+    store().setEditor(1, "A.md", createPageState("first world, edited", "A"));
+    store().setNotice(1, "A.md", { kind: "conflict" });
+    store().setPage(1, "A.md", first.page);
+
+    expect(store().pages["A.md"]).toEqual({ status: "loading" });
+  });
+});
+
+describe("savers", () => {
+  it("stop when their page closes or is replaced in its tab", () => {
+    openWorld(["A.md", "B.md"], "A.md");
+    const a = readyPage("a");
+    const b = readyPage("b");
+    store().setPage(1, "A.md", a.page);
+    store().setPage(1, "B.md", b.page);
+
+    store().openPage("C.md", { newTab: false });
+    store().closeTab("B.md");
+
+    expect(a.dispose).toHaveBeenCalled();
+    expect(b.dispose).toHaveBeenCalled();
+  });
+
+  it("stop when their world closes or another opens", () => {
+    openWorld(["A.md"], "A.md", 1);
+    const first = readyPage("first");
+    store().setPage(1, "A.md", first.page);
+    openWorld(["A.md"], "A.md", 2);
+    expect(first.dispose).toHaveBeenCalled();
+    const second = readyPage("second");
+    store().setPage(2, "A.md", second.page);
+
+    store().closed();
+
+    expect(second.dispose).toHaveBeenCalled();
   });
 });

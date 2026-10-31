@@ -2,11 +2,15 @@ import type { EditorState } from "@codemirror/state";
 import { create } from "zustand";
 import { defaultTreeWidth } from "../../ui/Shell";
 import type { WorldOpened } from "./commands";
+import type { PageSaver, SaveNotice, SaveResult } from "./saving";
 
-/** One open page. A ready page keeps its editor state, so switching tabs keeps cursor and undo. */
+/**
+ * One open page. A ready page keeps its editor state, so switching tabs keeps cursor and undo, and
+ * the saver of its edits with the notice the saver last reported.
+ */
 export type PageStatus =
   | { status: "loading" }
-  | { status: "ready"; version: string; editor: EditorState }
+  | { status: "ready"; editor: EditorState; saver: PageSaver; notice: SaveNotice | null }
   | { status: "not_utf8" }
   | { status: "read_error"; message: string };
 
@@ -20,8 +24,15 @@ type WorldStore = {
   treeWidth: number;
   treeOverlayOpen: boolean;
   pages: Readonly<Record<string, PageStatus>>;
+  /**
+   * True from the start of a world change until it ends: the pages save, then the folder dialog
+   * shows. Nothing in the world can be edited or opened meanwhile, because the change drops every
+   * page's editor, and the folder dialog does not stop input to the window on every platform.
+   */
+  changingWorld: boolean;
   opened: (world: WorldOpened) => void;
   closed: () => void;
+  setChangingWorld: (changing: boolean) => void;
   /** Opens a page in the active tab, or in a new tab when asked or when no tab is active. */
   openPage: (path: string, options: { newTab: boolean }) => void;
   activate: (path: string) => void;
@@ -29,8 +40,18 @@ type WorldStore = {
   toggleFolder: (path: string, open: boolean) => void;
   setTreeWidth: (width: number) => void;
   setTreeOverlayOpen: (open: boolean) => void;
-  /** Records a page's state; ignored once the page is no longer open. */
-  setPage: (path: string, status: PageStatus) => void;
+  /**
+   * The setters below take the world session the page was opened in, and are ignored once that
+   * world or the page is no longer open, so nothing from one world reaches another.
+   */
+  setPage: (session: number, path: string, status: PageStatus) => void;
+  /** Keeps a ready page's editor state, for example when its tab stops showing it. */
+  setEditor: (session: number, path: string, editor: EditorState) => void;
+  setNotice: (session: number, path: string, notice: SaveNotice | null) => void;
+  /** Saves an open page's edits now. A page without an editor has none. */
+  flush: (path: string) => Promise<SaveResult>;
+  /** Stops every page's autosave, and returns the function that resumes it. */
+  holdSaving: () => () => void;
 };
 
 const closedWorld = {
@@ -56,17 +77,25 @@ function withAncestors(expanded: ReadonlySet<string>, path: string | null) {
   return new Set([...expanded, ...ancestors]);
 }
 
+/** `pages` without `path`, whose saver stops: the page has saved or the user discarded its edits. */
 function without(pages: WorldStore["pages"], path: string) {
-  const { [path]: _removed, ...rest } = pages;
+  const { [path]: removed, ...rest } = pages;
+  if (removed?.status === "ready") removed.saver.dispose();
   return rest;
+}
+
+function savers(pages: WorldStore["pages"]) {
+  return Object.values(pages).flatMap((page) => (page.status === "ready" ? [page.saver] : []));
 }
 
 const loading: PageStatus = { status: "loading" };
 
 export const useWorldStore = create<WorldStore>()((set, get) => ({
   ...closedWorld,
+  changingWorld: false,
 
-  opened: ({ name, session, workspace }) =>
+  opened: ({ name, session, workspace }) => {
+    for (const saver of savers(get().pages)) saver.dispose();
     set({
       ...closedWorld,
       world: { name, session },
@@ -75,9 +104,15 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       expanded: withAncestors(new Set(workspace.expanded), workspace.active),
       treeWidth: workspace.treeWidth,
       pages: Object.fromEntries(workspace.tabs.map((path) => [path, loading])),
-    }),
+    });
+  },
 
-  closed: () => set(closedWorld),
+  closed: () => {
+    for (const saver of savers(get().pages)) saver.dispose();
+    set(closedWorld);
+  },
+
+  setChangingWorld: (changingWorld) => set({ changingWorld }),
 
   openPage: (path, { newTab }) => {
     const { tabs, active, pages, activate } = get();
@@ -123,6 +158,33 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
 
   setTreeOverlayOpen: (treeOverlayOpen) => set({ treeOverlayOpen }),
 
-  setPage: (path, status) =>
-    set(({ tabs, pages }) => (tabs.includes(path) ? { pages: { ...pages, [path]: status } } : {})),
+  setPage: (session, path, status) =>
+    set(({ world, tabs, pages }) =>
+      world?.session === session && tabs.includes(path)
+        ? { pages: { ...pages, [path]: status } }
+        : {},
+    ),
+
+  setEditor: (session, path, editor) => {
+    const page = get().pages[path];
+    if (page?.status === "ready") get().setPage(session, path, { ...page, editor });
+  },
+
+  setNotice: (session, path, notice) => {
+    const page = get().pages[path];
+    if (page?.status === "ready") get().setPage(session, path, { ...page, notice });
+  },
+
+  flush: (path) => {
+    const page = get().pages[path];
+    return page?.status === "ready" ? page.saver.flush() : Promise.resolve({ kind: "clean" });
+  },
+
+  holdSaving: () => {
+    const held = savers(get().pages);
+    for (const saver of held) saver.hold();
+    return () => {
+      for (const saver of held) saver.release();
+    };
+  },
 }));
