@@ -42,7 +42,7 @@ function mockCreatingIpc(overrides: Parameters<typeof mockWorldIpc>[0] = {}) {
 
 async function openTestWorld() {
   renderWorld();
-  fireEvent.click(screen.getByRole("button", { name: "Open world…" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));
   return screen.findByRole("tree", { name: testWorld.name });
 }
 

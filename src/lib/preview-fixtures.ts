@@ -4,6 +4,7 @@
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type { PageText, WorldOpened } from "../features/world/commands";
 import type { TreeEntry } from "../ui/FileTree";
+import type { RecentWorld } from "../ui/WelcomeScreen";
 
 const previewMarker = "0.0.0-preview.sample-data";
 
@@ -152,6 +153,50 @@ function checkFree(names: string[], fileName: string) {
 let world: PreviewWorld | null = null;
 let session = 0;
 
+/** A recent world of the preview and the preview world it opens, or none for a missing folder. */
+type PreviewRecent = RecentWorld & { world: PreviewWorld | null };
+
+const sampleWorldPath = "/home/preview/Worlds/The Glass Steppe";
+
+/** The preview's recent worlds, most recently opened first. */
+let recentWorlds: PreviewRecent[] = [
+  {
+    id: "1",
+    name: sampleWorld.name,
+    path: sampleWorldPath,
+    missing: false,
+    world: sampleWorld,
+  },
+  {
+    id: "2",
+    name: "Ashfall Reaches",
+    path: "/home/preview/Worlds/Ashfall Reaches",
+    missing: false,
+    world: emptyWorld("Ashfall Reaches"),
+  },
+  {
+    id: "3",
+    name: "The Sunken Archive",
+    path: "/media/preview/backup/Worlds/The Sunken Archive",
+    missing: true,
+    world: null,
+  },
+];
+let nextRecentId = recentWorlds.length + 1;
+
+/** Moves an opened world to the top of the recent list, adding it when it is new. */
+function remember(opened: PreviewWorld, path: string) {
+  const known = recentWorlds.find((recent) => recent.world === opened);
+  const entry = known ?? {
+    id: String(nextRecentId++),
+    name: opened.name,
+    path,
+    missing: false,
+    world: opened,
+  };
+  recentWorlds = [entry, ...recentWorlds.filter((recent) => recent !== entry)];
+}
+
 function requireWorld() {
   if (!world) throw { kind: "no_world", message: "No world is open." };
   return world;
@@ -211,7 +256,10 @@ const createdWorlds: Record<string, string[]> = {};
 /** Sample command results: values, or functions of the arguments that throw like the core. */
 export const previewFixtures: Record<string, unknown> = {
   // Opens the sample world at once: the preview has no folder dialog.
-  world_open: (): WorldOpened => opened(sampleWorld),
+  world_open: (): WorldOpened => {
+    remember(sampleWorld, sampleWorldPath);
+    return opened(sampleWorld);
+  },
   world_close: () => {
     world = null;
     return null;
@@ -256,6 +304,33 @@ export const previewFixtures: Record<string, unknown> = {
     const created = createdWorlds[newLocation] ?? [];
     checkFree(created, name);
     createdWorlds[newLocation] = [...created, name];
-    return opened(emptyWorld(name));
+    const next = emptyWorld(name);
+    remember(next, `${newLocation}/${name}`);
+    return opened(next);
   },
+  // The preview always launches on the welcome screen.
+  world_restore: () => null,
+  recent_list: (): RecentWorld[] =>
+    recentWorlds
+      .filter((recent) => world === null || recent.world !== world)
+      .map(({ world: _world, ...recent }) => recent),
+  recent_remove: (args?: InvokeArgs) => {
+    const { id } = args as { id: string };
+    recentWorlds = recentWorlds.filter((recent) => recent.id !== id);
+    return null;
+  },
+  world_open_recent: (args?: InvokeArgs): WorldOpened => {
+    const { id } = args as { id: string };
+    const recent = recentWorlds.find((entry) => entry.id === id);
+    if (!recent) {
+      throw { kind: "not_found", message: "This world is no longer in the recent list." };
+    }
+    if (!recent.world) {
+      throw { kind: "world_missing", message: "The world's folder cannot be found." };
+    }
+    remember(recent.world, recent.path);
+    return opened(recent.world);
+  },
+  workspace_save: () => null,
+  app_close: () => null,
 };

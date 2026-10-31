@@ -55,8 +55,15 @@ test("the production build renders a page in the editor under the production CSP
     document.addEventListener("securitypolicyviolation", (event) =>
       violations.push(`${event.violatedDirective} ${event.blockedURI}`),
     );
-    // A stand-in for the Tauri runtime, so the production bundle reaches a canned core.
+    // A stand-in for the Tauri runtime, so the production bundle reaches a canned core. Event
+    // subscriptions are answered by command name, with the callback plumbing `listen` uses, but no
+    // event is ever sent.
+    let callbacks = 0;
     const responses: Record<string, unknown> = {
+      world_restore: null,
+      recent_list: [],
+      "plugin:event|listen": 1,
+      "plugin:event|unlisten": null,
       world_open: {
         name: "Kesh",
         session: 1,
@@ -70,7 +77,12 @@ test("the production build renders a page in the editor under the production CSP
     };
     Object.assign(window, {
       isTauri: true,
-      __TAURI_INTERNALS__: { invoke: async (command: string) => responses[command] },
+      __TAURI_INTERNALS__: {
+        invoke: async (command: string) => responses[command],
+        transformCallback: () => ++callbacks,
+      },
+      // `@tauri-apps/api` calls it before it asks the core to unlisten.
+      __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
     });
   });
   await page.route(`${origin}/**`, (route) => {

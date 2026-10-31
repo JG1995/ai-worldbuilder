@@ -47,6 +47,12 @@ const defaults: Record<string, Handler> = {
   world_new_location: () => ({ location: testLocation }),
   world_new_browse: () => null,
   world_create: ({ name }): WorldOpened => ({ ...testWorld, name: String(name), session: 2 }),
+  world_restore: () => null,
+  recent_list: () => [],
+  recent_remove: () => null,
+  world_open_recent: (): WorldOpened => ({ ...testWorld, session: 2 }),
+  workspace_save: () => null,
+  app_close: () => null,
 };
 
 function entryPath(folder: unknown, name: string) {
