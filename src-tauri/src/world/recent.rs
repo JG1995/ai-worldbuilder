@@ -23,6 +23,7 @@ const DEFAULT_TREE_WIDTH: u32 = 264;
 /// The open tabs in order, the active tab, the expanded folders and the tree width of a world.
 /// Paths are relative to the world.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
     pub tabs: Vec<String>,
@@ -44,6 +45,7 @@ impl Default for Workspace {
 
 /// A recent world as the welcome screen and the world menu show it.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct RecentWorld {
     id: String,
     name: String,

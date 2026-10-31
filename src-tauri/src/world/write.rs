@@ -68,6 +68,7 @@ impl OwnWrites {
 
 /// The version of a page's bytes after a write.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct PageVersion {
     pub version: String,
 }
@@ -132,6 +133,7 @@ fn write_page_with(
 
 /// A page or folder the user created, by its path relative to the world.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct NewEntry {
     pub path: String,
 }

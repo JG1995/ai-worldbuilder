@@ -1,5 +1,5 @@
 import type { IpcError } from "@/lib/ipc";
-import type { PageText } from "@/types/api";
+import type { PageText, PageVersion } from "@/types/api";
 
 /** How long typing must pause before a page saves by itself. */
 export const autosaveDelay = 1000;
@@ -35,7 +35,7 @@ export const missingReason = "The page no longer exists on disk.";
 /** What the saver needs from outside: the core's commands and a place to show its notice. */
 export type SaverPorts = {
   read: (path: string) => Promise<PageText>;
-  write: (path: string, text: string, version: string) => Promise<{ version: string }>;
+  write: (path: string, text: string, version: string) => Promise<PageVersion>;
   notify: (notice: SaveNotice | null) => void;
 };
 
@@ -135,7 +135,7 @@ export class PageSaver {
    * resolves to true when it did. Something back at the page's path turns the missing-page notice
    * into the conflict notice.
    */
-  restore(restore: (path: string, text: string) => Promise<{ version: string }>): Promise<boolean> {
+  restore(restore: (path: string, text: string) => Promise<PageVersion>): Promise<boolean> {
     return this.enqueue(async () => {
       if (this.notice?.kind !== "missing") return false;
       const text = this.latest.toString();
