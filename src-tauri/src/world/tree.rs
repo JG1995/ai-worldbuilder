@@ -39,10 +39,17 @@ pub fn list(root: &Path) -> Result<Vec<TreeEntry>, AppError> {
 }
 
 /// Lists one folder recursively. Entry types come from the directory entries themselves, which do
-/// not follow links, so links and junctions are skipped rather than followed.
+/// not follow links, so links and junctions are skipped rather than followed. A subfolder the user
+/// may not read is listed as empty, so it cannot hide the rest of the world.
 fn list_folder(folder: &Path, prefix: Option<&str>) -> io::Result<Vec<TreeEntry>> {
+    let read_dir = match fs::read_dir(folder) {
+        Err(error) if prefix.is_some() && error.kind() == io::ErrorKind::PermissionDenied => {
+            return Ok(Vec::new());
+        }
+        result => result?,
+    };
     let mut entries = Vec::new();
-    for entry in fs::read_dir(folder)? {
+    for entry in read_dir {
         let entry = entry?;
         let Ok(name) = entry.file_name().into_string() else {
             continue;
@@ -257,6 +264,22 @@ mod tests {
             names(&tree),
             ["Places", r"a\b", "Real", "Session 1: Arrival"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lists_an_unreadable_folder_as_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let world = world(&["Real.md", "Locked/Hidden.md"], &["Locked"]);
+        let locked = world.path().join("Locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let tree = list(world.path());
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let tree = tree.unwrap();
+        assert_eq!(names(&tree), ["Locked", "Real"]);
+        assert_eq!(find(&tree, "Locked").children, Some(Vec::new()));
     }
 
     #[cfg(target_os = "linux")]
