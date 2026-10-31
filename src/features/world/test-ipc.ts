@@ -42,6 +42,10 @@ const defaults: Record<string, Handler> = {
   page_write: ({ path, text }) => ({
     version: `version of ${String(path)} saved as ${String(text)}`,
   }),
+  page_compare: () => ({ version: "version on disk", lines: [] }),
+  page_restore: ({ path, text }) => ({
+    version: `version of ${String(path)} restored as ${String(text)}`,
+  }),
   page_create: ({ folder, name }) => ({ path: entryPath(folder, `${String(name)}.md`) }),
   folder_create: ({ folder, name }) => ({ path: entryPath(folder, String(name)) }),
   world_new_location: () => ({ location: testLocation }),

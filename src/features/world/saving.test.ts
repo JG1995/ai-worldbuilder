@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../lib/ipc";
 import type { PageText } from "./commands";
-import { autosaveDelay, missingReason, PageSaver, type SaveNotice } from "./saving";
+import { autosaveDelay, isReadOnlyNotice, PageSaver, type SaveNotice } from "./saving";
 
 type Write = { text: string; version: string };
 
@@ -39,6 +39,9 @@ function saverOf(
 }
 
 const page: PageText = { text: "# Kesh\n", version: "v0" };
+
+/** The core's answer for a page deleted or moved on disk. */
+const gone = new IpcError("not_found", "The page or folder does not exist.");
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -180,15 +183,184 @@ describe("failed saves", () => {
     expect(lastNotice()).toBeNull();
   });
 
-  it("reports a page deleted on disk as missing, with the interim reason", async () => {
-    const { saver, lastNotice } = saverOf(page, {
-      write: () => Promise.reject(new IpcError("not_found", "The page or folder does not exist.")),
-    });
+  it("reports a page deleted on disk as missing, with the missing-page notice", async () => {
+    const { saver, writes, lastNotice } = saverOf(page, { write: () => Promise.reject(gone) });
 
     saver.changed("# Kesh\nA");
 
     expect(await saver.flush()).toEqual({ kind: "missing" });
-    expect(lastNotice()).toEqual({ kind: "failed", reason: missingReason });
+    expect(lastNotice()).toEqual({ kind: "missing" });
+    saver.changed("# Kesh\nAB");
+    await vi.advanceTimersByTimeAsync(autosaveDelay);
+    expect(writes).toHaveLength(1);
+  });
+});
+
+describe("restoring a missing page", () => {
+  async function missingPage() {
+    const parts = saverOf(page, { write: () => Promise.reject(gone) });
+    parts.saver.changed("# Kesh\nmine");
+    await parts.saver.flush();
+    return parts;
+  }
+
+  it("writes the editor's text back and saves as usual afterwards", async () => {
+    const { saver, writes, lastNotice } = await missingPage();
+    const restores: string[] = [];
+
+    const restored = await saver.restore((_path, text) => {
+      restores.push(text);
+      return Promise.resolve({ version: "restored" });
+    });
+
+    expect(restored).toBe(true);
+    expect(restores).toEqual(["# Kesh\nmine"]);
+    expect(lastNotice()).toBeNull();
+    expect(await saver.flush()).toEqual({ kind: "clean" });
+    expect(writes).toHaveLength(1);
+  });
+
+  it("shows the conflict notice when something is back at the page's path", async () => {
+    const { saver, lastNotice } = await missingPage();
+
+    const restored = await saver.restore(() =>
+      Promise.reject(new IpcError("conflict", "Something is at the page's path again.")),
+    );
+
+    expect(restored).toBe(false);
+    expect(lastNotice()).toEqual({ kind: "conflict" });
+  });
+});
+
+describe("outside changes", () => {
+  const theirs: PageText = { text: "# Kesh\ntheirs\n", version: "theirs" };
+
+  /** A saver whose reads answer `read`, and the texts it reloaded into the editor. */
+  function outside(
+    read: () => Promise<PageText>,
+    write?: (call: Write) => Promise<{ version: string }>,
+  ) {
+    const parts = saverOf(page, { read, write });
+    const reloads: string[] = [];
+    const check = () =>
+      parts.saver.outsideChange((text) => {
+        reloads.push(text);
+        return true;
+      });
+    return { ...parts, reloads, check };
+  }
+
+  it("reload a page without unsaved edits, which then has nothing to save", async () => {
+    const { saver, writes, reloads, check } = outside(() => Promise.resolve(theirs));
+
+    expect(await check()).toEqual({ kind: "reloaded" });
+
+    expect(reloads).toEqual([theirs.text]);
+    expect(await saver.flush()).toEqual({ kind: "clean" });
+    saver.changed("# Kesh\ntheirs\nmine");
+    await saver.flush();
+    expect(writes).toEqual([{ text: "# Kesh\ntheirs\nmine", version: "theirs" }]);
+  });
+
+  it("ignore a page whose version equals the one last read or saved", async () => {
+    const { reloads, lastNotice, check } = outside(() => Promise.resolve(page));
+
+    expect(await check()).toEqual({ kind: "unchanged" });
+
+    expect(reloads).toEqual([]);
+    expect(lastNotice()).toBeNull();
+  });
+
+  it("show the conflict notice on a page with unsaved edits, which pauses autosave", async () => {
+    const { saver, writes, reloads, lastNotice, check } = outside(() => Promise.resolve(theirs));
+    saver.changed("# Kesh\nmine");
+
+    expect(await check()).toEqual({ kind: "notice" });
+
+    expect(reloads).toEqual([]);
+    expect(lastNotice()).toEqual({ kind: "conflict" });
+    await vi.advanceTimersByTimeAsync(autosaveDelay * 2);
+    expect(writes).toEqual([]);
+  });
+
+  it("read the page only after a save in flight has settled", async () => {
+    const answer = deferred<{ version: string }>();
+    const reads: string[] = [];
+    const { saver, reloads, check } = outside(
+      () => {
+        reads.push("read");
+        return Promise.resolve({ text: "# Kesh\nA", version: "v1" });
+      },
+      () => answer.promise,
+    );
+    saver.changed("# Kesh\nA");
+    const saving = saver.flush();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const checking = check();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toEqual([]);
+
+    answer.resolve({ version: "v1" });
+    await saving;
+    // The change it was told of is its own save, whose version it now holds.
+    expect(await checking).toEqual({ kind: "unchanged" });
+    expect(reads).toEqual(["read"]);
+    expect(reloads).toEqual([]);
+  });
+
+  it("show the conflict notice, not a reload, when typing happens while the page is read", async () => {
+    const read = deferred<PageText>();
+    let reading = false;
+    const { saver, reloads, lastNotice, check } = outside(() => {
+      reading = true;
+      return read.promise;
+    });
+
+    const checking = check();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reading).toBe(true);
+    saver.changed("# Kesh\ntyped meanwhile");
+    read.resolve(theirs);
+
+    expect(await checking).toEqual({ kind: "notice" });
+    expect(reloads).toEqual([]);
+    expect(lastNotice()).toEqual({ kind: "conflict" });
+  });
+
+  it("show the missing-page notice for a page deleted on disk", async () => {
+    const { saver, lastNotice, check } = outside(() => Promise.reject(gone));
+
+    expect(await check()).toEqual({ kind: "notice" });
+
+    expect(lastNotice()).toEqual({ kind: "missing" });
+    expect(await saver.flush()).toEqual({ kind: "missing" });
+  });
+
+  it("keep unsaved text read-only under the notice of a page that is no longer UTF-8", async () => {
+    const notUtf8 = new IpcError("not_utf8", "The page is not UTF-8 text.");
+    const edited = outside(() => Promise.reject(notUtf8));
+    const unedited = outside(() => Promise.reject(notUtf8));
+    edited.saver.changed("# Kesh\nmine");
+
+    expect(await edited.check()).toEqual({ kind: "notice" });
+    expect(await unedited.check()).toEqual({
+      kind: "unreadable",
+      status: "not_utf8",
+      message: "The page is not UTF-8 text.",
+    });
+
+    expect(edited.lastNotice()).toEqual({
+      kind: "not_utf8",
+      message: "The page is not UTF-8 text.",
+    });
+    expect(isReadOnlyNotice(edited.lastNotice())).toBe(true);
+    expect(await edited.saver.flush()).toEqual({
+      kind: "failed",
+      reason: "The page is not UTF-8 text.",
+    });
+    expect(edited.writes).toEqual([]);
+    expect(unedited.lastNotice()).toBeNull();
   });
 });
 

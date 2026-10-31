@@ -2,6 +2,8 @@ mod error;
 mod recent;
 mod world;
 
+use std::sync::Arc;
+
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use error::{AppError, ErrorKind, guard};
@@ -19,11 +21,16 @@ pub fn run() {
         }))
         .manage(world::WorldState::default())
         .setup(|app| {
+            let state = app.state::<world::WorldState>();
             // Without an app data folder, the recent list stays empty and is never saved.
             if let Ok(folder) = app.path().app_data_dir() {
-                app.state::<world::WorldState>()
-                    .set_recent(recent::Recent::load(&folder));
+                state.set_recent(recent::Recent::load(&folder));
             }
+            let handle = app.handle().clone();
+            // An event the webview cannot take changes nothing in the core.
+            state.set_events(Arc::new(move |event: world::WorldEvent| {
+                let _ = handle.emit(event.name(), &event);
+            }));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -44,6 +51,8 @@ pub fn run() {
             world::world_tree,
             world::page_read,
             world::page_write,
+            world::page_compare,
+            world::page_restore,
             world::page_create,
             world::folder_create,
             world::world_new_location,

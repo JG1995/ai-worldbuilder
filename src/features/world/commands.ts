@@ -44,6 +44,25 @@ export const pageRead = (path: string) => invokeCommand<PageText>("page_read", {
 export const pageWrite = (path: string, text: string, version: string) =>
   invokeCommand<{ version: string }>("page_write", { path, text, version });
 
+/** One line of a page on disk compared with the editor's text. */
+export type DiffLine = {
+  /** `added`: only in the editor's text; `removed`: only on disk. */
+  kind: "same" | "added" | "removed";
+  text: string;
+};
+
+/** Compares the page on disk with the editor's text, line by line. */
+export const pageCompare = (path: string, text: string) =>
+  invokeCommand<{ version: string; lines: DiffLine[] }>("page_compare", { path, text });
+
+/**
+ * Writes the editor's text back to a page deleted or moved outside the application, recreating its
+ * folders, and returns the version of its bytes. Rejects with `conflict` when something is at its
+ * path again.
+ */
+export const pageRestore = (path: string, text: string) =>
+  invokeCommand<{ version: string }>("page_restore", { path, text });
+
 /**
  * Creates an empty page `{name}.md` in `folder`, or at the world's top level when it is null, and
  * returns its path. Rejects with `invalid_name` or `exists`, whose message names the broken rule.
@@ -89,3 +108,16 @@ export const appClose = () => invokeCommand<null>("app_close");
 
 /** The core asks the interface to save and then call `appClose`: the user closed the window. */
 export const closeRequestedEvent = "app:close-requested";
+
+/**
+ * The watcher's events. Each carries the session of the opening it belongs to, so events from a
+ * world that is no longer open can be told apart.
+ */
+export type WorldEvents = {
+  /** Entries were created, removed or renamed (`tree`), or the pages at `pages` changed on disk. */
+  "world:changed": { session: number; tree: boolean; pages: string[] };
+  /** The world's folder is gone. */
+  "world:missing": { session: number };
+  /** The watcher could not start or stopped working. */
+  "world:watch-failed": { session: number; message: string };
+};

@@ -2,6 +2,7 @@ import { EditorView } from "@codemirror/view";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecentWorld } from "../../ui/WelcomeScreen";
 import { closeRequestedEvent, type WorldOpened } from "./commands";
@@ -97,6 +98,28 @@ describe("launching", () => {
     );
     expect(argsOf(calls, "page_read")).toEqual([{ path: "Places/Kesh Tor.md" }]);
     expect(screen.queryByRole("button", { name: "Open world…" })).not.toBeInTheDocument();
+  });
+
+  it("restores once per page load though StrictMode runs the launch twice, so the world's events count", async () => {
+    let restores = 0;
+    const calls = mockWorldIpc({
+      world_restore: (): WorldOpened => ({ ...testWorld, session: ++restores }),
+    });
+
+    render(
+      <StrictMode>
+        <QueryClientProvider client={new QueryClient()}>
+          <World />
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+    expect(await screen.findByRole("tree", { name: testWorld.name })).toBeInTheDocument();
+    await act(() => emit("world:watch-failed", { session: 1, message: "Too many watches." }));
+
+    expect(
+      await screen.findByText("Outside changes may not appear until the world is reopened."),
+    ).toBeInTheDocument();
+    expect(commandsOf(calls).filter((command) => command === "world_restore")).toHaveLength(1);
   });
 
   it('shows "No worlds yet." when nothing is stored', async () => {

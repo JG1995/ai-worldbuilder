@@ -56,6 +56,59 @@ pub fn existing_folder(root: &Path, relative: Option<&str>) -> Result<PathBuf, A
     Ok(path)
 }
 
+/// Where a page that is gone can be written back: the absolute path of the page at `relative`
+/// inside `root`, and the folders above it that are missing, outermost first, for the caller to
+/// create. Each existing folder on the way must be a real folder, not a link, and the page itself
+/// must be absent: anything at its path is a `conflict`.
+pub fn restorable_page(root: &Path, relative: &str) -> Result<(PathBuf, Vec<PathBuf>), AppError> {
+    let segments = segments(relative)?;
+    let Some((page_name, folders)) = segments.split_last() else {
+        return Err(invalid_path());
+    };
+    if !is_page_name(page_name) {
+        return Err(invalid_path());
+    }
+    check_root(root)?;
+    let mut path = root.to_path_buf();
+    let mut missing = Vec::new();
+    for folder in folders {
+        path.push(folder);
+        if !missing.is_empty() {
+            missing.push(path.clone());
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(entry) if entry.file_type().is_symlink() => return Err(invalid_path()),
+            Ok(entry) if entry.is_dir() => {}
+            Ok(_) => {
+                return Err(AppError::new(
+                    ErrorKind::Io,
+                    "A file is in the way of the page's folder.",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => missing.push(path.clone()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    path.push(page_name);
+    if missing.is_empty() {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(page_is_back()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok((path, missing))
+}
+
+/// Something is at the path of a page that was gone, so writing it back would replace it.
+pub fn page_is_back() -> AppError {
+    AppError::new(
+        ErrorKind::Conflict,
+        "Something is at the page's path again, so it was not restored.",
+    )
+}
+
 /// Checks that the world's folder still exists. It may be a link, because the user picked it.
 pub fn check_root(root: &Path) -> Result<(), AppError> {
     match fs::metadata(root) {

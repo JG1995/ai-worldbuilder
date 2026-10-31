@@ -1,5 +1,6 @@
 import { undo } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PageTab } from "./PageTab";
@@ -13,7 +14,11 @@ function renderPage() {
     ...testWorld,
     workspace: { tabs: [path], active: path, expanded: [], treeWidth: 264 },
   });
-  render(<PageTab path={path} session={testWorld.session} onClose={vi.fn()} />);
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <PageTab path={path} session={testWorld.session} onClose={vi.fn()} />
+    </QueryClientProvider>,
+  );
   return screen.findByRole("textbox", { name: "Overview" });
 }
 
@@ -110,5 +115,77 @@ describe("the conflict notice", () => {
     expect(writesOf(calls)).toHaveLength(1);
     undo(editorOf(textbox));
     expect(editorOf(textbox).state.doc.toString()).toBe("# Overview\nMine");
+  });
+
+  it("offers Compare, which shows the diff in place of the editor and resolves with Keep mine", async () => {
+    const { calls, notice } = await conflictedPage();
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Compare" }));
+
+    const compare = await screen.findByRole("region", { name: "Compare" });
+    expect(screen.queryByRole("textbox", { name: "Overview" })).not.toBeInTheDocument();
+    const compared = calls
+      .filter(({ command }) => command === "page_compare")
+      .map(({ args }) => args);
+    expect(compared).toEqual([{ path, text: "# Overview\nMine" }]);
+    fireEvent.click(within(compare).getByRole("button", { name: "Keep mine" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.queryByRole("region", { name: "Compare" })).not.toBeInTheDocument();
+    expect(writesOf(calls).at(-1)).toEqual({ path, text: "# Overview\nMine", version: "theirs" });
+  });
+
+  it("resolves from Compare with Load theirs, reading the version on disk then", async () => {
+    const { textbox, notice } = await conflictedPage();
+    fireEvent.click(within(notice).getByRole("button", { name: "Compare" }));
+
+    fireEvent.click(
+      within(await screen.findByRole("region", { name: "Compare" })).getByRole("button", {
+        name: "Load theirs",
+      }),
+    );
+
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(textbox).toHaveTextContent("# Overview.md changed elsewhere");
+  });
+});
+
+describe("the missing-page notice", () => {
+  /** A page whose save finds it deleted on disk. */
+  async function missingPage(overrides: Parameters<typeof mockWorldIpc>[0] = {}) {
+    const calls = mockWorldIpc({
+      page_write: () => {
+        throw { kind: "not_found", message: "The page or folder does not exist." };
+      },
+      ...overrides,
+    });
+    const textbox = await renderPage();
+    typeAtEnd(textbox, "Mine");
+    await saveNow();
+    const notice = screen.getByRole("alert");
+    expect(notice).toHaveTextContent("This page was deleted or moved outside Grimoire.md.");
+    return { calls, textbox, notice };
+  }
+
+  it("keeps the text read-only, and Restore writes it back", async () => {
+    const { calls, textbox, notice } = await missingPage();
+    expect(textbox).toHaveAttribute("aria-readonly", "true");
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Restore" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(
+      calls.filter(({ command }) => command === "page_restore").map(({ args }) => args),
+    ).toEqual([{ path, text: "# Overview\nMine" }]);
+    expect(textbox).not.toHaveAttribute("aria-readonly");
+  });
+
+  it("closes the tab with Close, discarding the text without saving", async () => {
+    const { calls, notice } = await missingPage();
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Close" }));
+
+    expect(useWorldStore.getState().tabs).toEqual([]);
+    expect(writesOf(calls)).toHaveLength(1);
   });
 });
