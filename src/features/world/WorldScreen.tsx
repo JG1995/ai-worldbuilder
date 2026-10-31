@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef } from "react";
+import { flushSync } from "react-dom";
 import type { IpcError } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { FileTree, type TreeEntry, type TreeNameInput } from "../../ui/FileTree";
@@ -103,12 +104,24 @@ export function WorldScreen({
   }
 
   function activateTab(path: string) {
+    // Ctrl/Cmd+Tab in the editor switches pages; focus then moves to the new page's editor.
+    const fromEditor = document.activeElement?.closest(".page-editor") != null;
     flushActiveBefore(path);
-    activate(path);
+    activate(path, { focusEditor: fromEditor });
   }
 
   async function closeTabSaved(path: string) {
     if (await confirmSaved(path)) closeTab(path);
+  }
+
+  /**
+   * Closes the active page from its own notice, saving first unless the text is discarded. Focus
+   * then moves to the tab that takes its place, as after the tab strip's close button.
+   */
+  async function closeFromPage(path: string, { save }: { save: boolean }) {
+    if (save && !(await confirmSaved(path))) return;
+    flushSync(() => closeTab(path));
+    document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
   }
 
   /** Opens a page from the tree. Replacing the active tab's page closes that page, saving first. */
@@ -299,7 +312,13 @@ export function WorldScreen({
             )}
             <div className="min-h-0 flex-1">
               {active ? (
-                <PageTab key={active} path={active} session={session} onClose={closePage} />
+                <PageTab
+                  key={active}
+                  path={active}
+                  session={session}
+                  onClose={(path) => void closeFromPage(path, { save: true })}
+                  onDiscard={(path) => void closeFromPage(path, { save: false })}
+                />
               ) : (
                 <NoPageOpen onNewPage={() => startNew("page")} />
               )}

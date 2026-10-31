@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import { createRef } from "react";
 import { expect, it, vi } from "vitest";
 import { CompareView } from "./CompareView";
 import type { DiffLine } from "./commands";
@@ -12,8 +13,16 @@ const lines: DiffLine[] = [
 
 function renderCompare() {
   const actions = { onKeepMine: vi.fn(), onLoadTheirs: vi.fn(), onClose: vi.fn() };
-  render(<CompareView path="Kesh.md" text={"# Kesh\nMine\n"} {...actions} />);
-  return actions;
+  const firstActionRef = createRef<HTMLButtonElement>();
+  render(
+    <CompareView
+      firstActionRef={firstActionRef}
+      path="Kesh.md"
+      text={"# Kesh\nMine\n"}
+      {...actions}
+    />,
+  );
+  return { ...actions, firstActionRef };
 }
 
 it("shows each line with its marker and colour, removed lines struck through", async () => {
@@ -40,12 +49,14 @@ it("shows each line with its marker and colour, removed lines struck through", a
   expect(within(rows[2]).getByText("+")).toHaveClass("text-success");
 });
 
-it("offers Keep mine, Load theirs and a way back to the editor", async () => {
+it("offers Keep mine, Load theirs and a way back to the editor, with Keep mine first", async () => {
   mockWorldIpc({ page_compare: () => ({ version: "theirs", lines }) });
   const actions = renderCompare();
   const compare = screen.getByRole("region", { name: "Compare" });
+  const keepMine = within(compare).getByRole("button", { name: "Keep mine" });
 
-  fireEvent.click(within(compare).getByRole("button", { name: "Keep mine" }));
+  expect(actions.firstActionRef.current).toBe(keepMine);
+  fireEvent.click(keepMine);
   fireEvent.click(within(compare).getByRole("button", { name: "Load theirs" }));
   fireEvent.click(within(compare).getByRole("button", { name: "Back to editing" }));
 

@@ -187,7 +187,9 @@ describe("creating pages and folders", () => {
     fireEvent.click(screen.getByRole("button", { name: "World menu" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "New world…" }));
     const dialog = await screen.findByRole("dialog", { name: "New world" });
-    expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveFocus();
+    await waitFor(() =>
+      expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveFocus(),
+    );
 
     pressShortcut("n");
     pressShortcut("N", { shiftKey: true });

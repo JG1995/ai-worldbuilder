@@ -140,7 +140,11 @@ pub fn start(
 /// reads and metadata changes, every path with a segment that confinement refuses (which covers
 /// `.obsidian` and the write path's temporary files), and every path for which `is_own` says that
 /// it still holds what the application last wrote there.
-pub fn changes(root: &Path, events: &[DebouncedEvent], is_own: impl Fn(&str) -> bool) -> Changes {
+pub fn changes(
+    root: &Path,
+    events: &[DebouncedEvent],
+    mut is_own: impl FnMut(&str) -> bool,
+) -> Changes {
     let mut changes = Changes::default();
     for event in events {
         let structural = match event.kind {

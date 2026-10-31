@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { IpcError } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { Notice } from "../../ui/Notice";
@@ -19,6 +20,8 @@ type PageTabProps = {
   session: number;
   /** Closes the tab, saving first. */
   onClose: (path: string) => void;
+  /** Closes the tab without saving, dropping the text. */
+  onDiscard: (path: string) => void;
 };
 
 /**
@@ -35,23 +38,26 @@ function reportingMissingWorld<T>(session: number, command: Promise<T>) {
 }
 
 /** One open page: it reads the page when it is loading and shows its editor or its notice. */
-export function PageTab({ path, session, onClose }: PageTabProps) {
+export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
-  // Only a page the user just created takes focus, so opening any other page leaves focus where
-  // it was.
-  const justCreated = useWorldStore((store) => store.createdPage === path);
-  const { setPage, setEditor, setNotice, createdPageShown, closeTab } = useWorldStore.getState();
+  // Only a page the user just created, or switched to from another page's editor, takes focus, so
+  // opening any other page leaves focus where it was.
+  const focusEditor = useWorldStore((store) => store.createdPage === path);
+  const { setPage, setEditor, setNotice, createdPageShown } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const [comparing, setComparing] = useState(false);
+  const compareAction = useRef<HTMLButtonElement>(null);
   const title = pageNameOf(path);
   const loading = page?.status === "loading";
   const ready = page?.status === "ready";
+  // Compare closes with its conflict, so a later conflict shows its notice until Compare is pressed.
+  if (comparing && !(ready && page.notice?.kind === "conflict")) setComparing(false);
 
   // The editor has focused itself as it mounted, which runs before this effect.
   useEffect(() => {
-    if (ready && justCreated) createdPageShown();
-  }, [ready, justCreated, createdPageShown]);
+    if (ready && focusEditor) createdPageShown();
+  }, [ready, focusEditor, createdPageShown]);
 
   useEffect(() => {
     if (!loading) return;
@@ -91,13 +97,25 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
 
   if (page?.status === "ready") {
     const { saver, notice, view } = page;
-    const showingCompare = comparing && notice?.kind === "conflict";
+    /** Opens Compare and focuses its first action, because the pressed Compare button goes away. */
+    const openCompare = () => {
+      flushSync(() => setComparing(true));
+      compareAction.current?.focus();
+    };
+    /**
+     * Shows the editor again if Compare hid it, and focuses it: the notice or Compare button that
+     * was pressed goes away with the notice.
+     */
+    const backToEditor = () => {
+      flushSync(() => setComparing(false));
+      view?.current?.focus();
+    };
     const keepMine = () => {
-      setComparing(false);
+      backToEditor();
       void saver.keepMine();
     };
     const loadTheirs = () => {
-      setComparing(false);
+      backToEditor();
       void saver.loadTheirs((text) => {
         // The tab may have stopped showing the page while its text was read.
         if (!view?.current) return false;
@@ -106,6 +124,7 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
       });
     };
     const restore = async () => {
+      backToEditor();
       const restored = await saver.restore((page, text) =>
         reportingMissingWorld(session, pageRestore(page, text)),
       );
@@ -119,33 +138,34 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
           notice && (
             <SaveNoticeBar
               notice={notice}
-              comparing={showingCompare}
+              comparing={comparing}
               onRetry={() => saver.flush()}
               onKeepMine={keepMine}
               onLoadTheirs={loadTheirs}
-              onCompare={() => setComparing(true)}
+              onCompare={openCompare}
               onRestore={() => void restore()}
-              onDiscard={() => closeTab(path)}
+              onDiscard={() => onDiscard(path)}
               onClose={() => onClose(path)}
             />
           )
         }
       >
-        {showingCompare && (
+        {comparing && (
           <CompareView
+            firstActionRef={compareAction}
             path={path}
             text={saver.text()}
             onKeepMine={keepMine}
             onLoadTheirs={loadTheirs}
-            onClose={() => setComparing(false)}
+            onClose={backToEditor}
           />
         )}
         {/* Hidden, not unmounted, while Compare shows, so Load theirs can still replace its text. */}
-        <div hidden={showingCompare}>
+        <div hidden={comparing}>
           <MarkdownEditor
             state={page.editor}
             readOnly={changingWorld || isReadOnlyNotice(notice)}
-            autoFocus={justCreated}
+            autoFocus={focusEditor}
             viewRef={view}
             onChange={(editor) => saver.changed(editor.doc)}
             onUnmount={(editor) => setEditor(session, path, editor)}

@@ -42,7 +42,10 @@ type WorldStore = {
   selectedFolder: string | null;
   /** The tree's inline name input for a new page or folder, while it is open. */
   nameInput: TreeNameInput | null;
-  /** A page just created, whose editor takes focus when it first shows. */
+  /**
+   * A page whose editor takes focus when it first shows: one just created, or one switched to
+   * while focus was in another page's editor.
+   */
   createdPage: string | null;
   expanded: ReadonlySet<string>;
   treeWidth: number;
@@ -62,7 +65,8 @@ type WorldStore = {
   setChangingWorld: (changing: boolean) => void;
   /** Opens a page in the active tab, or in a new tab when asked or when no tab is active. */
   openPage: (path: string, options: { newTab: boolean }) => void;
-  activate: (path: string) => void;
+  /** Makes a page the active tab; with `focusEditor`, its editor takes focus when it shows. */
+  activate: (path: string, options?: { focusEditor?: boolean }) => void;
   closeTab: (path: string) => void;
   /** Expands or collapses a folder, and selects it. */
   toggleFolder: (path: string, open: boolean) => void;
@@ -200,12 +204,12 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     activate(path);
   },
 
-  activate: (path) =>
+  activate: (path, { focusEditor = false } = {}) =>
     set(({ expanded, createdPage }) => ({
       active: path,
       selectedFolder: null,
       // A created page left before its editor showed no longer takes focus when it shows.
-      createdPage: createdPage === path ? createdPage : null,
+      createdPage: focusEditor || createdPage === path ? path : null,
       expanded: withAncestors(expanded, path),
     })),
 
