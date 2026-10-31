@@ -32,10 +32,13 @@ export function isReadOnlyNotice(notice: SaveNotice | null) {
 /** Why a page that was deleted or moved on disk cannot be saved, as the failed-save dialog says. */
 export const missingReason = "The page no longer exists on disk.";
 
-/** What the saver needs from outside: the core's commands and a place to show its notice. */
+/**
+ * What the saver needs from outside: the core's commands and a place to show its notice. A write
+ * from Keep mine sets `keepMine`.
+ */
 export type SaverPorts = {
   read: (path: string) => Promise<PageText>;
-  write: (path: string, text: string, version: string) => Promise<PageVersion>;
+  write: (path: string, text: string, version: string, keepMine: boolean) => Promise<PageVersion>;
   notify: (notice: SaveNotice | null) => void;
 };
 
@@ -100,7 +103,7 @@ export class PageSaver {
   /** Saves the latest text now, after any save already running. */
   flush(): Promise<SaveResult> {
     this.cancelTimer();
-    return this.enqueue(() => this.save());
+    return this.enqueue(() => this.save(false));
   }
 
   /** Resolves a conflict by writing the editor's text over the page as it is on disk now. */
@@ -111,7 +114,7 @@ export class PageSaver {
       if (!current) return;
       this.saved = current;
       this.setNotice(null);
-      await this.save();
+      await this.save(true);
     });
   }
 
@@ -230,7 +233,7 @@ export class PageSaver {
     // A save in conflict or on a read-only page writes nothing, so it needs no guard here.
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.enqueue(() => this.save());
+      void this.enqueue(() => this.save(false));
     }, autosaveDelay);
   }
 
@@ -245,7 +248,8 @@ export class PageSaver {
     return run;
   }
 
-  private async save(): Promise<SaveResult> {
+  /** Saves the latest text; `keepMine` is set when Keep mine writes it over the page on disk. */
+  private async save(keepMine: boolean): Promise<SaveResult> {
     const notice = this.notice;
     if (this.disposed) return { kind: "clean" };
     if (notice?.kind === "conflict") return { kind: "conflict" };
@@ -259,7 +263,7 @@ export class PageSaver {
       return { kind: "clean" };
     }
     try {
-      const { version } = await this.ports.write(this.path, text, this.saved.version);
+      const { version } = await this.ports.write(this.path, text, this.saved.version, keepMine);
       this.saved = { text, version };
       this.setNotice(null);
       return { kind: "saved" };

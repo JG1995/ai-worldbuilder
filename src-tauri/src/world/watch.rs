@@ -17,8 +17,9 @@ use super::paths::{is_allowed_name, is_page_name};
 /// How long the folder must be quiet before a burst of changes is reported as one batch.
 const SETTLE_TIME: Duration = Duration::from_millis(500);
 
-/// What the watcher tells the interface. Each event carries the session of the opening it belongs
-/// to, so the interface can ignore events from a world that is no longer open.
+/// What the watcher, and the world's history, tell the interface. Each event carries the session of
+/// the opening it belongs to, so the interface can ignore events from a world that is no longer
+/// open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum WorldEvent {
@@ -32,6 +33,12 @@ pub enum WorldEvent {
     Missing { session: u64 },
     /// The watcher could not start or stopped working.
     WatchFailed { session: u64, message: String },
+    /// The world's changes are not being recorded in its history, for the reason in `message`.
+    HistoryNotRecording { session: u64, message: String },
+    /// The world's changes are being recorded again.
+    HistoryRecording { session: u64 },
+    /// The world's history database was damaged, so it was set aside and a new one started.
+    HistorySetAside { session: u64 },
 }
 
 impl WorldEvent {
@@ -41,6 +48,9 @@ impl WorldEvent {
             Self::Changed { .. } => "world:changed",
             Self::Missing { .. } => "world:missing",
             Self::WatchFailed { .. } => "world:watch-failed",
+            Self::HistoryNotRecording { .. } => "world:history-not-recording",
+            Self::HistoryRecording { .. } => "world:history-recording",
+            Self::HistorySetAside { .. } => "world:history-set-aside",
         }
     }
 }

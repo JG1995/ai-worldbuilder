@@ -23,6 +23,7 @@ similar = "^3.2.1"
 tauri-plugin-single-instance = "^2.5.5"
 notify = "^8.2.1"
 notify-debouncer-full = "^0.7.0"
+rusqlite = { version = "^0.41.1", features = ["bundled"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "^0.9.12"
