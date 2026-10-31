@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!pnpm-lock.yaml", "!src/assets/brand/*.svg"]
+    "includes": ["**", "!pnpm-lock.yaml", "!src/assets/brand/*.svg", "!src/types/generated"]
   },
   "formatter": {
     "indentStyle": "space",

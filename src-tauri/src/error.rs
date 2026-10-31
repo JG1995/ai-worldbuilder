@@ -5,6 +5,7 @@ use serde::Serialize;
 
 /// Stable error categories that the interface can branch on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     Internal,

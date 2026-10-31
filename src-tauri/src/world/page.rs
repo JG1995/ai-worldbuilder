@@ -13,8 +13,11 @@ const BYTE_ORDER_MARK: &str = "\u{feff}";
 
 /// A page's text as the editor shows it, with the version of the bytes it came from.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct PageText {
+    /// With `\n` line endings and no byte-order mark.
     pub text: String,
+    /// An opaque token for the page's bytes on disk.
     pub version: String,
 }
 
@@ -89,6 +92,7 @@ pub fn rebuild(current: &[u8], text: &str) -> Result<Vec<u8>, AppError> {
 
 /// Whether a line of a comparison is on both sides, only in the editor's text, or only on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum LineKind {
     Same,
@@ -96,7 +100,9 @@ pub enum LineKind {
     Removed,
 }
 
+/// One line of a page on disk compared with the editor's text.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct DiffLine {
     pub kind: LineKind,
     pub text: String,

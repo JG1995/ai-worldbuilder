@@ -2,7 +2,15 @@
 // `ipc.ts` loads this module behind `import.meta.env.DEV`, and `tools/check-dist.mjs` fails the
 // check if the marker below, which every version token carries, appears in a production bundle.
 import type { InvokeArgs } from "@tauri-apps/api/core";
-import type { DiffLine, PageText, RecentWorld, TreeEntry, WorldOpened } from "@/types/api";
+import type {
+  Comparison,
+  DiffLine,
+  PageText,
+  PageVersion,
+  RecentWorld,
+  TreeEntry,
+  WorldOpened,
+} from "@/types/api";
 
 const previewMarker = "0.0.0-preview.sample-data";
 
@@ -304,7 +312,7 @@ export const previewFixtures: Record<string, unknown> = {
     return { text, version: versionOf(open, path) };
   },
   // Keeps saved text for as long as the preview page stays loaded.
-  page_write: (args?: InvokeArgs): { version: string } => {
+  page_write: (args?: InvokeArgs): PageVersion => {
     const { open, path, text } = pageText(args);
     const { text: edited, version } = args as { text: string; version: string };
     if (version !== versionOf(open, path)) {
@@ -324,7 +332,7 @@ export const previewFixtures: Record<string, unknown> = {
   },
   // The preview simulates no outside changes, so neither is reached from its pages; both answer
   // like the core.
-  page_compare: (args?: InvokeArgs): { version: string; lines: DiffLine[] } => {
+  page_compare: (args?: InvokeArgs): Comparison => {
     const { open, path, text } = pageText(args);
     const { text: mine } = args as { text: string };
     return { version: versionOf(open, path), lines: compareLines(text, mine) };

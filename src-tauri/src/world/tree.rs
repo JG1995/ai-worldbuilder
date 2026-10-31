@@ -13,14 +13,16 @@ use super::paths::{check_root, is_allowed_name, is_page_name};
 use crate::error::AppError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
     Folder,
     Page,
 }
 
-/// One listed entry, in the shape of the interface's `TreeEntry`.
+/// A page or folder in the world's tree.
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct TreeEntry {
     /// Relative to the world, with `/` separators. A page's path keeps its extension.
     pub path: String,
@@ -29,6 +31,7 @@ pub struct TreeEntry {
     pub kind: EntryKind,
     /// A folder's entries; absent for a page.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub children: Option<Vec<TreeEntry>>,
 }
 

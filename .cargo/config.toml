@@ -1,0 +1,6 @@
+# Where ts-rs writes the interface's types when the Rust tests run (`pnpm bindings`). Cargo reads
+# this file from the directory it runs in or one above it, so it sits at the repository root.
+[env]
+TS_RS_EXPORT_DIR = { value = "src/types/generated", relative = true }
+# Sessions are u64 in Rust and stay far below 2^53, so they are plain numbers in TypeScript.
+TS_RS_LARGE_INT = "number"

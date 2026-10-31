@@ -1,7 +1,10 @@
 import { invokeCommand } from "@/lib/ipc";
 import type {
-  DiffLine,
+  Comparison,
+  NewEntry,
+  NewLocation,
   PageText,
+  PageVersion,
   RecentWorld,
   TreeEntry,
   Workspace,
@@ -26,11 +29,11 @@ export const pageRead = (path: string) => invokeCommand<PageText>("page_read", {
  * `version`, and returns the version of the bytes it now has. Rejects with `conflict` otherwise.
  */
 export const pageWrite = (path: string, text: string, version: string) =>
-  invokeCommand<{ version: string }>("page_write", { path, text, version });
+  invokeCommand<PageVersion>("page_write", { path, text, version });
 
 /** Compares the page on disk with the editor's text, line by line. */
 export const pageCompare = (path: string, text: string) =>
-  invokeCommand<{ version: string; lines: DiffLine[] }>("page_compare", { path, text });
+  invokeCommand<Comparison>("page_compare", { path, text });
 
 /**
  * Writes the editor's text back to a page deleted or moved outside the application, recreating its
@@ -38,24 +41,24 @@ export const pageCompare = (path: string, text: string) =>
  * path again.
  */
 export const pageRestore = (path: string, text: string) =>
-  invokeCommand<{ version: string }>("page_restore", { path, text });
+  invokeCommand<PageVersion>("page_restore", { path, text });
 
 /**
  * Creates an empty page `{name}.md` in `folder`, or at the world's top level when it is null, and
  * returns its path. Rejects with `invalid_name` or `exists`, whose message names the broken rule.
  */
 export const pageCreate = (folder: string | null, name: string) =>
-  invokeCommand<{ path: string }>("page_create", { folder, name });
+  invokeCommand<NewEntry>("page_create", { folder, name });
 
 /** Creates an empty folder as `pageCreate` creates a page. */
 export const folderCreate = (folder: string | null, name: string) =>
-  invokeCommand<{ path: string }>("folder_create", { folder, name });
+  invokeCommand<NewEntry>("folder_create", { folder, name });
 
 /** Forgets any location picked before and returns the default one for a new world, to show. */
-export const worldNewLocation = () => invokeCommand<{ location: string }>("world_new_location");
+export const worldNewLocation = () => invokeCommand<NewLocation>("world_new_location");
 
 /** Shows the folder dialog for the new world's location; null when the user cancels. */
-export const worldNewBrowse = () => invokeCommand<{ location: string } | null>("world_new_browse");
+export const worldNewBrowse = () => invokeCommand<NewLocation | null>("world_new_browse");
 
 /** Creates an empty folder `name` at the new world's location and opens it as the world. */
 export const worldCreate = (name: string) => invokeCommand<WorldOpened>("world_create", { name });

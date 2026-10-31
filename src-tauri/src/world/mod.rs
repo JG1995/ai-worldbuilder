@@ -65,6 +65,7 @@ struct OpenWorld {
 
 /// A page on disk compared with the editor's text.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Comparison {
     version: String,
     lines: Vec<DiffLine>,
@@ -72,12 +73,14 @@ pub struct Comparison {
 
 /// Where New world will create its folder, as a path to show.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct NewLocation {
     location: String,
 }
 
 /// The result of opening a world.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct WorldOpened {
     name: String,
     /// Increases with every open, so the interface can tell one opening from the next.
