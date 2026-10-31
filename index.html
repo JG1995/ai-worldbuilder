@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Grimoire.md</title>
+    <!--
+      Tauri gives this empty element the per-load style nonce, which it also adds to style-src.
+      The editor (src/features/editor/MarkdownEditor.tsx) reads it, so CodeMirror's own style
+      element carries the nonce. Keep the element empty: Vite processes one with content.
+    -->
+    <style></style>
   </head>
 
   <body>

@@ -13,11 +13,11 @@ for (const [colorScheme, background] of [
   ["dark", windowDark],
   ["light", windowLight],
 ] as const) {
-  test(`the placeholder follows the OS colour mode: ${colorScheme}`, async ({ page }) => {
+  test(`the welcome screen follows the OS colour mode: ${colorScheme}`, async ({ page }) => {
     await page.emulateMedia({ colorScheme });
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: "Grimoire.md" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open world…" })).toBeVisible();
     expect(await bodyBackground(page)).toBe(background);
   });
 }

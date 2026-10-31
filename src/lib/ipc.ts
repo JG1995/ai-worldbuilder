@@ -26,7 +26,13 @@ export async function invokeCommand<T>(name: string, args?: InvokeArgs): Promise
     if (!Object.hasOwn(previewFixtures, name)) {
       throw new IpcError("ipc", `The browser preview has no sample data for command "${name}".`);
     }
-    return previewFixtures[name] as T;
+    // A fixture is a value, or a function of the arguments that may throw like the core.
+    const fixture = previewFixtures[name];
+    try {
+      return (typeof fixture === "function" ? await fixture(args) : fixture) as T;
+    } catch (rejection) {
+      throw toIpcError(rejection);
+    }
   }
 
   throw new IpcError("ipc", `Command "${name}" is only available in the Grimoire.md app.`);

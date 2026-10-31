@@ -33,13 +33,13 @@ Build Windows installers from a separate clone of the repository on the Windows 
 ## Commands
 
 - `pnpm install` installs dependencies.
-- `pnpm dev` runs the interface alone in a browser preview, answering Rust commands with development-only sample data.
+- `pnpm dev` runs the interface alone in a browser preview, answering Rust commands with development-only sample data. It starts on the welcome screen, where Open world… opens a sample world at once, without a folder dialog.
 - `pnpm tauri dev` runs the desktop application in development mode.
 - `pnpm check` runs every check: Biome, `tsc`, secretlint, the production build and its check for sample data, the showcase and inlined assets, Vitest, the Playwright tests, `cargo fmt --check`, `cargo clippy` and `cargo test`. It stops at the first failing check.
 - `pnpm icons` rebuilds the bundled icon font and `src/ui/icon-glyphs.ts` from the names in `src/ui/icon-names.json`. It needs [pipx](https://pipx.pypa.io/) and network access, because it fetches fonttools from PyPI.
 - `pnpm tauri build` builds unsigned installers for the current OS into `src-tauri/target/release/bundle/`.
 
-In development, `/showcase.html` on the dev server shows the design foundation: the colour, type, spacing and shape tokens, the icons and the logo, and every shared control and surface in its states, with a switch between the OS, dark and light colour modes. `/showcase.html#sample-world` shows the composed sample screen. Under `pnpm tauri dev`, the placeholder screen links to the showcase. Production builds never include it.
+In development, `/showcase.html` on the dev server shows the design foundation: the colour, type, spacing and shape tokens, the icons and the logo, and every shared control and surface in its states, with a switch between the OS, dark and light colour modes. `/showcase.html#sample-world` shows the composed sample screen. In development builds, a Showcase link in the top right corner of the welcome screen opens it. Production builds never include it.
 
 ## Continuous integration and releases
 
