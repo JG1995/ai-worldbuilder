@@ -212,6 +212,33 @@ describe("switching from the world menu", () => {
   });
 });
 
+describe("history notices", () => {
+  const notRecording =
+    "Changes to this world are not being recorded in history and cannot be undone. The disk is full.";
+  const setAside =
+    "This world's earlier history could not be read and was set aside. New changes are recorded.";
+
+  it("show on the world screen with their reason and go when the world closes", async () => {
+    mockWorldIpc();
+    await openOverview();
+
+    await act(() =>
+      emit("world:history-not-recording", { session: 1, message: "The disk is full." }),
+    );
+    await act(() => emit("world:history-set-aside", { session: 1 }));
+
+    // Warnings are announced as they appear.
+    expect((await screen.findByText(notRecording)).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByText(setAside).closest('[role="alert"]')).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "World menu" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Close world" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));
+    expect(await screen.findByRole("tree", { name: testWorld.name })).toBeInTheDocument();
+    expect(screen.queryByText(notRecording)).not.toBeInTheDocument();
+    expect(screen.queryByText(setAside)).not.toBeInTheDocument();
+  });
+});
+
 describe("closing the window", () => {
   const requestClose = () => act(() => emit(closeRequestedEvent));
 

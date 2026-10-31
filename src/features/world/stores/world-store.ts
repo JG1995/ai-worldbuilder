@@ -34,8 +34,11 @@ export function unreadablePage({ kind, message }: IpcError): PageStatus {
   return kind === "not_utf8" ? { status: "not_utf8" } : { status: "read_error", message };
 }
 
-/** What the open world shows above the page region, about the world as a whole. */
-export type WorldNotice = "missing" | "watch_failed";
+/**
+ * What the open world shows above the page region, about the world as a whole, until it closes.
+ * `history_set_aside`: the world's damaged history was set aside and a new one started.
+ */
+export type WorldNotice = "missing" | "watch_failed" | "history_set_aside";
 
 type WorldStore = {
   world: { name: string; session: number } | null;
@@ -60,6 +63,8 @@ type WorldStore = {
   treeOverlayOpen: boolean;
   pages: Readonly<Record<string, PageStatus>>;
   worldNotices: ReadonlySet<WorldNotice>;
+  /** Why the world's changes are not being recorded in its history, while they are not. */
+  historyNotRecording: string | null;
   /** Oldest first. */
   toasts: Toast[];
   /**
@@ -105,6 +110,8 @@ type WorldStore = {
   setNotice: (session: number, path: string, notice: SaveNotice | null) => void;
   /** Shows a world-level notice until the world closes; ignored once that world is not open. */
   showWorldNotice: (session: number, notice: WorldNotice) => void;
+  /** Shows why changes are not being recorded, or hides it with null once they are again. */
+  setHistoryNotRecording: (session: number, reason: string | null) => void;
   showToast: (session: number, message: string) => void;
   dismissToast: (id: string) => void;
   /** Saves an open page's edits now. A page without an editor has none. */
@@ -125,6 +132,7 @@ const closedWorld = {
   treeOverlayOpen: false,
   pages: {},
   worldNotices: new Set<WorldNotice>(),
+  historyNotRecording: null,
   toasts: [],
 };
 
@@ -291,6 +299,9 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
         ? { worldNotices: new Set([...worldNotices, notice]) }
         : {},
     ),
+
+  setHistoryNotRecording: (session, historyNotRecording) =>
+    set(({ world }) => (world?.session === session ? { historyNotRecording } : {})),
 
   showToast: (session, message) =>
     set(({ world, toasts }) =>

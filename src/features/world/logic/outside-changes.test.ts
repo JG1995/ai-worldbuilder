@@ -193,6 +193,33 @@ describe("world-level notices", () => {
     ).toBeInTheDocument();
   });
 
+  it("show and hide the history's, holding a newer session's until it opens and ignoring an earlier one's", async () => {
+    const notRecording = /^Changes to this world are not being recorded in history/;
+    const setAside = /^This world's earlier history could not be read and was set aside/;
+    mockDisk(overview);
+    renderWorld();
+    const open = await screen.findByRole("button", { name: "Open world…" });
+
+    // Sent while the world opens, before the interface knows its session.
+    await act(() =>
+      emit("world:history-not-recording", { session: 1, message: "The disk is full." }),
+    );
+    fireEvent.click(open);
+
+    expect(await screen.findByText(notRecording)).toHaveTextContent(
+      "cannot be undone. The disk is full.",
+    );
+    await act(() => emit("world:history-recording", { session: 0 }));
+    await act(() => emit("world:history-set-aside", { session: 0 }));
+    expect(screen.getByText(notRecording)).toBeInTheDocument();
+    expect(screen.queryByText(setAside)).not.toBeInTheDocument();
+
+    await act(() => emit("world:history-recording", { session: 1 }));
+    await act(() => emit("world:history-set-aside", { session: 1 }));
+    await waitFor(() => expect(screen.queryByText(notRecording)).not.toBeInTheDocument());
+    expect(screen.getByText(setAside)).toBeInTheDocument();
+  });
+
   it("show a world whose folder is gone, with Close world", async () => {
     const calls = mockDisk(overview);
     await openWorld();

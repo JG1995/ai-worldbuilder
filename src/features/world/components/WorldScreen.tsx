@@ -69,6 +69,7 @@ export function WorldScreen({
   const treeWidth = useWorldStore((store) => store.treeWidth);
   const treeOverlayOpen = useWorldStore((store) => store.treeOverlayOpen);
   const worldNotices = useWorldStore((store) => store.worldNotices);
+  const historyNotRecording = useWorldStore((store) => store.historyNotRecording);
   const toasts = useWorldStore((store) => store.toasts);
   const {
     openPage,
@@ -304,6 +305,18 @@ export function WorldScreen({
           {worldNotices.has("watch_failed") && (
             <Notice status="warning">
               Outside changes may not appear until the world is reopened.
+            </Notice>
+          )}
+          {historyNotRecording !== null && (
+            <Notice status="warning">
+              Changes to this world are not being recorded in history and cannot be undone.{" "}
+              {historyNotRecording}
+            </Notice>
+          )}
+          {worldNotices.has("history_set_aside") && (
+            <Notice status="warning">
+              This world's earlier history could not be read and was set aside. New changes are
+              recorded.
             </Notice>
           )}
           {tree.isError && !worldMissing && (

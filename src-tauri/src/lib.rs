@@ -1,4 +1,5 @@
 mod error;
+mod history;
 #[cfg(target_os = "linux")]
 mod theme;
 mod world;

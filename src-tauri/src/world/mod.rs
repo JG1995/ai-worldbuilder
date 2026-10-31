@@ -13,16 +13,18 @@ mod write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
+use crate::history::{self, History};
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
 pub use watch::{EventSink, WorldEvent};
-use write::{NewEntry, OwnWrites, PageVersion};
+use write::{NewEntry, OwnWrites, PageVersion, Recorder, Recording};
 
 const APP_TITLE: &str = "Grimoire.md";
 /// The limits on a workspace from the interface: the tree width range of `src/ui/Shell.tsx`, and
@@ -49,6 +51,9 @@ struct Inner {
     /// The recent worlds. They change under the same lock as `world`, so the list and the open
     /// world always agree.
     recent: Recent,
+    /// The app data folder, which holds each world's history. Without it, as in most tests, no
+    /// history is kept.
+    app_data: Option<PathBuf>,
     /// The folder New world creates its folder in, once the user has picked one with Browse….
     new_location: Option<PathBuf>,
 }
@@ -59,8 +64,31 @@ struct OpenWorld {
     recent_id: Option<String>,
     /// What the application wrote in it, so the watcher leaves those writes out.
     own_writes: OwnWrites,
+    /// Its history, or `None` when there is no app data folder or the history could not open.
+    history: Option<History>,
+    /// Whether its writes are being recorded, as the interface was last told.
+    recording: bool,
     /// Lives exactly as long as this opening: replacing or clearing the open world drops it.
     _watcher: Option<watch::Watcher>,
+}
+
+impl OpenWorld {
+    /// Takes in what became of a write's record in the opening `session`, and returns the event
+    /// that tells the interface when recording stopped or started again. It is sent once per change
+    /// of state, not once per write.
+    fn recorded(&mut self, outcome: Recording, session: u64) -> Option<WorldEvent> {
+        match outcome {
+            Recording::Recorded if !self.recording => {
+                self.recording = true;
+                Some(WorldEvent::HistoryRecording { session })
+            }
+            Recording::Failed(message) if self.recording => {
+                self.recording = false;
+                Some(WorldEvent::HistoryNotRecording { session, message })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A page on disk compared with the editor's text.
@@ -89,9 +117,12 @@ pub struct WorldOpened {
 }
 
 impl WorldState {
-    /// Loads the recent worlds kept in the app data folder, at launch.
+    /// Loads the recent worlds kept in the app data folder, at launch, and keeps the folder for
+    /// the worlds' histories.
     pub fn load_recent(&self, app_data: &Path) {
-        self.lock().recent = Recent::load(app_data);
+        let mut inner = self.lock();
+        inner.recent = Recent::load(app_data);
+        inner.app_data = Some(app_data.to_path_buf());
     }
 
     /// Takes where the watcher sends its events, once, at launch.
@@ -104,8 +135,8 @@ impl WorldState {
     }
 
     /// Opens the folder at `root`, replacing the open world, unless the folder cannot be read. The
-    /// world moves to the top of the recent list and opens with its stored workspace, and a new
-    /// watcher starts for it.
+    /// world moves to the top of the recent list and opens with its stored workspace and its
+    /// history, and a new watcher starts for it.
     fn open(&self, root: PathBuf) -> Result<WorldOpened, AppError> {
         fs::read_dir(&root)?;
         let name = root.file_name().map_or_else(
@@ -114,27 +145,54 @@ impl WorldState {
         );
         let (session, stored) = {
             let mut inner = self.lock();
-            // The old world's watcher stops before the session changes.
+            // The old world's watcher stops and its history closes before the session changes.
             inner.world = None;
             inner.session += 1;
-            let watcher = self.watch(&root, inner.session);
+            let session = inner.session;
+            let watcher = self.watch(&root, session);
             let recent_id = inner.recent.opened(&root, &name);
             let stored = recent_id
                 .as_deref()
                 .and_then(|id| inner.recent.workspace(id));
+            let (history, recording) = match &inner.app_data {
+                Some(app_data) => self.open_history(app_data, &root, session),
+                None => (None, false),
+            };
             inner.world = Some(OpenWorld {
                 root: root.clone(),
                 recent_id,
                 own_writes: OwnWrites::default(),
+                history,
+                recording,
                 _watcher: watcher,
             });
-            (inner.session, stored)
+            (session, stored)
         };
         Ok(WorldOpened {
             name,
             session,
             workspace: stored.map_or_else(Workspace::default, |stored| existing_in(&root, stored)),
         })
+    }
+
+    /// Opens the history of the world at `root` for the opening `session`, resolving the records
+    /// that writes left pending with what is on disk now, and removing changes past retention. It
+    /// tells the interface when a damaged history was set aside, or when changes are not being
+    /// recorded, and returns the history with whether it records.
+    fn open_history(&self, app_data: &Path, root: &Path, session: u64) -> (Option<History>, bool) {
+        let opened = History::open(app_data, root, now(), |path| state_on_disk(root, path));
+        if let Some(sink) = self.events.get() {
+            if opened.set_aside {
+                sink(WorldEvent::HistorySetAside { session });
+            }
+            if let Some(failure) = &opened.not_recording {
+                sink(WorldEvent::HistoryNotRecording {
+                    session,
+                    message: failure.reason().to_owned(),
+                });
+            }
+        }
+        (opened.history, opened.not_recording.is_none())
     }
 
     /// Opens a world from the recent list: `not_found` for an id that is not in it, and
@@ -239,9 +297,9 @@ impl WorldState {
     /// Holds the world lock while the entry is created, so it never overlaps a write.
     fn create_entry(
         &self,
-        create: impl FnOnce(&Path, &mut OwnWrites) -> Result<NewEntry, AppError>,
+        create: impl FnOnce(&Path, &mut OwnWrites, &mut Recorder) -> Result<NewEntry, AppError>,
     ) -> Result<NewEntry, AppError> {
-        self.with_world(|world| create(&world.root, &mut world.own_writes))
+        self.with_world(create)
     }
 
     fn tree(&self) -> Result<Vec<TreeEntry>, AppError> {
@@ -261,16 +319,23 @@ impl WorldState {
         })
     }
 
-    /// Holds the world lock for the whole write, so writes never overlap.
-    fn write_page(&self, path: &str, text: &str, version: &str) -> Result<PageVersion, AppError> {
-        self.with_world(|world| {
-            write::write_page(&world.root, &mut world.own_writes, path, text, version)
+    /// Holds the world lock for the whole write, so writes never overlap. Keep mine sets
+    /// `keep_mine`, which records the save as Keep mine's.
+    fn write_page(
+        &self,
+        path: &str,
+        text: &str,
+        version: &str,
+        keep_mine: bool,
+    ) -> Result<PageVersion, AppError> {
+        self.with_world(|root, own, recorder| {
+            write::write_page(root, own, recorder, path, text, version, keep_mine)
         })
     }
 
     /// Writes a page that is gone back, under the world lock like a save.
     fn restore_page(&self, path: &str, text: &str) -> Result<PageVersion, AppError> {
-        self.with_world(|world| write::restore_page(&world.root, &mut world.own_writes, path, text))
+        self.with_world(|root, own, recorder| write::restore_page(root, own, recorder, path, text))
     }
 
     fn root(&self) -> Result<PathBuf, AppError> {
@@ -279,13 +344,25 @@ impl WorldState {
         Ok(world.root.clone())
     }
 
-    /// Runs `write` on the open world with the world lock held.
+    /// Runs `write` on the open world's folder with the world lock held, so the write and its
+    /// record in history happen together, in the order of writes. When the record failed while the
+    /// opening was recording, or succeeded while it was not, the interface is told.
     fn with_world<T>(
         &self,
-        write: impl FnOnce(&mut OpenWorld) -> Result<T, AppError>,
+        write: impl FnOnce(&Path, &mut OwnWrites, &mut Recorder) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let mut inner = self.lock();
-        write(inner.world.as_mut().ok_or_else(no_world)?)
+        let session = inner.session;
+        let world = inner.world.as_mut().ok_or_else(no_world)?;
+        let mut recorder = Recorder::new(world.history.as_mut(), now());
+        let result = write(&world.root, &mut world.own_writes, &mut recorder);
+        let outcome = recorder.outcome();
+        if let Some(event) = world.recorded(outcome, session)
+            && let Some(sink) = self.events.get()
+        {
+            sink(event);
+        }
+        result
     }
 
     /// Starts the watcher for the opening `session` of the world at `root`. Its batches are read
@@ -355,15 +432,16 @@ pub async fn page_read(state: State<'_, WorldState>, path: String) -> Result<Pag
 }
 
 /// Saves the editor's text to a page if the page still has the bytes of `version`, and returns the
-/// version of the bytes it now has.
+/// version of the bytes it now has. Keep mine sets `keep_mine`, so history records it as such.
 #[tauri::command]
 pub async fn page_write(
     state: State<'_, WorldState>,
     path: String,
     text: String,
     version: String,
+    keep_mine: bool,
 ) -> Result<PageVersion, AppError> {
-    guard(|| state.write_page(&path, &text, &version))
+    guard(|| state.write_page(&path, &text, &version, keep_mine))
 }
 
 /// Compares a page on disk with the editor's text, line by line.
@@ -395,7 +473,9 @@ pub async fn page_create(
     name: String,
 ) -> Result<NewEntry, AppError> {
     guard(|| {
-        state.create_entry(|root, own| write::create_page(root, own, folder.as_deref(), &name))
+        state.create_entry(|root, own, recorder| {
+            write::create_page(root, own, recorder, folder.as_deref(), &name)
+        })
     })
 }
 
@@ -407,7 +487,9 @@ pub async fn folder_create(
     name: String,
 ) -> Result<NewEntry, AppError> {
     guard(|| {
-        state.create_entry(|root, own| write::create_folder(root, own, folder.as_deref(), &name))
+        state.create_entry(|root, own, recorder| {
+            write::create_folder(root, own, recorder, folder.as_deref(), &name)
+        })
     })
 }
 
@@ -570,6 +652,26 @@ fn no_world() -> AppError {
     AppError::new(ErrorKind::NoWorld, "No world is open.")
 }
 
+/// What is at `relative` in the world at `root` now, for history's recovery. A path that
+/// confinement refuses, or that cannot be read, counts as absent.
+fn state_on_disk(root: &Path, relative: &str) -> history::State {
+    if let Ok(page) = paths::existing_page(root, relative) {
+        return fs::read(page).map_or(history::State::Absent, history::State::Page);
+    }
+    if paths::existing_folder(root, Some(relative)).is_ok() {
+        history::State::Folder
+    } else {
+        history::State::Absent
+    }
+}
+
+/// The time in seconds since the Unix epoch.
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 /// Shows the open world's name in the window title, or only the application's name when no world
 /// is open. The core sets the title, because `core:default` does not let the webview do it. A title
 /// that cannot be set changes nothing else, so the command still succeeds.
@@ -648,14 +750,16 @@ mod tests {
         );
         assert_eq!(
             state
-                .write_page("Places/Saltmere.md", "# Saltmere\n", "any")
+                .write_page("Places/Saltmere.md", "# Saltmere\n", "any", false)
                 .unwrap_err()
                 .kind,
             ErrorKind::NoWorld
         );
         assert_eq!(
             state
-                .create_entry(|root, own| write::create_page(root, own, None, "New"))
+                .create_entry(|root, own, recorder| write::create_page(
+                    root, own, recorder, None, "New"
+                ))
                 .unwrap_err()
                 .kind,
             ErrorKind::NoWorld
@@ -678,14 +782,18 @@ mod tests {
             state.read_page("Places/Saltmere.md").map(drop),
             state.compare_page("Places/Saltmere.md", "mine\n").map(drop),
             state
-                .write_page("Places/Saltmere.md", "mine\n", &version)
+                .write_page("Places/Saltmere.md", "mine\n", &version, false)
                 .map(drop),
             state.restore_page("Places/Saltmere.md", "mine\n").map(drop),
             state
-                .create_entry(|root, own| write::create_page(root, own, None, "New"))
+                .create_entry(|root, own, recorder| {
+                    write::create_page(root, own, recorder, None, "New")
+                })
                 .map(drop),
             state
-                .create_entry(|root, own| write::create_folder(root, own, None, "New"))
+                .create_entry(|root, own, recorder| {
+                    write::create_folder(root, own, recorder, None, "New")
+                })
                 .map(drop),
         ]
         .map(|result| result.unwrap_err().kind);
@@ -733,13 +841,22 @@ mod tests {
 
         let page = state.read_page("Places/Saltmere.md").unwrap();
         state
-            .write_page("Places/Saltmere.md", "# Saltmere harbour\n", &page.version)
+            .write_page(
+                "Places/Saltmere.md",
+                "# Saltmere harbour\n",
+                &page.version,
+                false,
+            )
             .unwrap();
         state
-            .create_entry(|root, own| write::create_page(root, own, Some("Places"), "Kesh Tor"))
+            .create_entry(|root, own, recorder| {
+                write::create_page(root, own, recorder, Some("Places"), "Kesh Tor")
+            })
             .unwrap();
         state
-            .create_entry(|root, own| write::create_folder(root, own, None, "Factions"))
+            .create_entry(|root, own, recorder| {
+                write::create_folder(root, own, recorder, None, "Factions")
+            })
             .unwrap();
         fs::write(world.path().join("Sentinel.md"), "").unwrap();
         assert_eq!(
@@ -781,7 +898,9 @@ mod tests {
         state.open(world.path().to_path_buf()).unwrap();
 
         let page = state
-            .create_entry(|root, own| write::create_page(root, own, Some("Places"), "Kesh Tor"))
+            .create_entry(|root, own, recorder| {
+                write::create_page(root, own, recorder, Some("Places"), "Kesh Tor")
+            })
             .unwrap();
 
         assert_eq!(page.path, "Places/Kesh Tor.md");
@@ -863,7 +982,12 @@ mod tests {
         let page = state.read_page("Places/Saltmere.md").unwrap();
 
         let saved = state
-            .write_page("Places/Saltmere.md", "# Saltmere harbour\n", &page.version)
+            .write_page(
+                "Places/Saltmere.md",
+                "# Saltmere harbour\n",
+                &page.version,
+                false,
+            )
             .unwrap();
 
         assert_eq!(
@@ -1074,5 +1198,162 @@ mod tests {
         assert_eq!(kept.expanded, folders[..5_000]);
         assert_eq!(kept.tree_width, 420);
         assert_eq!(narrow.tree_width, 200);
+    }
+
+    mod history {
+        use super::*;
+        use crate::history::testing::{file, stored};
+        use crate::history::{Entry, State};
+
+        /// A world state launched with `app_data`, whose events go to the returned receiver.
+        fn launched_and_watched(app_data: &TempDir) -> (WorldState, mpsc::Receiver<WorldEvent>) {
+            let (state, events) = watched();
+            state.load_recent(app_data.path());
+            (state, events)
+        }
+
+        /// The history events sent so far, in order. They are sent while a command runs, so they
+        /// are all there when it returns.
+        fn history_events(events: &mpsc::Receiver<WorldEvent>) -> Vec<WorldEvent> {
+            events
+                .try_iter()
+                .filter(|event| event.name().starts_with("world:history-"))
+                .collect()
+        }
+
+        /// Saves `text` over the Saltmere page of the open world.
+        fn save(state: &WorldState, text: &str) {
+            let page = state.read_page("Places/Saltmere.md").unwrap();
+            state
+                .write_page("Places/Saltmere.md", text, &page.version, false)
+                .unwrap();
+        }
+
+        #[test]
+        fn a_save_through_the_world_state_records_the_bytes_it_replaced() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            state.open(world.path().to_path_buf()).unwrap();
+
+            save(&state, "# Saltmere harbour\n");
+
+            let changes = stored(app_data.path(), world.path());
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].kind, "edit");
+            assert!(!changes[0].pending);
+            assert_eq!(
+                changes[0].entries[0].entry,
+                Entry {
+                    path: "Places/Saltmere.md".to_owned(),
+                    before: State::Page("\u{feff}# Saltmere\r\n".into()),
+                    after: State::Page("\u{feff}# Saltmere harbour\r\n".into()),
+                }
+            );
+            // The world folder gains nothing of the application's.
+            assert_eq!(fs::read_dir(world.path()).unwrap().count(), 2);
+        }
+
+        #[test]
+        fn opening_tells_the_interface_about_a_damaged_and_a_newer_history() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let database = file(app_data.path(), world.path());
+            fs::create_dir_all(database.parent().unwrap()).unwrap();
+            fs::write(&database, [7u8; 4096]).unwrap();
+            let (state, events) = launched_and_watched(&app_data);
+
+            let damaged = state.open(world.path().to_path_buf()).unwrap().session;
+            assert_eq!(
+                history_events(&events),
+                [WorldEvent::HistorySetAside { session: damaged }]
+            );
+            state.close();
+
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection.pragma_update(None, "user_version", 2).unwrap();
+            drop(connection);
+            let newer = state.open(world.path().to_path_buf()).unwrap().session;
+            assert_eq!(
+                history_events(&events),
+                [WorldEvent::HistoryNotRecording {
+                    session: newer,
+                    message: "The history database is in a newer format than this version of \
+                              Grimoire.md knows."
+                        .to_owned(),
+                }]
+            );
+            // Writes still go ahead.
+            save(&state, "# Saltmere harbour\n");
+            assert!(history_events(&events).is_empty());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_failing_then_working_history_says_so_once_each_way() {
+            use std::os::unix::fs::PermissionsExt;
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            let folder = file(app_data.path(), world.path())
+                .parent()
+                .unwrap()
+                .to_path_buf();
+
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+            save(&state, "# One\n");
+            save(&state, "# Two\n");
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+            save(&state, "# Three\n");
+            save(&state, "# Four\n");
+
+            assert_eq!(
+                history_events(&events),
+                [
+                    WorldEvent::HistoryNotRecording {
+                        session,
+                        message: "The history database cannot be written.".to_owned(),
+                    },
+                    WorldEvent::HistoryRecording { session },
+                ]
+            );
+        }
+
+        #[test]
+        fn a_world_removed_from_the_recent_list_keeps_its_history() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            state.open(world.path().to_path_buf()).unwrap();
+            save(&state, "# Saltmere harbour\n");
+            let id = state.lock().world.as_ref().unwrap().recent_id.clone();
+            state.close();
+
+            state.remove_recent(&id.unwrap());
+            state.open(world.path().to_path_buf()).unwrap();
+
+            assert_eq!(stored(app_data.path(), world.path()).len(), 1);
+        }
+
+        #[test]
+        fn a_moved_world_starts_an_empty_history_and_leaves_the_old_one_unchanged() {
+            let app_data = tempfile::tempdir().unwrap();
+            let parent = tempfile::tempdir().unwrap();
+            let (old, new) = (parent.path().join("Kesh"), parent.path().join("Kesh moved"));
+            fs::create_dir_all(old.join("Places")).unwrap();
+            fs::write(old.join("Places/Saltmere.md"), "# Saltmere\n").unwrap();
+            let state = launched(&app_data);
+            state.open(old.clone()).unwrap();
+            save(&state, "# Saltmere harbour\n");
+            state.close();
+            let old_history = fs::read(file(app_data.path(), &old)).unwrap();
+
+            fs::rename(&old, &new).unwrap();
+            state.open(new.clone()).unwrap();
+
+            assert!(stored(app_data.path(), &new).is_empty());
+            assert_eq!(fs::read(file(app_data.path(), &old)).unwrap(), old_history);
+        }
     }
 }

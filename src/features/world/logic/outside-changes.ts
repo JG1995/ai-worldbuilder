@@ -15,11 +15,12 @@ type WorldEvent = {
 }[keyof WorldEvents];
 
 /**
- * Follows the watcher's events until the returned function is called. An event for the open world
- * refreshes the tree, checks its open pages, or shows a world-level notice; an event from a world
- * that is no longer open is ignored. The core sends an opening's first events, such as a watcher
- * that could not start, while it opens the world, so they can arrive before the interface knows
- * the new session: those wait until that world opens here.
+ * Follows the watcher's and the world history's events until the returned function is called. An
+ * event for the open world refreshes the tree, checks its open pages, or shows or hides a
+ * world-level notice; an event from a world that is no longer open is ignored. The core sends an
+ * opening's first events, such as a watcher that could not start or a history that cannot record,
+ * while it opens the world, so they can arrive before the interface knows the new session: those
+ * wait until that world opens here.
  */
 export function followOutsideChanges(queryClient: QueryClient): () => void {
   /** The session of the latest world opened here; later sessions are still opening. */
@@ -33,7 +34,7 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
   }
 
   function apply(event: WorldEvent) {
-    const { showWorldNotice } = useWorldStore.getState();
+    const { showWorldNotice, setHistoryNotRecording } = useWorldStore.getState();
     switch (event.name) {
       case "world:changed":
         return changed(queryClient, event.payload);
@@ -41,6 +42,12 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
         return showWorldNotice(event.payload.session, "missing");
       case "world:watch-failed":
         return showWorldNotice(event.payload.session, "watch_failed");
+      case "world:history-not-recording":
+        return setHistoryNotRecording(event.payload.session, event.payload.message);
+      case "world:history-recording":
+        return setHistoryNotRecording(event.payload.session, null);
+      case "world:history-set-aside":
+        return showWorldNotice(event.payload.session, "history_set_aside");
     }
   }
 
@@ -61,6 +68,16 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
     ),
     listenEvent<WorldEvents["world:watch-failed"]>("world:watch-failed", (payload) =>
       receive({ name: "world:watch-failed", payload }),
+    ),
+    listenEvent<WorldEvents["world:history-not-recording"]>(
+      "world:history-not-recording",
+      (payload) => receive({ name: "world:history-not-recording", payload }),
+    ),
+    listenEvent<WorldEvents["world:history-recording"]>("world:history-recording", (payload) =>
+      receive({ name: "world:history-recording", payload }),
+    ),
+    listenEvent<WorldEvents["world:history-set-aside"]>("world:history-set-aside", (payload) =>
+      receive({ name: "world:history-set-aside", payload }),
     ),
   ];
 
