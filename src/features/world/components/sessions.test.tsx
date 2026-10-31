@@ -4,10 +4,10 @@ import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RecentWorld } from "../../ui/WelcomeScreen";
-import { closeRequestedEvent, type WorldOpened } from "./commands";
-import { useWorldStore } from "./store";
-import { mockWorldIpc, testWorld } from "./test-ipc";
+import type { RecentWorld, WorldOpened } from "@/types/api";
+import { closeRequestedEvent } from "../api/commands";
+import { mockWorldIpc, testWorld } from "../api/test-ipc";
+import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
 function renderWorld() {
@@ -246,6 +246,26 @@ describe("closing the window", () => {
     expect(commandsOf(calls)).not.toContain("app_close");
 
     await requestClose();
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: '"Overview" could not be saved' }),
+      ).getByRole("button", { name: "Discard changes" }),
+    );
+    await waitFor(() => expect(commandsOf(calls)).toContain("app_close"));
+  });
+
+  it("asks about a page only after the dialog of its closing tab is answered, so one dialog shows at once", async () => {
+    const calls = mockWorldIpc({ page_write: failingWrite });
+    typeAtEnd(await openOverview(), "More");
+    fireEvent.click(screen.getByRole("button", { name: "Close Overview" }));
+    const asked = await screen.findByRole("dialog", { name: '"Overview" could not be saved' });
+
+    await requestClose();
+    // Every command answers within the current task, so a second dialog would show by the next.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(screen.getAllByRole("dialog")).toEqual([asked]);
+    fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
+
     fireEvent.click(
       within(
         await screen.findByRole("dialog", { name: '"Overview" could not be saved' }),

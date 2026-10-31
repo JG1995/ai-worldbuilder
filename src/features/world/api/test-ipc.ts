@@ -3,9 +3,8 @@
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { vi } from "vitest";
-import type { TreeEntry } from "../../ui/FileTree";
-import type { PageText, WorldOpened } from "./commands";
-import { pageNameOf } from "./store";
+import type { PageText, TreeEntry, WorldOpened } from "@/types/api";
+import { pageNameOf } from "../utils/paths";
 
 type Handler = (args: Record<string, unknown>) => unknown;
 

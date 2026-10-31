@@ -1,9 +1,11 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { listenEvent } from "../../lib/ipc";
-import { reloadedState, replaceState } from "../editor/MarkdownEditor";
-import { type WorldEvents, worldTreeKey } from "./commands";
+import { listenEvent } from "@/lib/ipc";
+import type { WorldEvents } from "@/types/api";
+import { reloadedState, replaceState } from "@/ui/MarkdownEditor";
+import { worldTreeKey } from "../api/commands";
+import { unreadablePage, useWorldStore } from "../stores/world-store";
+import { pageNameOf } from "../utils/paths";
 import type { OutsideChange } from "./saving";
-import { pageNameOf, useWorldStore } from "./store";
 
 /** The toast a batch of outside changes shows when it reloaded at least one page. */
 export const reloadToast = "Reloaded: changed outside Grimoire.md";
@@ -20,8 +22,6 @@ type WorldEvent = {
  * the new session: those wait until that world opens here.
  */
 export function followOutsideChanges(queryClient: QueryClient): () => void {
-  let stopped = false;
-  const unlisteners: (() => void)[] = [];
   /** The session of the latest world opened here; later sessions are still opening. */
   let latest = useWorldStore.getState().world?.session ?? 0;
   let early: WorldEvent[] = [];
@@ -52,7 +52,7 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
     for (const event of due) void apply(event);
   });
 
-  const subscriptions = [
+  const unlisteners = [
     listenEvent<WorldEvents["world:changed"]>("world:changed", (payload) =>
       receive({ name: "world:changed", payload }),
     ),
@@ -63,15 +63,8 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
       receive({ name: "world:watch-failed", payload }),
     ),
   ];
-  for (const subscription of subscriptions) {
-    void subscription.then((unlisten) => {
-      if (stopped) unlisten();
-      else unlisteners.push(unlisten);
-    });
-  }
 
   return () => {
-    stopped = true;
     stopFollowingStore();
     for (const unlisten of unlisteners) unlisten();
   };
@@ -105,13 +98,7 @@ async function pageChanged(session: number, path: string): Promise<OutsideChange
   const current = pages[path];
   if (result.kind === "unreadable" && current?.status === "ready" && current.saver === page.saver) {
     page.saver.dispose();
-    setPage(
-      session,
-      path,
-      result.status === "not_utf8"
-        ? { status: "not_utf8" }
-        : { status: "read_error", message: result.message },
-    );
+    setPage(session, path, unreadablePage(result.error));
   }
   return result.kind;
 }

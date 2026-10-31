@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { mockWorldIpc } from "../features/world/test-ipc";
+import { mockWorldIpc } from "@/features/world/api/test-ipc";
 import { App } from "./App";
 
 it("launches on the welcome screen when the core has no world to reopen", async () => {

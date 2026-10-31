@@ -1,10 +1,11 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { Button } from "../ui/Button";
-import { FileTree, type TreeEntry, type TreeNameInput } from "../ui/FileTree";
-import type { MenuItem } from "../ui/Menu";
-import { Notice } from "../ui/Notice";
-import { NoPageOpen, PageView } from "../ui/PageView";
-import { WelcomeScreen } from "../ui/WelcomeScreen";
+import type { TreeEntry } from "@/types/api";
+import { Button } from "@/ui/Button";
+import { FileTree, type TreeNameInput } from "@/ui/FileTree";
+import type { MenuItem } from "@/ui/Menu";
+import { Notice } from "@/ui/Notice";
+import { NoPageOpen, PageView } from "@/ui/PageView";
+import { WelcomeScreen } from "@/ui/WelcomeScreen";
 import {
   largeSampleWorld,
   samplePageParagraphs,

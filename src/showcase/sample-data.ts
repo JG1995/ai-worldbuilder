@@ -1,9 +1,8 @@
 // Sample names and text for the development-only showcase. The build guard in vite.config.ts
 // keeps this module out of production builds.
 
-import type { TreeEntry } from "../ui/FileTree";
-import type { Tab } from "../ui/TabStrip";
-import type { RecentWorld } from "../ui/WelcomeScreen";
+import type { RecentWorld, TreeEntry } from "@/types/api";
+import type { Tab } from "@/ui/TabStrip";
 
 export const sampleWorldName = "Saltmere";
 

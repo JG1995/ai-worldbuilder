@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { FileTree, type TreeEntry } from "./FileTree";
+import type { TreeEntry } from "@/types/api";
+import { FileTree } from "./FileTree";
 
 const entries: TreeEntry[] = [
   {

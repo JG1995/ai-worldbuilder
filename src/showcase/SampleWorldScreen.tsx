@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "../ui/Button";
-import { Dialog } from "../ui/Dialog";
-import { FileTree, type TreeEntry, type TreeNameInput } from "../ui/FileTree";
-import type { MenuItem } from "../ui/Menu";
-import { NoPageOpen, PageView } from "../ui/PageView";
-import { defaultTreeWidth, Shell } from "../ui/Shell";
-import { type Tab, TabStrip } from "../ui/TabStrip";
-import { type Toast, ToastRegion } from "../ui/Toast";
-import { WelcomeScreen } from "../ui/WelcomeScreen";
+import type { TreeEntry } from "@/types/api";
+import { Button } from "@/ui/Button";
+import { Dialog } from "@/ui/Dialog";
+import { FileTree, type TreeNameInput } from "@/ui/FileTree";
+import type { MenuItem } from "@/ui/Menu";
+import { NoPageOpen, PageView } from "@/ui/PageView";
+import { defaultTreeWidth, Shell } from "@/ui/Shell";
+import { type Tab, TabStrip } from "@/ui/TabStrip";
+import { type Toast, ToastRegion } from "@/ui/Toast";
+import { WelcomeScreen } from "@/ui/WelcomeScreen";
 import { closeTab } from "./ShellSections";
 import { ModeSwitch } from "./Showcase";
 import {

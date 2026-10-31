@@ -1,27 +1,27 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
-import { type IpcError, listenEvent } from "../../lib/ipc";
-import { Button } from "../../ui/Button";
-import { Dialog } from "../../ui/Dialog";
-import { WelcomeScreen } from "../../ui/WelcomeScreen";
+import { type IpcError, listenEvent } from "@/lib/ipc";
+import type { WorldOpened } from "@/types/api";
+import { Button } from "@/ui/Button";
+import { Dialog } from "@/ui/Dialog";
+import { WelcomeScreen } from "@/ui/WelcomeScreen";
 import {
   appClose,
   closeRequestedEvent,
   recentList,
   recentListKey,
   recentRemove,
-  type WorldOpened,
   worldClose,
   worldCreate,
   worldOpen,
   worldOpenRecent,
   worldRestore,
   worldTreeKey,
-} from "./commands";
+} from "../api/commands";
+import { followOutsideChanges } from "../logic/outside-changes";
+import { saveWorkspace, useWorldStore } from "../stores/world-store";
 import { useSaveConfirmation } from "./FailedSaveDialog";
 import { NewWorldDialog } from "./NewWorldDialog";
-import { followOutsideChanges } from "./outside-changes";
-import { saveWorkspace, useWorldStore } from "./store";
 import { WorldScreen } from "./WorldScreen";
 
 type Failure = { title: string; message: string };
@@ -151,18 +151,7 @@ export function World() {
     }),
   );
 
-  useEffect(() => {
-    let stop: (() => void) | undefined;
-    let current = true;
-    void listenEvent(closeRequestedEvent, () => void closeWindow()).then((unlisten) => {
-      if (current) stop = unlisten;
-      else unlisten();
-    });
-    return () => {
-      current = false;
-      stop?.();
-    };
-  }, []);
+  useEffect(() => listenEvent(closeRequestedEvent, () => void closeWindow()), []);
 
   const openWorld = () =>
     changeWorld(async () => {
@@ -241,6 +230,7 @@ export function World() {
           onOpenWorld={openWorld}
           onNewWorld={() => setNewWorldOpen(true)}
           onCloseWorld={closeWorld}
+          confirmSaved={confirmSaved}
         />
       );
     }

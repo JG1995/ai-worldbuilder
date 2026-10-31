@@ -84,11 +84,30 @@ describe("listenEvent", () => {
     mockTauri(() => null);
     const handler = vi.fn();
 
-    const unlisten = await listenEvent("world:changed", handler);
-    await emit("world:changed", { session: 1 });
+    const unlisten = listenEvent("world:changed", handler);
+    await vi.waitFor(async () => {
+      await emit("world:changed", { session: 1 });
+      expect(handler).toHaveBeenCalled();
+    });
     unlisten();
     await emit("world:changed", { session: 2 });
 
     expect(handler.mock.calls).toEqual([[{ session: 1 }]]);
+  });
+
+  it("never calls the handler when it stops before listening has started", async () => {
+    mockTauri(() => null);
+    const handler = vi.fn();
+    const later = vi.fn();
+
+    listenEvent("world:changed", handler)();
+    const unlisten = listenEvent("world:changed", later);
+    await vi.waitFor(async () => {
+      await emit("world:changed", { session: 1 });
+      expect(later).toHaveBeenCalled();
+    });
+    unlisten();
+
+    expect(handler).not.toHaveBeenCalled();
   });
 });

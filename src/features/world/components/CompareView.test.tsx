@@ -1,9 +1,9 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createRef } from "react";
 import { expect, it, vi } from "vitest";
+import type { DiffLine } from "@/types/api";
+import { mockWorldIpc } from "../api/test-ipc";
 import { CompareView } from "./CompareView";
-import type { DiffLine } from "./commands";
-import { mockWorldIpc } from "./test-ipc";
 
 const lines: DiffLine[] = [
   { kind: "same", text: "# Kesh" },

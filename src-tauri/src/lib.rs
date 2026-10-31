@@ -1,5 +1,4 @@
 mod error;
-mod recent;
 #[cfg(target_os = "linux")]
 mod theme;
 mod world;
@@ -30,7 +29,7 @@ pub fn run() {
             let state = app.state::<world::WorldState>();
             // Without an app data folder, the recent list stays empty and is never saved.
             if let Ok(folder) = app.path().app_data_dir() {
-                state.set_recent(recent::Recent::load(&folder));
+                state.load_recent(&folder);
             }
             let handle = app.handle().clone();
             // An event the webview cannot take changes nothing in the core.

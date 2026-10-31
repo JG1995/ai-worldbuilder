@@ -1,20 +1,20 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef } from "react";
 import { flushSync } from "react-dom";
-import type { IpcError } from "../../lib/ipc";
-import { Button } from "../../ui/Button";
-import { FileTree, type TreeEntry, type TreeNameInput } from "../../ui/FileTree";
-import type { MenuItem } from "../../ui/Menu";
-import { Notice } from "../../ui/Notice";
-import { NoPageOpen } from "../../ui/PageView";
-import { Shell } from "../../ui/Shell";
-import { TabStrip } from "../../ui/TabStrip";
-import { ToastRegion } from "../../ui/Toast";
-import type { RecentWorld } from "../../ui/WelcomeScreen";
-import { folderCreate, pageCreate, worldTree, worldTreeKey } from "./commands";
-import { useSaveConfirmation } from "./FailedSaveDialog";
+import type { IpcError } from "@/lib/ipc";
+import type { RecentWorld, TreeEntry } from "@/types/api";
+import { Button } from "@/ui/Button";
+import { FileTree, type TreeNameInput } from "@/ui/FileTree";
+import type { MenuItem } from "@/ui/Menu";
+import { Notice } from "@/ui/Notice";
+import { NoPageOpen } from "@/ui/PageView";
+import { Shell } from "@/ui/Shell";
+import { TabStrip } from "@/ui/TabStrip";
+import { ToastRegion } from "@/ui/Toast";
+import { folderCreate, pageCreate, worldTree, worldTreeKey } from "../api/commands";
+import { useWorldStore } from "../stores/world-store";
+import { pageNameOf } from "../utils/paths";
 import { PageTab } from "./PageTab";
-import { pageNameOf, useWorldStore } from "./store";
 
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
@@ -43,6 +43,8 @@ type WorldScreenProps = {
   onOpenWorld: () => void;
   onNewWorld: () => void;
   onCloseWorld: () => void;
+  /** Saves a page, asking with the failed-save dialog while it cannot; false on Cancel. */
+  confirmSaved: (path: string) => Promise<boolean>;
 };
 
 /**
@@ -57,6 +59,7 @@ export function WorldScreen({
   onOpenWorld,
   onNewWorld,
   onCloseWorld,
+  confirmSaved,
 }: WorldScreenProps) {
   const tabs = useWorldStore((store) => store.tabs);
   const active = useWorldStore((store) => store.active);
@@ -92,7 +95,6 @@ export function WorldScreen({
   useEffect(() => {
     if (worldMissing) showWorldNotice(session, "missing");
   }, [worldMissing, session, showWorldNotice]);
-  const { confirmSaved, failedSaveDialog } = useSaveConfirmation();
   /** Where focus was when the name input opened, to return it there when the input closes. */
   const focusBeforeNaming = useRef<Element | null>(null);
   const creating = useRef(false);
@@ -241,92 +243,87 @@ export function WorldScreen({
   const closePage = (path: string) => void closeTabSaved(path);
 
   return (
-    <>
-      <Shell
-        treeWidth={treeWidth}
-        onTreeWidthChange={setTreeWidth}
-        treeOverlayOpen={treeOverlayOpen}
-        onTreeOverlayOpenChange={setTreeOverlayOpen}
-        tree={
-          // Until the first listing arrives, an empty pane, not the empty-world message.
-          tree.isPending ? (
-            <div className="h-full bg-window" />
-          ) : (
-            <FileTree
-              worldName={worldName}
-              entries={tree.data ?? []}
-              expanded={expanded}
-              selected={selectedFolder ?? active ?? undefined}
-              worldMenuItems={worldMenuItems}
-              onWorldMenuSelect={onWorldMenuSelect}
-              contextMenuItems={contextMenuItems}
-              onContextMenuSelect={onContextMenuSelect}
-              nameInput={nameInput ?? undefined}
-              onOpen={(path, { newTab }) => {
-                setTreeOverlayOpen(false);
-                void openFromTree(path, { newTab });
-              }}
-              onToggle={toggleFolder}
-              onNewPage={() => startNew("page")}
-              onNewFolder={() => startNew("folder")}
-              newPageShortcut={newPageShortcut}
-              newFolderShortcut={newFolderShortcut}
-              onNameSubmit={(name) => void submitName(name)}
-              onNameCancel={cancelNew}
-            />
-          )
-        }
-        tabStrip={(treeToggle) => (
-          <TabStrip
-            tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
-            activeId={active ?? undefined}
-            onActivate={activateTab}
-            onClose={closePage}
-            leading={treeToggle}
+    <Shell
+      treeWidth={treeWidth}
+      onTreeWidthChange={setTreeWidth}
+      treeOverlayOpen={treeOverlayOpen}
+      onTreeOverlayOpenChange={setTreeOverlayOpen}
+      tree={
+        // Until the first listing arrives, an empty pane, not the empty-world message.
+        tree.isPending ? (
+          <div className="h-full bg-window" />
+        ) : (
+          <FileTree
+            worldName={worldName}
+            entries={tree.data ?? []}
+            expanded={expanded}
+            selected={selectedFolder ?? active ?? undefined}
+            worldMenuItems={worldMenuItems}
+            onWorldMenuSelect={onWorldMenuSelect}
+            contextMenuItems={contextMenuItems}
+            onContextMenuSelect={onContextMenuSelect}
+            nameInput={nameInput ?? undefined}
+            onOpen={(path, { newTab }) => {
+              setTreeOverlayOpen(false);
+              void openFromTree(path, { newTab });
+            }}
+            onToggle={toggleFolder}
+            onNewPage={() => startNew("page")}
+            onNewFolder={() => startNew("folder")}
+            newPageShortcut={newPageShortcut}
+            newFolderShortcut={newFolderShortcut}
+            onNameSubmit={(name) => void submitName(name)}
+            onNameCancel={cancelNew}
           />
-        )}
-        toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} />}
-        page={
-          <div className="flex h-full flex-col">
-            {worldNotices.has("missing") && (
-              <Notice
-                status="error"
-                actions={
-                  <Button variant="secondary" onClick={onCloseWorld}>
-                    Close world
-                  </Button>
-                }
-              >
-                The world's folder cannot be found.
-              </Notice>
+        )
+      }
+      tabStrip={(treeToggle) => (
+        <TabStrip
+          tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
+          activeId={active ?? undefined}
+          onActivate={activateTab}
+          onClose={closePage}
+          leading={treeToggle}
+        />
+      )}
+      toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} />}
+      page={
+        <div className="flex h-full flex-col">
+          {worldNotices.has("missing") && (
+            <Notice
+              status="error"
+              actions={
+                <Button variant="secondary" onClick={onCloseWorld}>
+                  Close world
+                </Button>
+              }
+            >
+              The world's folder cannot be found.
+            </Notice>
+          )}
+          {worldNotices.has("watch_failed") && (
+            <Notice status="warning">
+              Outside changes may not appear until the world is reopened.
+            </Notice>
+          )}
+          {tree.isError && !worldMissing && (
+            <Notice status="error">The world's pages cannot be listed: {tree.error.message}</Notice>
+          )}
+          <div className="min-h-0 flex-1">
+            {active ? (
+              <PageTab
+                key={active}
+                path={active}
+                session={session}
+                onClose={(path) => void closeFromPage(path, { save: true })}
+                onDiscard={(path) => void closeFromPage(path, { save: false })}
+              />
+            ) : (
+              <NoPageOpen onNewPage={() => startNew("page")} />
             )}
-            {worldNotices.has("watch_failed") && (
-              <Notice status="warning">
-                Outside changes may not appear until the world is reopened.
-              </Notice>
-            )}
-            {tree.isError && !worldMissing && (
-              <Notice status="error">
-                The world's pages cannot be listed: {tree.error.message}
-              </Notice>
-            )}
-            <div className="min-h-0 flex-1">
-              {active ? (
-                <PageTab
-                  key={active}
-                  path={active}
-                  session={session}
-                  onClose={(path) => void closeFromPage(path, { save: true })}
-                  onDiscard={(path) => void closeFromPage(path, { save: false })}
-                />
-              ) : (
-                <NoPageOpen onNewPage={() => startNew("page")} />
-              )}
-            </div>
           </div>
-        }
-      />
-      {failedSaveDialog}
-    </>
+        </div>
+      }
+    />
   );
 }

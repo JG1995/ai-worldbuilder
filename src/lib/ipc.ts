@@ -1,10 +1,12 @@
 import { type InvokeArgs, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ErrorKind } from "@/types/api";
 
 /** A failed command, in the `{ kind, message }` shape the Rust core returns. */
 export class IpcError extends Error {
   constructor(
-    readonly kind: string,
+    /** The core's error kind, or `ipc` when the call never reached the core. */
+    readonly kind: ErrorKind | "ipc",
     message: string,
   ) {
     super(message);
@@ -40,16 +42,24 @@ export async function invokeCommand<T>(name: string, args?: InvokeArgs): Promise
 }
 
 /**
- * Calls `handler` with the payload of each event `name` the Rust core sends, and resolves to the
- * function that stops listening. Outside Tauri no event ever arrives, so it listens to nothing.
+ * Calls `handler` with the payload of each event `name` the Rust core sends, until the returned
+ * function is called. Outside Tauri no event ever arrives, so it listens to nothing.
  */
-export async function listenEvent<T>(
-  name: string,
-  handler: (payload: T) => void,
-): Promise<() => void> {
+export function listenEvent<T>(name: string, handler: (payload: T) => void): () => void {
   if (!isTauri()) return () => {};
-  const unlisten = await listen<T>(name, (event) => handler(event.payload));
-  return () => void unlisten();
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  // Tauri starts listening asynchronously, so a stop that comes first stops it once it has.
+  void listen<T>(name, (event) => {
+    if (!stopped) handler(event.payload);
+  }).then((stop) => {
+    if (stopped) stop();
+    else unlisten = stop;
+  });
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
 }
 
 function toIpcError(rejection: unknown): IpcError {
@@ -61,7 +71,8 @@ function toIpcError(rejection: unknown): IpcError {
     typeof rejection.kind === "string" &&
     typeof rejection.message === "string"
   ) {
-    return new IpcError(rejection.kind, rejection.message);
+    // The core serializes its `ErrorKind`, which `ErrorKind` in src/types/api.ts mirrors.
+    return new IpcError(rejection.kind as ErrorKind, rejection.message);
   }
   const message =
     typeof rejection === "string" ? rejection : (JSON.stringify(rejection) ?? String(rejection));

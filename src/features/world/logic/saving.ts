@@ -1,5 +1,5 @@
-import type { IpcError } from "../../lib/ipc";
-import type { PageText } from "./commands";
+import type { IpcError } from "@/lib/ipc";
+import type { PageText } from "@/types/api";
 
 /** How long typing must pause before a page saves by itself. */
 export const autosaveDelay = 1000;
@@ -51,11 +51,17 @@ export type OutsideChange =
   /** A notice shows over the kept text: the conflict, the missing page, or why it cannot be read. */
   | { kind: "notice" }
   /** The page cannot be read any more and had no unsaved edits, so it needs no editor. */
-  | { kind: "unreadable"; status: "not_utf8" | "read_error"; message: string }
+  | { kind: "unreadable"; error: IpcError }
   | { kind: "world_missing" };
 
 /** An editor document; CodeMirror's `Text` and plain strings both qualify. */
 type Document = { toString(): string };
+
+/** The notice of a page that cannot be read, from the core's error. */
+function readFailureNotice({ kind, message }: IpcError): SaveNotice {
+  if (kind === "not_found") return { kind: "missing" };
+  return kind === "not_utf8" ? { kind: "not_utf8", message } : { kind: "unreadable", message };
+}
 
 /**
  * Saves one open page: about a second after its last change, or at once on `flush`. One save runs
@@ -187,20 +193,12 @@ export class PageSaver {
   }
 
   /** What an outside change does to a page that can no longer be read. */
-  private unreadable({ kind, message }: IpcError): OutsideChange {
+  private unreadable(error: IpcError): OutsideChange {
     if (this.disposed) return { kind: "unchanged" };
-    if (kind === "world_missing") return { kind: "world_missing" };
-    if (kind !== "not_found" && !this.edited()) {
-      return {
-        kind: "unreadable",
-        status: kind === "not_utf8" ? "not_utf8" : "read_error",
-        message,
-      };
-    }
+    if (error.kind === "world_missing") return { kind: "world_missing" };
+    if (error.kind !== "not_found" && !this.edited()) return { kind: "unreadable", error };
     this.cancelTimer();
-    if (kind === "not_found") this.setNotice({ kind: "missing" });
-    else if (kind === "not_utf8") this.setNotice({ kind: "not_utf8", message });
-    else this.setNotice({ kind: "unreadable", message });
+    this.setNotice(readFailureNotice(error));
     return { kind: "notice" };
   }
 
@@ -283,13 +281,10 @@ export class PageSaver {
     try {
       return await this.ports.read(this.path);
     } catch (error) {
-      const { kind, message } = error as IpcError;
+      const failure = error as IpcError;
       this.cancelTimer();
       // While the world's folder is gone, the conflict stays as it is.
-      if (kind === "world_missing") return null;
-      if (kind === "not_found") this.setNotice({ kind: "missing" });
-      else if (kind === "not_utf8") this.setNotice({ kind: "not_utf8", message });
-      else this.setNotice({ kind: "unreadable", message });
+      if (failure.kind !== "world_missing") this.setNotice(readFailureNotice(failure));
       return null;
     }
   }

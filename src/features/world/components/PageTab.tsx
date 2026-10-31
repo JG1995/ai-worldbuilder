@@ -1,15 +1,16 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import type { IpcError } from "../../lib/ipc";
-import { Button } from "../../ui/Button";
-import { Notice } from "../../ui/Notice";
-import { PageView } from "../../ui/PageView";
-import { createPageState, MarkdownEditor, replaceDocument } from "../editor/MarkdownEditor";
+import type { IpcError } from "@/lib/ipc";
+import { Button } from "@/ui/Button";
+import { createPageState, MarkdownEditor, replaceDocument } from "@/ui/MarkdownEditor";
+import { Notice } from "@/ui/Notice";
+import { PageView } from "@/ui/PageView";
+import { pageRead, pageRestore, pageWrite, worldTreeKey } from "../api/commands";
+import { isReadOnlyNotice, PageSaver, type SaveNotice } from "../logic/saving";
+import { unreadablePage, useWorldStore } from "../stores/world-store";
+import { pageNameOf } from "../utils/paths";
 import { CompareView } from "./CompareView";
-import { pageRead, pageRestore, pageWrite, worldTreeKey } from "./commands";
-import { isReadOnlyNotice, PageSaver, type SaveNotice } from "./saving";
-import { pageNameOf, useWorldStore } from "./store";
 
 const notUtf8Text =
   "This page is not UTF-8 text. It cannot be edited here and has not been changed.";
@@ -80,14 +81,7 @@ export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
         });
       },
       (error: IpcError) => {
-        if (!current) return;
-        setPage(
-          session,
-          path,
-          error.kind === "not_utf8"
-            ? { status: "not_utf8" }
-            : { status: "read_error", message: error.message },
-        );
+        if (current) setPage(session, path, unreadablePage(error));
       },
     );
     return () => {

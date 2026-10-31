@@ -2,11 +2,14 @@ import type { EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import type { RefObject } from "react";
 import { create } from "zustand";
-import type { TreeNameInput } from "../../ui/FileTree";
-import { defaultTreeWidth } from "../../ui/Shell";
-import type { Toast } from "../../ui/Toast";
-import { type Workspace, type WorldOpened, workspaceSave } from "./commands";
-import type { PageSaver, SaveNotice, SaveResult } from "./saving";
+import type { IpcError } from "@/lib/ipc";
+import type { Workspace, WorldOpened } from "@/types/api";
+import type { TreeNameInput } from "@/ui/FileTree";
+import { defaultTreeWidth } from "@/ui/Shell";
+import type { Toast } from "@/ui/Toast";
+import { workspaceSave } from "../api/commands";
+import type { PageSaver, SaveNotice, SaveResult } from "../logic/saving";
+import { parentOf } from "../utils/paths";
 
 /**
  * One open page. A ready page keeps its editor state, so switching tabs keeps cursor and undo, and
@@ -25,6 +28,11 @@ export type PageStatus =
     }
   | { status: "not_utf8" }
   | { status: "read_error"; message: string };
+
+/** A page shown without an editor, because the core cannot read it. */
+export function unreadablePage({ kind, message }: IpcError): PageStatus {
+  return kind === "not_utf8" ? { status: "not_utf8" } : { status: "read_error", message };
+}
 
 /** What the open world shows above the page region, about the world as a whole. */
 export type WorldNotice = "missing" | "watch_failed";
@@ -125,17 +133,6 @@ let toastCount = 0;
 
 /** How long after the tabs, the expanded folders or the tree width change the workspace saves. */
 export const workspaceSaveDelay = 500;
-
-/** The page name shown for a path: its last segment without the `.md` extension. */
-export function pageNameOf(path: string) {
-  return (path.split("/").at(-1) ?? path).replace(/\.md$/i, "");
-}
-
-/** The folder that holds `path`, or null at the world's top level. */
-function parentOf(path: string) {
-  const end = path.lastIndexOf("/");
-  return end === -1 ? null : path.slice(0, end);
-}
 
 /** `expanded` with every folder above `path` added. */
 function withAncestors(expanded: ReadonlySet<string>, path: string | null) {

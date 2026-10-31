@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { type RecentWorld, WelcomeScreen } from "./WelcomeScreen";
+import type { RecentWorld } from "@/types/api";
+import { WelcomeScreen } from "./WelcomeScreen";
 
 const recent: RecentWorld[] = [
   { id: "1", name: "Saltmere", path: "/home/gm/worlds/Saltmere", missing: false },
