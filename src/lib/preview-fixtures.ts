@@ -5,10 +5,13 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
   Comparison,
   DiffLine,
+  HistoryVersion,
   PageText,
   PageVersion,
   RecentWorld,
+  RestoredPage,
   TreeEntry,
+  VersionKind,
   WorldOpened,
 } from "@/types/api";
 
@@ -59,12 +62,26 @@ Use \`inline code\` for dice notation such as \`3d6\`.
 /** The page whose saves always fail, so the failed-save notice and dialog can be seen. */
 const lockedPage = "Locations/Locked chronicle.md";
 
-/** A preview world: its pages, the folders created in it, and how often each page was saved. */
+/** A change the preview recorded in a page's history: its text before (null: no page) and after. */
+type PreviewChange = {
+  id: number;
+  path: string;
+  kind: VersionKind;
+  at: number;
+  before: string | null;
+  after: string;
+};
+
+/**
+ * A preview world: its pages, the folders created in it, how often each page was saved, and the
+ * changes recorded in its history, oldest first. Unlike the core, every save is a change of its own.
+ */
 type PreviewWorld = {
   name: string;
   pages: Record<string, SamplePage>;
   folders: Set<string>;
   saves: Record<string, number>;
+  changes: PreviewChange[];
 };
 
 const emptyWorld = (name: string): PreviewWorld => ({
@@ -72,6 +89,7 @@ const emptyWorld = (name: string): PreviewWorld => ({
   pages: {},
   folders: new Set(),
   saves: {},
+  changes: [],
 });
 
 const sampleWorld: PreviewWorld = { ...emptyWorld("The Glass Steppe"), pages: samplePages };
@@ -271,6 +289,48 @@ function compareLines(disk: string, text: string): DiffLine[] {
   return lines;
 }
 
+let changeCount = 0;
+
+/** Records a change of the page at `path` and returns its id. */
+function record(
+  open: PreviewWorld,
+  path: string,
+  kind: VersionKind,
+  before: string | null,
+  after: string,
+) {
+  const id = ++changeCount;
+  open.changes.push({ id, path, kind, at: Math.floor(Date.now() / 1000), before, after });
+  return id;
+}
+
+/**
+ * A page's earlier versions with their texts, newest first, as the core derives them: each change's
+ * text after it, and the text before it, labelled outside, when that is not the text listed last.
+ */
+function versionsOf(open: PreviewWorld, path: string) {
+  const versions: (HistoryVersion & { text: string })[] = [];
+  const push = (id: string, kind: VersionKind, at: number, text: string | null) => {
+    if (text !== null && versions.at(-1)?.text !== text) versions.push({ id, kind, at, text });
+  };
+  for (const change of open.changes.filter((candidate) => candidate.path === path)) {
+    push(`${change.id}-before`, "outside", change.at, change.before);
+    push(`${change.id}-after`, change.kind, change.at, change.after);
+  }
+  return versions.reverse();
+}
+
+/** Puts `text` in the page at `path` like a write of the core's, with a new version. */
+function writeText(open: PreviewWorld, path: string, text: string) {
+  open.pages[path] = text;
+  open.saves[path] = (open.saves[path] ?? 0) + 1;
+}
+
+const conflict = {
+  kind: "conflict",
+  message: "The page changed on disk since it was last read or saved.",
+};
+
 /** Creates an empty page or folder like the core, refusing names that break a rule or clash. */
 function createEntry(args: InvokeArgs | undefined, kind: TreeEntry["kind"]) {
   const open = requireWorld();
@@ -284,8 +344,10 @@ function createEntry(args: InvokeArgs | undefined, kind: TreeEntry["kind"]) {
   const fileName = kind === "page" ? `${name}.md` : name;
   checkFree(namesIn(open, folder), fileName);
   const path = folder === null ? fileName : `${folder}/${fileName}`;
-  if (kind === "page") open.pages[path] = "";
-  else open.folders.add(path);
+  if (kind === "page") {
+    open.pages[path] = "";
+    record(open, path, "new_page", null, "");
+  } else open.folders.add(path);
   return { path };
 }
 
@@ -315,20 +377,63 @@ export const previewFixtures: Record<string, unknown> = {
   page_write: (args?: InvokeArgs): PageVersion => {
     const { open, path, text } = pageText(args);
     const { text: edited, version } = args as { text: string; version: string };
-    if (version !== versionOf(open, path)) {
-      throw {
-        kind: "conflict",
-        message: "The page changed on disk since it was last read or saved.",
-      };
-    }
+    if (version !== versionOf(open, path)) throw conflict;
     if (open === sampleWorld && path === lockedPage) {
       throw { kind: "io", message: "Another program is using the file." };
     }
     if (edited !== text) {
-      open.pages[path] = edited;
-      open.saves[path] = (open.saves[path] ?? 0) + 1;
+      writeText(open, path, edited);
+      record(open, path, "edit", text, edited);
     }
     return { version: versionOf(open, path) };
+  },
+  history_list: (args?: InvokeArgs): HistoryVersion[] => {
+    const { open, path, text } = pageText(args);
+    const versions = versionsOf(open, path);
+    const firstEarlier = versions.findIndex((version) => version.text !== text);
+    return versions
+      .slice(firstEarlier === -1 ? versions.length : firstEarlier)
+      .map(({ id, kind, at }) => ({ id, kind, at }));
+  },
+  history_compare: (args?: InvokeArgs): DiffLine[] => {
+    const { open, path } = pageText(args);
+    const { version, text } = args as { version: string; text: string };
+    const earlier = versionsOf(open, path).find((candidate) => candidate.id === version);
+    if (!earlier) {
+      throw { kind: "not_found", message: "This version is no longer in the page's history." };
+    }
+    return compareLines(earlier.text, text);
+  },
+  history_restore: (args?: InvokeArgs): RestoredPage => {
+    const { open, path, text } = pageText(args);
+    const { version, pageVersion } = args as { version: string; pageVersion: string };
+    if (pageVersion !== versionOf(open, path)) throw conflict;
+    const earlier = versionsOf(open, path).find((candidate) => candidate.id === version);
+    if (!earlier) {
+      throw { kind: "not_found", message: "This version is no longer in the page's history." };
+    }
+    if (earlier.text === text) return { text, version: versionOf(open, path), change: null };
+    writeText(open, path, earlier.text);
+    const change = record(open, path, "restore", text, earlier.text);
+    return { text: earlier.text, version: versionOf(open, path), change: String(change) };
+  },
+  history_undo: (args?: InvokeArgs): RestoredPage => {
+    const open = requireWorld();
+    const { change } = args as { change: string };
+    const undone = open.changes.find((candidate) => String(candidate.id) === change);
+    if (!undone || undone.before === null) {
+      throw { kind: "not_found", message: "This change cannot be undone." };
+    }
+    if (open.pages[undone.path] !== undone.after) {
+      const name = undone.path.split("/").at(-1)?.replace(/\.md$/i, "");
+      throw {
+        kind: "conflict",
+        message: `“${name}” changed since the restore, so nothing was undone. Its history still holds every version.`,
+      };
+    }
+    writeText(open, undone.path, undone.before);
+    const id = record(open, undone.path, "undo", undone.after, undone.before);
+    return { text: undone.before, version: versionOf(open, undone.path), change: String(id) };
   },
   // The preview simulates no outside changes, so neither is reached from its pages; both answer
   // like the core.

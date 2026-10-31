@@ -56,6 +56,18 @@ const defaults: Record<string, Handler> = {
   world_open_recent: (): WorldOpened => ({ ...testWorld, session: 2 }),
   workspace_save: () => null,
   app_close: () => null,
+  history_list: () => [],
+  history_compare: () => [],
+  history_restore: ({ path, version }) => ({
+    text: `# ${pageNameOf(String(path))} as ${String(version)}\n`,
+    version: `version of ${String(path)} restored to ${String(version)}`,
+    change: "restore",
+  }),
+  history_undo: ({ change }) => ({
+    text: `# Undone ${String(change)}\n`,
+    version: `version after undoing ${String(change)}`,
+    change: "undo",
+  }),
 };
 
 function entryPath(folder: unknown, name: string) {

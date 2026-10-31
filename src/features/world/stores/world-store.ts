@@ -40,6 +40,9 @@ export function unreadablePage({ kind, message }: IpcError): PageStatus {
  */
 export type WorldNotice = "missing" | "watch_failed" | "history_set_aside";
 
+/** A toast, with what its action does when it has one. */
+export type WorldToast = Toast & { onAction?: () => void };
+
 type WorldStore = {
   world: { name: string; session: number } | null;
   /** Open pages' paths, in tab order. */
@@ -65,8 +68,10 @@ type WorldStore = {
   worldNotices: ReadonlySet<WorldNotice>;
   /** Why the world's changes are not being recorded in its history, while they are not. */
   historyNotRecording: string | null;
+  /** The path of the active page while its History view shows in place of its editor. */
+  historyPath: string | null;
   /** Oldest first. */
-  toasts: Toast[];
+  toasts: WorldToast[];
   /**
    * True from the start of a world change until it ends: the pages save, then the folder dialog
    * shows. Nothing in the world can be edited or opened meanwhile, because the change drops every
@@ -81,6 +86,8 @@ type WorldStore = {
   /** Makes a page the active tab; with `focusEditor`, its editor takes focus when it shows. */
   activate: (path: string, options?: { focusEditor?: boolean }) => void;
   closeTab: (path: string) => void;
+  /** Shows the History view of `path` while it is the active page, or hides it with null. */
+  showHistory: (path: string | null) => void;
   /** Expands or collapses a folder, and selects it. */
   toggleFolder: (path: string, open: boolean) => void;
   /**
@@ -112,8 +119,15 @@ type WorldStore = {
   showWorldNotice: (session: number, notice: WorldNotice) => void;
   /** Shows why changes are not being recorded, or hides it with null once they are again. */
   setHistoryNotRecording: (session: number, reason: string | null) => void;
-  showToast: (session: number, message: string) => void;
+  /** Shows a toast, with an action such as Undo when `action` is given. */
+  showToast: (
+    session: number,
+    message: string,
+    action?: { label: string; run: () => void },
+  ) => void;
   dismissToast: (id: string) => void;
+  /** Dismisses a toast and runs its action. */
+  runToastAction: (id: string) => void;
   /** Saves an open page's edits now. A page without an editor has none. */
   flush: (path: string) => Promise<SaveResult>;
   /** Stops every page's autosave, and returns the function that resumes it. */
@@ -133,6 +147,7 @@ const closedWorld = {
   pages: {},
   worldNotices: new Set<WorldNotice>(),
   historyNotRecording: null,
+  historyPath: null,
   toasts: [],
 };
 
@@ -210,8 +225,9 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
   },
 
   activate: (path, { focusEditor = false } = {}) =>
-    set(({ expanded, createdPage }) => ({
+    set(({ expanded, createdPage, historyPath }) => ({
       active: path,
+      historyPath: historyPath === path ? historyPath : null,
       selectedFolder: null,
       // A created page left before its editor showed no longer takes focus when it shows.
       createdPage: focusEditor || createdPage === path ? path : null,
@@ -219,7 +235,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     })),
 
   closeTab: (path) =>
-    set(({ tabs, active, pages, expanded, selectedFolder }) => {
+    set(({ tabs, active, pages, expanded, selectedFolder, historyPath }) => {
       const index = tabs.indexOf(path);
       if (index === -1) return {};
       const rest = tabs.filter((tab) => tab !== path);
@@ -228,10 +244,14 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
         tabs: rest,
         active: next,
         selectedFolder: next === active ? selectedFolder : null,
+        historyPath: next === historyPath ? historyPath : null,
         expanded: withAncestors(expanded, next),
         pages: without(pages, path),
       };
     }),
+
+  showHistory: (path) =>
+    set(({ active }) => (path === null || path === active ? { historyPath: path } : {})),
 
   toggleFolder: (path, open) =>
     set(({ expanded }) => {
@@ -303,15 +323,24 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
   setHistoryNotRecording: (session, historyNotRecording) =>
     set(({ world }) => (world?.session === session ? { historyNotRecording } : {})),
 
-  showToast: (session, message) =>
-    set(({ world, toasts }) =>
-      world?.session === session
-        ? { toasts: [...toasts, { id: `toast-${++toastCount}`, message }] }
-        : {},
-    ),
+  showToast: (session, message, action) =>
+    set(({ world, toasts }) => {
+      if (world?.session !== session) return {};
+      const id = `toast-${++toastCount}`;
+      const toast: WorldToast = action
+        ? { id, message, action: action.label, onAction: action.run }
+        : { id, message };
+      return { toasts: [...toasts, toast] };
+    }),
 
   dismissToast: (id) =>
     set(({ toasts }) => ({ toasts: toasts.filter((toast) => toast.id !== id) })),
+
+  runToastAction: (id) => {
+    const toast = get().toasts.find((candidate) => candidate.id === id);
+    get().dismissToast(id);
+    toast?.onAction?.();
+  },
 
   flush: (path) => {
     const page = get().pages[path];

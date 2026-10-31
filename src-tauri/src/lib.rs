@@ -69,6 +69,10 @@ pub fn run() {
             world::world_open_recent,
             world::world_restore,
             world::workspace_save,
+            world::history_list,
+            world::history_compare,
+            world::history_restore,
+            world::history_undo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

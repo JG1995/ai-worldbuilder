@@ -468,3 +468,90 @@ describe("conflicts", () => {
     expect(writes).toHaveLength(1);
   });
 });
+
+describe("replacing the page through a core write", () => {
+  const restored = { text: "# Kesh restored\n", version: "restored", change: "7" };
+
+  /** An editor that records what the saver puts in it. */
+  function editor() {
+    const replaced: string[] = [];
+    const reloaded: string[] = [];
+    return {
+      replaced,
+      reloaded,
+      replace: (text: string) => void replaced.push(text),
+      reload: (text: string) => reloaded.push(text) > 0,
+    };
+  }
+
+  it("saves pending edits first, then writes with the saved version and puts the text in the editor once", async () => {
+    const { saver, writes } = saverOf(page);
+    const target = editor();
+    const savedVersions: string[] = [];
+    saver.subscribe(() => savedVersions.push(saver.savedVersion()));
+    const coreWrites: { version: string; pendingSaved: number }[] = [];
+    saver.changed("# Kesh\nMine");
+
+    const result = await saver.replacePage(async (version) => {
+      coreWrites.push({ version, pendingSaved: writes.length });
+      return restored;
+    }, target);
+
+    expect(writes).toEqual([{ text: "# Kesh\nMine", version: "v0" }]);
+    expect(coreWrites).toEqual([{ version: "v1", pendingSaved: 1 }]);
+    expect(result).toEqual({ kind: "replaced", page: restored });
+    expect(target.replaced).toEqual(["# Kesh restored\n"]);
+    expect(saver.text()).toBe("# Kesh restored\n");
+    expect(savedVersions).toEqual(["v1", "restored"]);
+    // The restored text is the saved text, so nothing is left to save.
+    expect(await saver.flush()).toEqual({ kind: "clean" });
+    expect(writes).toHaveLength(1);
+  });
+
+  it("writes nothing when pending edits cannot be saved", async () => {
+    const { saver, lastNotice } = saverOf(page, {
+      write: () => Promise.reject(new IpcError("io", "The disk is full.")),
+    });
+    const write = vi.fn(async () => restored);
+    saver.changed("# Kesh\nMine");
+
+    expect(await saver.replacePage(write, editor())).toEqual({ kind: "unsaved" });
+    expect(write).not.toHaveBeenCalled();
+    expect(lastNotice()).toEqual({ kind: "failed", reason: "The disk is full." });
+    expect(saver.text()).toBe("# Kesh\nMine");
+  });
+
+  it("leaves the editor's text after a conflict, then follows the outside-change rules", async () => {
+    for (const [onDisk, outside] of [
+      [page, "unchanged"],
+      [{ text: "# Kesh theirs\n", version: "theirs" }, "reloaded"],
+    ] as const) {
+      const { saver } = saverOf(page, { read: async () => onDisk });
+      const target = editor();
+      const refusal = new IpcError("conflict", "“Page” changed since the restore.");
+
+      const result = await saver.replacePage(() => Promise.reject(refusal), target);
+
+      expect(result).toEqual({ kind: "failed", error: refusal, outside: { kind: outside } });
+      expect(target.replaced).toEqual([]);
+      expect(target.reloaded).toEqual(outside === "reloaded" ? ["# Kesh theirs\n"] : []);
+      expect(saver.savedVersion()).toBe(onDisk.version);
+    }
+  });
+
+  it("keeps text typed while the page was written, as a conflict with the page on disk", async () => {
+    const { saver, lastNotice } = saverOf(page);
+    const target = editor();
+    const answer = deferred<typeof restored>();
+
+    const replacing = saver.replacePage(() => answer.promise, target);
+    await vi.advanceTimersByTimeAsync(0);
+    saver.changed("# Kesh\nTyped meanwhile");
+    answer.resolve(restored);
+
+    expect((await replacing).kind).toBe("replaced");
+    expect(target.replaced).toEqual([]);
+    expect(saver.text()).toBe("# Kesh\nTyped meanwhile");
+    expect(lastNotice()).toEqual({ kind: "conflict" });
+  });
+});

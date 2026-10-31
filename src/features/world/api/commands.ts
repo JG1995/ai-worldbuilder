@@ -1,11 +1,14 @@
 import { invokeCommand } from "@/lib/ipc";
 import type {
   Comparison,
+  DiffLine,
+  HistoryVersion,
   NewEntry,
   NewLocation,
   PageText,
   PageVersion,
   RecentWorld,
+  RestoredPage,
   TreeEntry,
   Workspace,
   WorldOpened,
@@ -54,6 +57,32 @@ export const pageCreate = (folder: string | null, name: string) =>
 /** Creates an empty folder as `pageCreate` creates a page. */
 export const folderCreate = (folder: string | null, name: string) =>
   invokeCommand<NewEntry>("folder_create", { folder, name });
+
+/**
+ * A page's earlier versions, newest first, without the newest ones equal to the page on disk.
+ * Rejects with `io` when the page's history cannot be read.
+ */
+export const historyList = (path: string) =>
+  invokeCommand<HistoryVersion[]>("history_list", { path });
+
+/** Compares a version of a page with the editor's text, line by line. */
+export const historyCompare = (path: string, version: string, text: string) =>
+  invokeCommand<DiffLine[]>("history_compare", { path, version, text });
+
+/**
+ * Writes a version's exact bytes back to its page, whose bytes on disk still have `pageVersion`,
+ * and returns the page's new text and version with the change that recorded it, if any. Rejects
+ * with `conflict` when the page changed on disk, and `not_found` for a version history lacks.
+ */
+export const historyRestore = (path: string, version: string, pageVersion: string) =>
+  invokeCommand<RestoredPage>("history_restore", { path, version, pageVersion });
+
+/**
+ * Undoes a restore, the change `change`, writing back the bytes it replaced. Rejects with
+ * `conflict`, whose message names the page, when the page changed since the restore.
+ */
+export const historyUndo = (change: string) =>
+  invokeCommand<RestoredPage>("history_undo", { change });
 
 /** Forgets any location picked before and returns the default one for a new world, to show. */
 export const worldNewLocation = () => invokeCommand<NewLocation>("world_new_location");

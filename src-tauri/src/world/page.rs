@@ -25,13 +25,17 @@ pub struct PageText {
 /// line endings turned into `\n`, as CodeMirror would.
 pub fn read(path: &Path) -> Result<PageText, AppError> {
     let bytes = fs::read(path)?;
-    let version = version_of(&bytes);
-    let text = decode(&bytes)?;
-    let text = text.strip_prefix(BYTE_ORDER_MARK).unwrap_or(text);
     Ok(PageText {
-        text: text.replace("\r\n", "\n").replace('\r', "\n"),
-        version,
+        text: text_of(&bytes)?,
+        version: version_of(&bytes),
     })
+}
+
+/// The editor's text of a page's `bytes`, as `read` gives it.
+pub fn text_of(bytes: &[u8]) -> Result<String, AppError> {
+    let text = decode(bytes)?;
+    let text = text.strip_prefix(BYTE_ORDER_MARK).unwrap_or(text);
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 /// The bytes to write for the editor's `text` (with `\n` line endings) over a page whose bytes are

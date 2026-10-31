@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
+use serde::Serialize;
 
 /// How long saves of one page keep extending the change of its editing session: 5 minutes.
 const SESSION_SECONDS: u64 = 5 * 60;
@@ -41,6 +42,13 @@ impl Failure {
 
     pub fn into_reason(self) -> String {
         self.0
+    }
+}
+
+/// A history that cannot be read or written fails a command that needs it with `io` and the reason.
+impl From<Failure> for crate::error::AppError {
+    fn from(failure: Failure) -> Self {
+        Self::new(crate::error::ErrorKind::Io, failure.0)
     }
 }
 
@@ -98,18 +106,7 @@ pub enum Kind {
     NewFolder,
     RestoredMissing,
     KeepMine,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Restore this version records it from PR page-history"
-        )
-    )]
     Restore,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Undo records it from PR page-history")
-    )]
     Undo,
 }
 
@@ -142,6 +139,47 @@ pub struct Record {
     /// The path of the editing session the write extends, whose bytes wait in `pending_after`.
     extends: Option<String>,
     now: u64,
+}
+
+impl Record {
+    /// The id of the change the write is recorded in.
+    pub fn change(&self) -> i64 {
+        self.change
+    }
+}
+
+/// How an earlier version of a page came about: the kind of the change that wrote it, or
+/// `outside` for text another tool wrote, which one of the application's writes then replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum VersionKind {
+    Edit,
+    NewPage,
+    RestoredMissing,
+    KeepMine,
+    Restore,
+    Undo,
+    Outside,
+}
+
+/// An earlier version of a page, as the History view lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct HistoryVersion {
+    /// An opaque id, which names the change that holds the version and the side it is on.
+    pub id: String,
+    pub kind: VersionKind,
+    /// When the application recorded it, in seconds since the Unix epoch.
+    pub at: u64,
+}
+
+/// Which state of a change a version is: the text it replaced, or the text it left.
+const BEFORE: &str = "before";
+const AFTER: &str = "after";
+
+fn version_id(change: i64, side: &str) -> String {
+    format!("{change}-{side}")
 }
 
 /// The editing session of one path in this opening: the change its saves extend.
@@ -294,6 +332,113 @@ impl History {
         Ok(transaction.commit()?)
     }
 
+    /// The earlier versions of the page at `path`, newest first, each with its bytes: the text
+    /// after each change of the path, and the text a change replaced when it is not the text the
+    /// change before left, labelled `outside`, because another tool wrote it. Absent and folder
+    /// states are no versions, and consecutive identical texts appear once. History follows the
+    /// path, so a page deleted and created again keeps the versions of the one before.
+    ///
+    /// A change still pending, because history failed to complete or abandon it in this opening,
+    /// is listed too, so the bytes it replaced can be restored before the next opening resolves it.
+    pub fn versions(&self, path: &str) -> Result<Vec<(HistoryVersion, Vec<u8>)>, Failure> {
+        let mut statement = self.connection.prepare(
+            "SELECT entries.change_id, changes.kind, changes.started, changes.latest,
+                    before_kind, before_bytes, after_kind, after_bytes
+             FROM entries JOIN changes ON changes.id = entries.change_id
+             WHERE entries.path = ?1 ORDER BY entries.change_id",
+        )?;
+        let rows = statement.query_map([path], |row| {
+            let before: String = row.get(4)?;
+            let after: String = row.get(6)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, i64>(3)? as u64,
+                State::stored(&before, row.get(5)?),
+                State::stored(&after, row.get(7)?),
+            ))
+        })?;
+        let mut versions: Vec<(HistoryVersion, Vec<u8>)> = Vec::new();
+        let mut push = |id: String, kind: VersionKind, at: u64, bytes: Vec<u8>| {
+            if versions.last().is_none_or(|(_, last)| *last != bytes) {
+                versions.push((HistoryVersion { id, kind, at }, bytes));
+            }
+        };
+        for row in rows {
+            let (change, kind, started, latest, before, after) = row?;
+            // When the text a change replaced is the text the change before it left, it is the
+            // last version listed, so it is skipped as a repeat; any other came from another tool.
+            if let State::Page(bytes) = before {
+                push(
+                    version_id(change, BEFORE),
+                    VersionKind::Outside,
+                    started,
+                    bytes,
+                );
+            }
+            if let State::Page(bytes) = after {
+                push(
+                    version_id(change, AFTER),
+                    version_kind(&kind),
+                    latest,
+                    bytes,
+                );
+            }
+        }
+        versions.reverse();
+        Ok(versions)
+    }
+
+    /// The bytes of the version `id` of the page at `path`, or `None` when the page's history has
+    /// no such version.
+    pub fn version_bytes(&self, path: &str, id: &str) -> Result<Option<Vec<u8>>, Failure> {
+        let Some((change, side)) = id.split_once('-') else {
+            return Ok(None);
+        };
+        let query = match side {
+            BEFORE => {
+                "SELECT before_bytes FROM entries
+                 WHERE change_id = ?1 AND path = ?2 AND before_kind = 'page'"
+            }
+            AFTER => {
+                "SELECT after_bytes FROM entries
+                 WHERE change_id = ?1 AND path = ?2 AND after_kind = 'page'"
+            }
+            _ => return Ok(None),
+        };
+        let Ok(change) = change.parse::<i64>() else {
+            return Ok(None);
+        };
+        let bytes = self
+            .connection
+            .query_row(query, params![change, path], |row| row.get(0))
+            .optional()?;
+        Ok(bytes)
+    }
+
+    /// The entries of the change `id`, or `None` when history has no such change.
+    pub fn change_entries(&self, id: i64) -> Result<Option<Vec<Entry>>, Failure> {
+        let entries: Vec<Entry> = self
+            .connection
+            .prepare(
+                "SELECT path, before_kind, before_bytes, after_kind, after_bytes
+                 FROM entries WHERE change_id = ?1 ORDER BY path",
+            )?
+            .query_map([id], |row| {
+                let before: String = row.get(1)?;
+                let after: String = row.get(3)?;
+                Ok(Entry {
+                    path: row.get(0)?,
+                    before: State::stored(&before, row.get(2)?),
+                    after: State::stored(&after, row.get(4)?),
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        // Every change has at least one entry, so none means no change.
+        Ok((!entries.is_empty()).then_some(entries))
+    }
+
     /// Inserts a change with its entries in one commit. Any change but an edit's ends the editing
     /// sessions of its paths.
     fn insert(
@@ -404,6 +549,19 @@ impl History {
             params![cutoff, KEPT_CHANGES - 1],
         )?;
         Ok(())
+    }
+}
+
+/// The kind of a version a change of `kind` left. Only an edit and the kinds below leave a page; a
+/// new folder leaves none.
+fn version_kind(kind: &str) -> VersionKind {
+    match kind {
+        "new_page" => VersionKind::NewPage,
+        "restored_missing" => VersionKind::RestoredMissing,
+        "keep_mine" => VersionKind::KeepMine,
+        "restore" => VersionKind::Restore,
+        "undo" => VersionKind::Undo,
+        _ => VersionKind::Edit,
     }
 }
 
@@ -742,6 +900,131 @@ mod tests {
             assert_eq!(changes[0].entries[0].pending_after, None);
             assert!(!changes[0].pending);
         }
+    }
+
+    /// Writes a completed change of `kind` to `PAGE` from `before` to `after` at `now`.
+    fn change(history: &mut History, kind: Kind, before: State, after: State, now: u64) {
+        let entry = Entry {
+            path: PAGE.to_owned(),
+            before,
+            after,
+        };
+        let record = history.begin(kind, &[entry], now).unwrap();
+        history.complete(record).unwrap();
+    }
+
+    fn page(bytes: &[u8]) -> State {
+        State::Page(bytes.to_vec())
+    }
+
+    /// `PAGE`'s versions, newest first, as (id, kind, time, bytes).
+    fn versions(history: &History) -> Vec<(String, VersionKind, u64, String)> {
+        history
+            .versions(PAGE)
+            .unwrap()
+            .into_iter()
+            .map(|(version, bytes)| {
+                let text = String::from_utf8(bytes).unwrap();
+                (version.id, version.kind, version.at, text)
+            })
+            .collect()
+    }
+
+    fn version(
+        id: &str,
+        kind: VersionKind,
+        at: u64,
+        text: &str,
+    ) -> (String, VersionKind, u64, String) {
+        (id.to_owned(), kind, at, text.to_owned())
+    }
+
+    #[test]
+    fn versions_list_each_change_s_text_and_the_outside_text_it_replaced_newest_first() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        save(&mut history, b"two", b"three", 60);
+        // Another tool wrote "theirs" over "three", and Keep mine wrote over it.
+        change(
+            &mut history,
+            Kind::KeepMine,
+            page(b"theirs"),
+            page(b"mine"),
+            400,
+        );
+        change(
+            &mut history,
+            Kind::Restore,
+            page(b"mine"),
+            page(b"one"),
+            500,
+        );
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("3-after", VersionKind::Restore, 500, "one"),
+                version("2-after", VersionKind::KeepMine, 400, "mine"),
+                version("2-before", VersionKind::Outside, 400, "theirs"),
+                version("1-after", VersionKind::Edit, 60, "three"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+        assert_eq!(
+            history.version_bytes(PAGE, "2-before").unwrap(),
+            Some(b"theirs".to_vec())
+        );
+        for unknown in ["4-after", "2-side", "two-after", "2"] {
+            assert_eq!(
+                history.version_bytes(PAGE, unknown).unwrap(),
+                None,
+                "{unknown}"
+            );
+        }
+        assert_eq!(history.version_bytes("Other.md", "2-before").unwrap(), None);
+    }
+
+    #[test]
+    fn consecutive_identical_texts_appear_once() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        // The page was deleted outside, and the editor's text restored it.
+        change(
+            &mut history,
+            Kind::RestoredMissing,
+            State::Absent,
+            page(b"two"),
+            10,
+        );
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_deleted_and_created_again_lists_the_earlier_page_s_versions() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"old", b"older", 0);
+        change(&mut history, Kind::NewPage, State::Absent, page(b""), 10);
+        save(&mut history, b"", b"new", 20);
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("3-after", VersionKind::Edit, 20, "new"),
+                version("2-after", VersionKind::NewPage, 10, ""),
+                version("1-after", VersionKind::Edit, 0, "older"),
+                version("1-before", VersionKind::Outside, 0, "old"),
+            ]
+        );
     }
 
     const DAY: u64 = 24 * 60 * 60;

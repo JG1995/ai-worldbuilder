@@ -5,13 +5,16 @@ export type { Comparison } from "./generated/Comparison";
 export type { DiffLine } from "./generated/DiffLine";
 export type { EntryKind } from "./generated/EntryKind";
 export type { ErrorKind } from "./generated/ErrorKind";
+export type { HistoryVersion } from "./generated/HistoryVersion";
 export type { LineKind } from "./generated/LineKind";
 export type { NewEntry } from "./generated/NewEntry";
 export type { NewLocation } from "./generated/NewLocation";
 export type { PageText } from "./generated/PageText";
 export type { PageVersion } from "./generated/PageVersion";
 export type { RecentWorld } from "./generated/RecentWorld";
+export type { RestoredPage } from "./generated/RestoredPage";
 export type { TreeEntry } from "./generated/TreeEntry";
+export type { VersionKind } from "./generated/VersionKind";
 export type { Workspace } from "./generated/Workspace";
 export type { WorldOpened } from "./generated/WorldOpened";
 

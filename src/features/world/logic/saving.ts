@@ -1,5 +1,5 @@
 import type { IpcError } from "@/lib/ipc";
-import type { PageText, PageVersion } from "@/types/api";
+import type { PageText, PageVersion, RestoredPage } from "@/types/api";
 
 /** How long typing must pause before a page saves by itself. */
 export const autosaveDelay = 1000;
@@ -57,6 +57,25 @@ export type OutsideChange =
   | { kind: "unreadable"; error: IpcError }
   | { kind: "world_missing" };
 
+/** What a core write of the whole page, such as Restore this version or Undo, did. */
+export type ReplaceResult =
+  | { kind: "replaced"; page: RestoredPage }
+  /** Pending edits could not be saved first, so nothing was written; the page's notice says why. */
+  | { kind: "unsaved" }
+  /**
+   * The core refused the write, and the page and its editor are as they were. After a `conflict`,
+   * `outside` is what checking the page as after an outside change did.
+   */
+  | { kind: "failed"; error: IpcError; outside: OutsideChange | null };
+
+/** How a core write of the whole page puts the page's text in its editor. */
+export type ReplaceEditor = {
+  /** Puts the written text in the editor as one step that undo reverts. */
+  replace: (text: string) => void;
+  /** Puts the text on disk in the editor after an outside change, as `outsideChange` does. */
+  reload: (text: string) => boolean;
+};
+
 /** An editor document; CodeMirror's `Text` and plain strings both qualify. */
 type Document = { toString(): string };
 
@@ -79,6 +98,7 @@ export class PageSaver {
   private queue: Promise<unknown> = Promise.resolve();
   private held = false;
   private disposed = false;
+  private readonly savedListeners = new Set<() => void>();
 
   constructor(
     private readonly path: string,
@@ -93,6 +113,17 @@ export class PageSaver {
   text() {
     return this.latest.toString();
   }
+
+  /** The version of the page's bytes that the editor last read or saved. */
+  savedVersion = () => this.saved.version;
+
+  /** Calls `listener` whenever `savedVersion` changes, until the returned function is called. */
+  subscribe = (listener: () => void) => {
+    this.savedListeners.add(listener);
+    return () => {
+      this.savedListeners.delete(listener);
+    };
+  };
 
   /** Records the editor's new document and restarts the autosave delay. */
   changed(document: Document) {
@@ -112,7 +143,7 @@ export class PageSaver {
       if (this.notice?.kind !== "conflict") return;
       const current = await this.readCurrent();
       if (!current) return;
-      this.saved = current;
+      this.adopt(current);
       this.setNotice(null);
       await this.save(true);
     });
@@ -127,9 +158,48 @@ export class PageSaver {
       if (this.notice?.kind !== "conflict") return;
       const current = await this.readCurrent();
       if (!current || !replace(current.text)) return;
-      this.saved = current;
+      this.adopt(current);
       this.latest = current.text;
       this.setNotice(null);
+    });
+  }
+
+  /**
+   * Replaces the whole page through `write`, a core write such as Restore this version or Undo,
+   * which gets the version of the bytes the editor last saved. It runs in the queue, after saving
+   * pending edits first, and writes nothing when they cannot be saved, so it never replaces text
+   * that is not in history. The written text goes to `editor.replace` and becomes the saved text.
+   * A refused write leaves the page and the editor as they are; after a `conflict`, the page is
+   * checked as after an outside change.
+   */
+  replacePage(
+    write: (version: string) => Promise<RestoredPage>,
+    editor: ReplaceEditor,
+  ): Promise<ReplaceResult> {
+    return this.enqueue(async (): Promise<ReplaceResult> => {
+      const saved = await this.save(false);
+      if (this.disposed || (saved.kind !== "saved" && saved.kind !== "clean")) {
+        return { kind: "unsaved" };
+      }
+      const text = this.text();
+      let page: RestoredPage;
+      try {
+        page = await write(this.saved.version);
+      } catch (error) {
+        const failure = error as IpcError;
+        const outside = failure.kind === "conflict" ? await this.check(editor.reload) : null;
+        return { kind: "failed", error: failure, outside };
+      }
+      this.adopt({ text: page.text, version: page.version });
+      if (this.text() === text) {
+        editor.replace(page.text);
+        this.latest = page.text;
+      } else {
+        // Text typed while the page was written is kept: it now differs from the page on disk.
+        this.cancelTimer();
+        this.setNotice({ kind: "conflict" });
+      }
+      return { kind: "replaced", page };
     });
   }
 
@@ -144,7 +214,7 @@ export class PageSaver {
       const text = this.latest.toString();
       try {
         const { version } = await restore(this.path, text);
-        this.saved = { text, version };
+        this.adopt({ text, version });
         this.setNotice(null);
         return true;
       } catch (error) {
@@ -165,34 +235,37 @@ export class PageSaver {
    * otherwise the conflict notice shows and autosave pauses.
    */
   outsideChange(reload: (text: string) => boolean): Promise<OutsideChange> {
-    return this.enqueue(async (): Promise<OutsideChange> => {
-      if (this.disposed) return { kind: "unchanged" };
-      let current: PageText;
-      try {
-        current = await this.ports.read(this.path);
-      } catch (error) {
-        return this.unreadable(error as IpcError);
+    return this.enqueue(() => this.check(reload));
+  }
+
+  /** `outsideChange`'s check, for a task already in the queue. */
+  private async check(reload: (text: string) => boolean): Promise<OutsideChange> {
+    if (this.disposed) return { kind: "unchanged" };
+    let current: PageText;
+    try {
+      current = await this.ports.read(this.path);
+    } catch (error) {
+      return this.unreadable(error as IpcError);
+    }
+    if (this.disposed) return { kind: "unchanged" };
+    if (current.version === this.saved.version) {
+      // A page that came back as it was saved, after a notice that it could not be read, is
+      // editable again, and its unsaved text saves as usual.
+      if (isReadOnlyNotice(this.notice)) {
+        this.setNotice(null);
+        if (this.edited()) this.schedule();
       }
-      if (this.disposed) return { kind: "unchanged" };
-      if (current.version === this.saved.version) {
-        // A page that came back as it was saved, after a notice that it could not be read, is
-        // editable again, and its unsaved text saves as usual.
-        if (isReadOnlyNotice(this.notice)) {
-          this.setNotice(null);
-          if (this.edited()) this.schedule();
-        }
-        return { kind: "unchanged" };
-      }
-      if (!this.edited() && this.notice === null) {
-        if (!reload(current.text)) return { kind: "unchanged" };
-        this.saved = current;
-        this.latest = current.text;
-        return { kind: "reloaded" };
-      }
-      this.cancelTimer();
-      this.setNotice({ kind: "conflict" });
-      return { kind: "notice" };
-    });
+      return { kind: "unchanged" };
+    }
+    if (!this.edited() && this.notice === null) {
+      if (!reload(current.text)) return { kind: "unchanged" };
+      this.adopt(current);
+      this.latest = current.text;
+      return { kind: "reloaded" };
+    }
+    this.cancelTimer();
+    this.setNotice({ kind: "conflict" });
+    return { kind: "notice" };
   }
 
   /** What an outside change does to a page that can no longer be read. */
@@ -264,7 +337,7 @@ export class PageSaver {
     }
     try {
       const { version } = await this.ports.write(this.path, text, this.saved.version, keepMine);
-      this.saved = { text, version };
+      this.adopt({ text, version });
       this.setNotice(null);
       return { kind: "saved" };
     } catch (error) {
@@ -291,6 +364,13 @@ export class PageSaver {
       if (failure.kind !== "world_missing") this.setNotice(readFailureNotice(failure));
       return null;
     }
+  }
+
+  /** Takes `page` as the text and version last read or saved, and tells the listeners. */
+  private adopt(page: PageText) {
+    const changed = page.version !== this.saved.version;
+    this.saved = page;
+    if (changed) for (const listener of this.savedListeners) listener();
   }
 
   private setNotice(notice: SaveNotice | null) {

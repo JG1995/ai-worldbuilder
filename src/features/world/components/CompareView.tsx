@@ -3,6 +3,7 @@ import type { IpcError } from "@/lib/ipc";
 import type { DiffLine } from "@/types/api";
 import { Button } from "@/ui/Button";
 import { pageCompare } from "../api/commands";
+import { DiffLines } from "./DiffLines";
 
 type CompareViewProps = {
   /** Keep mine, which the opener focuses because the Compare button that opened it is gone. */
@@ -14,19 +15,6 @@ type CompareViewProps = {
   onLoadTheirs: () => void;
   /** Returns to the editor without resolving the conflict. */
   onClose: () => void;
-};
-
-const lineStyles: Record<DiffLine["kind"], { row: string; marker: string; text: string }> = {
-  same: { row: "text-text-muted", marker: "", text: "" },
-  added: { row: "bg-diff-added text-text", marker: "text-success", text: "" },
-  removed: { row: "bg-diff-removed text-text", marker: "text-error", text: "line-through" },
-};
-
-const markers: Record<DiffLine["kind"], string> = { same: "", added: "+", removed: "−" };
-const spokenKinds: Record<DiffLine["kind"], string> = {
-  same: "",
-  added: "Only in your text: ",
-  removed: "Only on disk: ",
 };
 
 /**
@@ -78,25 +66,11 @@ export function CompareView({
       {result === null && <p className="ui text-text-muted">Comparing…</p>}
       {result && "error" in result && <p>The page cannot be compared: {result.error}</p>}
       {result && "lines" in result && (
-        <ol aria-label="Differences" className="flex flex-col">
-          {result.lines.map((line, index) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: lines have no identity but their place, and the list never changes.
-            <li key={index} className={`flex gap-2 ${lineStyles[line.kind].row}`}>
-              <span
-                aria-hidden="true"
-                className={`w-4 shrink-0 text-center ${lineStyles[line.kind].marker}`}
-              >
-                {markers[line.kind]}
-              </span>
-              <span
-                className={`min-w-0 flex-1 whitespace-pre-wrap break-words ${lineStyles[line.kind].text}`}
-              >
-                <span className="sr-only">{spokenKinds[line.kind]}</span>
-                {line.text || " "}
-              </span>
-            </li>
-          ))}
-        </ol>
+        <DiffLines
+          lines={result.lines}
+          addedPrefix="Only in your text: "
+          removedPrefix="Only on disk: "
+        />
       )}
     </section>
   );

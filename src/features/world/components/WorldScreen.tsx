@@ -18,6 +18,7 @@ import { PageTab } from "./PageTab";
 
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
+const historyShortcut = "Ctrl+Shift+H";
 
 /** World menu items for recent worlds carry the world's id after this prefix. */
 const recentItemPrefix = "recent:";
@@ -86,7 +87,9 @@ export function WorldScreen({
     pageCreated,
     folderCreated,
     showWorldNotice,
+    showHistory,
     dismissToast,
+    runToastAction,
   } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const treeKey = [...worldTreeKey, session];
@@ -141,6 +144,12 @@ export function WorldScreen({
     openPage(path, { newTab });
   }
 
+  /** Opens a page from the tree in the current tab, as a click does, then shows its history. */
+  async function openHistory(path: string) {
+    await openFromTree(path, { newTab: false });
+    showHistory(path);
+  }
+
   /**
    * Opens the name input for a new page or folder in its target folder. From the page region
    * below 960px it opens the tree overlay; at 960px and wider the shell closes the overlay again.
@@ -190,18 +199,22 @@ export function WorldScreen({
 
   /**
    * Window shortcuts, wherever focus is outside a modal dialog: Ctrl/Cmd+S saves the active page
-   * at once, Ctrl/Cmd+N starts a new page and Ctrl/Cmd+Shift+N a new folder.
+   * at once, Ctrl/Cmd+N starts a new page, Ctrl/Cmd+Shift+N a new folder, and Ctrl/Cmd+Shift+H
+   * shows the active page's history.
    */
   const shortcuts = useEffectEvent((event: KeyboardEvent) => {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
     const key = event.key.toLowerCase();
-    if (key !== "s" && key !== "n") return;
-    // Ctrl+N would otherwise open a browser window, so it is cancelled even where it does nothing.
-    if (key === "n") event.preventDefault();
+    const history = key === "h" && event.shiftKey;
+    if (key !== "s" && key !== "n" && !history) return;
+    // Ctrl+N would otherwise open a browser window, and Ctrl+Shift+H a browser's history, so
+    // both are cancelled even where they do nothing.
+    if (key === "n" || history) event.preventDefault();
     const { changingWorld, active } = useWorldStore.getState();
     if (changingWorld || document.activeElement?.closest('[aria-modal="true"]')) return;
     event.preventDefault();
     if (key === "n") startNew(event.shiftKey ? "folder" : "page");
+    else if (active !== null && history) showHistory(active);
     else if (active !== null) void flush(active);
   });
 
@@ -218,7 +231,10 @@ export function WorldScreen({
         ...newEntryItems,
       ];
     }
-    return [{ id: "open-new-tab", label: "Open in new tab", shortcut: "Ctrl+click" }];
+    return [
+      { id: "open-new-tab", label: "Open in new tab", shortcut: "Ctrl+click" },
+      { id: "history", label: "History", shortcut: historyShortcut },
+    ];
   }
 
   function onContextMenuSelect(id: string, target: TreeEntry | null) {
@@ -227,6 +243,7 @@ export function WorldScreen({
     else if (id === "new-folder") startNew("folder", folder);
     else if (id === "toggle" && target) toggleFolder(target.path, !expanded.has(target.path));
     else if (id === "open-new-tab" && target) void openFromTree(target.path, { newTab: true });
+    else if (id === "history" && target) void openHistory(target.path);
   }
 
   const worldMenuItems: MenuItem[] = [
@@ -287,7 +304,7 @@ export function WorldScreen({
           leading={treeToggle}
         />
       )}
-      toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} />}
+      toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />}
       page={
         <div className="flex h-full flex-col">
           {worldNotices.has("missing") && (
