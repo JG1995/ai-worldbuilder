@@ -259,6 +259,34 @@ describe("closing a page that cannot be saved", () => {
     expect(screen.queryByRole("tab", { name: "Kesh Tor" })).not.toBeInTheDocument();
   });
 
+  it("replaces only the tab whose save it checked when another tab becomes active meanwhile", async () => {
+    let finishOverviewSave = () => {};
+    const overviewSave = new Promise<void>((resolve) => {
+      finishOverviewSave = resolve;
+    });
+    mockWorldIpc({
+      page_write: ({ path }) =>
+        path === "Overview.md" ? overviewSave.then(() => ({ version: "saved" })) : failingWrite(),
+    });
+    await openOverview();
+    fireEvent.click(screen.getByRole("treeitem", { name: "Places" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: "Mirror lake" }), { ctrlKey: true });
+    typeAtEnd(await screen.findByRole("textbox", { name: "Mirror lake" }), "Unsaved");
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
+    typeAtEnd(await screen.findByRole("textbox", { name: "Overview" }), "More");
+
+    fireEvent.click(screen.getByRole("treeitem", { name: "Kesh Tor" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Mirror lake" }));
+    await act(async () => finishOverviewSave());
+
+    const asked = await screen.findByRole("dialog", { name: '"Mirror lake" could not be saved' });
+    fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("tab", { name: "Kesh Tor" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "Mirror lake" })).toHaveTextContent(
+      "# Mirror lakeUnsaved",
+    );
+  });
+
   it("asks when a conflict's Keep mine finds the page no longer UTF-8, which keeps the text read-only", async () => {
     let conflicted = false;
     const calls = mockWorldIpc({

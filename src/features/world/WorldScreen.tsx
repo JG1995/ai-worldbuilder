@@ -58,12 +58,15 @@ export function WorldScreen({ session, worldName, onOpenWorld, onCloseWorld }: W
   }
 
   /** Opens a page from the tree. Replacing the active tab's page closes that page, saving first. */
-  async function openFromTree(path: string, { newTab }: { newTab: boolean }) {
+  async function openFromTree(path: string, { newTab }: { newTab: boolean }): Promise<void> {
     const { tabs, active } = useWorldStore.getState();
     if (newTab || active === null || tabs.includes(path)) {
       flushActiveBefore(path);
     } else if (!(await confirmSaved(active))) {
       return;
+    } else if (useWorldStore.getState().active !== active) {
+      // Another tab became active during the save, and it has not been saved: start over for it.
+      return openFromTree(path, { newTab });
     }
     openPage(path, { newTab });
   }
