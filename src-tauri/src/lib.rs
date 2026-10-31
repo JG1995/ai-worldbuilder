@@ -1,5 +1,7 @@
 mod error;
 mod recent;
+#[cfg(target_os = "linux")]
+mod theme;
 mod world;
 
 use std::sync::Arc;
@@ -21,6 +23,10 @@ pub fn run() {
         }))
         .manage(world::WorldState::default())
         .setup(|app| {
+            #[cfg(target_os = "linux")]
+            if let Some(theme) = theme::fallback() {
+                app.set_theme(Some(theme));
+            }
             let state = app.state::<world::WorldState>();
             // Without an app data folder, the recent list stays empty and is never saved.
             if let Ok(folder) = app.path().app_data_dir() {

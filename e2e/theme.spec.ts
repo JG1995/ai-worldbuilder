@@ -8,7 +8,8 @@ function bodyBackground(page: Page) {
 }
 
 // Chromium has no "no-preference" state: it reports `light` when the OS gives no preference,
-// so that case cannot be told apart from light here.
+// so that case cannot be told apart from light here. The desktop app handles it in
+// `src-tauri/src/theme.rs`.
 for (const [colorScheme, background] of [
   ["dark", windowDark],
   ["light", windowLight],

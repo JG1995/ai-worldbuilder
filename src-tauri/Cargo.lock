@@ -1360,6 +1360,7 @@ dependencies = [
 name = "grimoire"
 version = "0.1.0"
 dependencies = [
+ "dbus",
  "notify",
  "notify-debouncer-full",
  "rfd",
