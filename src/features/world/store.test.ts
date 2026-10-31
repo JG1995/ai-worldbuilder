@@ -271,6 +271,18 @@ describe("the workspace", () => {
     ]);
   });
 
+  it("saves a whole-pixel tree width after a drag on a scaled display", async () => {
+    const calls = mockWorldIpc();
+    openWorld();
+    // The core accepts only a whole number of pixels.
+    store().setTreeWidth(300.8);
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+
+    expect(saves(calls)).toEqual([
+      { workspace: { tabs: [], active: null, expanded: [], treeWidth: 301 } },
+    ]);
+  });
+
   it("saves nothing for a world that closed or changed before the delay ended", async () => {
     const calls = mockWorldIpc();
     openWorld();
