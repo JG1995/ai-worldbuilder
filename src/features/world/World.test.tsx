@@ -214,6 +214,57 @@ describe("saving", () => {
   });
 });
 
+describe("focus", () => {
+  /** Opens Overview, then Kesh Tor in a new tab, and returns Kesh Tor's editor. */
+  async function openTwoPages() {
+    await openOverview();
+    fireEvent.click(screen.getByRole("treeitem", { name: "Places" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: "Kesh Tor" }), { ctrlKey: true });
+    return screen.findByRole("textbox", { name: "Kesh Tor" });
+  }
+
+  const pressCtrlTab = () =>
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Tab", ctrlKey: true });
+
+  it("moves to the next page's editor on Ctrl+Tab in an editor", async () => {
+    mockWorldIpc();
+    const keshTor = await openTwoPages();
+    act(() => EditorView.findFromDOM(keshTor)?.focus());
+
+    pressCtrlTab();
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Overview" })).toHaveFocus());
+  });
+
+  it("stays on a focused tab on Ctrl+Tab", async () => {
+    mockWorldIpc();
+    await openTwoPages();
+    const tab = screen.getByRole("tab", { name: "Kesh Tor" });
+    act(() => tab.focus());
+
+    pressCtrlTab();
+
+    expect(await screen.findByRole("textbox", { name: "Overview" })).not.toHaveFocus();
+    expect(tab).toHaveFocus();
+  });
+
+  it("moves to the tab that takes the place of a missing page closed from its notice", async () => {
+    mockWorldIpc({
+      page_write: () => {
+        throw { kind: "not_found", message: "The page or folder does not exist." };
+      },
+    });
+    typeAtEnd(await openTwoPages(), "More");
+    await act(() => useWorldStore.getState().flush("Places/Kesh Tor.md"));
+
+    const notice = screen.getByRole("alert");
+    fireEvent.click(within(notice).getByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toHaveFocus());
+    expect(screen.queryByRole("tab", { name: "Kesh Tor" })).not.toBeInTheDocument();
+  });
+});
+
 describe("closing a page that cannot be saved", () => {
   const closeOverview = () =>
     fireEvent.click(screen.getByRole("button", { name: "Close Overview" }));
@@ -226,7 +277,9 @@ describe("closing a page that cannot be saved", () => {
     closeOverview();
     const asked = await dialog();
     expect(asked).toHaveTextContent("Another program is using the file.");
-    expect(within(asked).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    await waitFor(() =>
+      expect(within(asked).getByRole("button", { name: "Cancel" })).toHaveFocus(),
+    );
     fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument();

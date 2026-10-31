@@ -257,3 +257,21 @@ test("recent worlds open from the welcome screen, and the world menu lists the o
   await page.getByRole("menuitem", { name: worldName }).click();
   await expect(page.getByRole("tree", { name: worldName })).toBeVisible();
 });
+
+test("an error dialog opened from the world menu returns focus to the World menu button", async ({
+  page,
+}) => {
+  await openSampleWorld(page);
+  const worldMenu = page.getByRole("button", { name: "World menu" });
+
+  await worldMenu.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("menuitem", { name: "The Sunken Archive" }).focus();
+  await page.keyboard.press("Enter");
+  const missing = page.getByRole("dialog", { name: "The world cannot be opened" });
+  await expect(missing.getByRole("button", { name: "OK" })).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  await expect(missing).toHaveCount(0);
+  await expect(worldMenu).toBeFocused();
+});

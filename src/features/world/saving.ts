@@ -41,7 +41,10 @@ export type SaverPorts = {
 
 /** What checking a page after a change on disk did. */
 export type OutsideChange =
-  /** Nothing: the page on disk is the one the editor last read or saved, or the page closed. */
+  /**
+   * Nothing to reload: the page on disk is the one the editor last read or saved, or the page
+   * closed. A notice that the page could not be read clears, since it can be again.
+   */
   | { kind: "unchanged" }
   /** The editor had no unsaved edits and shows the page from disk now. */
   | { kind: "reloaded" }
@@ -161,7 +164,16 @@ export class PageSaver {
       } catch (error) {
         return this.unreadable(error as IpcError);
       }
-      if (this.disposed || current.version === this.saved.version) return { kind: "unchanged" };
+      if (this.disposed) return { kind: "unchanged" };
+      if (current.version === this.saved.version) {
+        // A page that came back as it was saved, after a notice that it could not be read, is
+        // editable again, and its unsaved text saves as usual.
+        if (isReadOnlyNotice(this.notice)) {
+          this.setNotice(null);
+          if (this.edited()) this.schedule();
+        }
+        return { kind: "unchanged" };
+      }
       if (!this.edited() && this.notice === null) {
         if (!reload(current.text)) return { kind: "unchanged" };
         this.saved = current;

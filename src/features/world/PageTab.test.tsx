@@ -9,14 +9,14 @@ import { mockWorldIpc, testWorld } from "./test-ipc";
 
 const path = "Overview.md";
 
-function renderPage() {
+function renderPage({ onDiscard = vi.fn() } = {}) {
   useWorldStore.getState().opened({
     ...testWorld,
     workspace: { tabs: [path], active: path, expanded: [], treeWidth: 264 },
   });
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <PageTab path={path} session={testWorld.session} onClose={vi.fn()} />
+      <PageTab path={path} session={testWorld.session} onClose={vi.fn()} onDiscard={onDiscard} />
     </QueryClientProvider>,
   );
   return screen.findByRole("textbox", { name: "Overview" });
@@ -92,10 +92,12 @@ describe("the conflict notice", () => {
   }
 
   it("offers Keep mine, which writes the editor's text over the version on disk", async () => {
-    const { calls, notice } = await conflictedPage();
+    const { calls, textbox, notice } = await conflictedPage();
 
     fireEvent.click(within(notice).getByRole("button", { name: "Keep mine" }));
 
+    // The pressed button goes away with the notice, so focus moves to the editor.
+    expect(textbox).toHaveFocus();
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(writesOf(calls).at(-1)).toEqual({
       path,
@@ -135,6 +137,58 @@ describe("the conflict notice", () => {
     expect(writesOf(calls).at(-1)).toEqual({ path, text: "# Overview\nMine", version: "theirs" });
   });
 
+  it("moves focus to Compare's first action as it opens, and Back to editing returns it to the editor", async () => {
+    const { textbox, notice } = await conflictedPage();
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Compare" }));
+
+    const compare = await screen.findByRole("region", { name: "Compare" });
+    await waitFor(() =>
+      expect(within(compare).getByRole("button", { name: "Keep mine" })).toHaveFocus(),
+    );
+    fireEvent.click(within(compare).getByRole("button", { name: "Back to editing" }));
+    expect(screen.queryByRole("region", { name: "Compare" })).not.toBeInTheDocument();
+    expect(textbox).toHaveFocus();
+  });
+
+  it("keeps Compare closed, and focus in the editor, when a conflict returns after the page was deleted with Compare open", async () => {
+    let disk: "saved" | "theirs" | "gone" | "other" = "saved";
+    let writes = 0;
+    mockWorldIpc({
+      page_read: () => {
+        if (disk === "gone") throw { kind: "not_found", message: "The page does not exist." };
+        return { text: `# ${disk}\n`, version: disk };
+      },
+      page_write: () => {
+        if (++writes === 1) throw { kind: "conflict", message: "The page changed on disk." };
+        return { version: "written" };
+      },
+    });
+    const textbox = await renderPage();
+    typeAtEnd(textbox, "Mine");
+    disk = "theirs";
+    await saveNow();
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Compare" }));
+    await screen.findByRole("region", { name: "Compare" });
+    const page = useWorldStore.getState().pages[path];
+    if (page?.status !== "ready") throw new Error("The page is not ready");
+    const outsideChange = () => act(() => page.saver.outsideChange(() => true));
+
+    disk = "gone";
+    await outsideChange();
+    expect(screen.getByRole("alert")).toHaveTextContent("deleted or moved");
+    disk = "saved";
+    await outsideChange();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    act(() => editorOf(textbox).focus());
+    disk = "other";
+    await outsideChange();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("changed on disk");
+    expect(screen.queryByRole("region", { name: "Compare" })).not.toBeInTheDocument();
+    expect(textbox).toHaveFocus();
+  });
+
   it("resolves from Compare with Load theirs, reading the version on disk then", async () => {
     const { textbox, notice } = await conflictedPage();
     fireEvent.click(within(notice).getByRole("button", { name: "Compare" }));
@@ -152,14 +206,13 @@ describe("the conflict notice", () => {
 
 describe("the missing-page notice", () => {
   /** A page whose save finds it deleted on disk. */
-  async function missingPage(overrides: Parameters<typeof mockWorldIpc>[0] = {}) {
+  async function missingPage(onDiscard = vi.fn()) {
     const calls = mockWorldIpc({
       page_write: () => {
         throw { kind: "not_found", message: "The page or folder does not exist." };
       },
-      ...overrides,
     });
-    const textbox = await renderPage();
+    const textbox = await renderPage({ onDiscard });
     typeAtEnd(textbox, "Mine");
     await saveNow();
     const notice = screen.getByRole("alert");
@@ -173,6 +226,7 @@ describe("the missing-page notice", () => {
 
     fireEvent.click(within(notice).getByRole("button", { name: "Restore" }));
 
+    expect(textbox).toHaveFocus();
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(
       calls.filter(({ command }) => command === "page_restore").map(({ args }) => args),
@@ -181,11 +235,12 @@ describe("the missing-page notice", () => {
   });
 
   it("closes the tab with Close, discarding the text without saving", async () => {
-    const { calls, notice } = await missingPage();
+    const onDiscard = vi.fn();
+    const { calls, notice } = await missingPage(onDiscard);
 
     fireEvent.click(within(notice).getByRole("button", { name: "Close" }));
 
-    expect(useWorldStore.getState().tabs).toEqual([]);
+    expect(onDiscard).toHaveBeenCalledWith(path);
     expect(writesOf(calls)).toHaveLength(1);
   });
 });

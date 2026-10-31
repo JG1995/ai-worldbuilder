@@ -337,6 +337,23 @@ describe("outside changes", () => {
     expect(await saver.flush()).toEqual({ kind: "missing" });
   });
 
+  it("clear the missing-page notice when the page comes back as it was saved", async () => {
+    let read = () => Promise.reject<PageText>(gone);
+    const { saver, writes, reloads, lastNotice, check } = outside(() => read());
+    saver.changed("# Kesh\nmine");
+    expect(await check()).toEqual({ kind: "notice" });
+    expect(lastNotice()).toEqual({ kind: "missing" });
+
+    read = () => Promise.resolve(page);
+    expect(await check()).toEqual({ kind: "unchanged" });
+
+    expect(lastNotice()).toBeNull();
+    expect(reloads).toEqual([]);
+    // Autosave resumes for the unsaved text.
+    await vi.advanceTimersByTimeAsync(autosaveDelay);
+    expect(writes).toEqual([{ text: "# Kesh\nmine", version: "v0" }]);
+  });
+
   it("keep unsaved text read-only under the notice of a page that is no longer UTF-8", async () => {
     const notUtf8 = new IpcError("not_utf8", "The page is not UTF-8 text.");
     const edited = outside(() => Promise.reject(notUtf8));

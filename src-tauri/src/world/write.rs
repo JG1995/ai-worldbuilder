@@ -47,16 +47,22 @@ impl OwnWrites {
     }
 
     /// Whether the entry at `relative` inside `root` still is what the application last wrote
-    /// there. The caller holds the world lock, so no write of the application's is half done.
-    pub fn is_own(&self, root: &Path, relative: &str) -> bool {
+    /// there. Once it is not, the record forgets the write, so the same content put back later by
+    /// another tool counts as an outside change. The caller holds the world lock, so no write of
+    /// the application's is half done.
+    pub fn is_own(&mut self, root: &Path, relative: &str) -> bool {
         let path = root.join(relative);
-        match self.0.get(relative) {
-            None => false,
+        let own = match self.0.get(relative) {
+            None => return false,
             Some(Written::Page(version)) => {
                 fs::read(&path).is_ok_and(|bytes| page::version_of(&bytes) == *version)
             }
             Some(Written::Folder) => fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_dir()),
+        };
+        if !own {
+            self.0.remove(relative);
         }
+        own
     }
 }
 
@@ -652,6 +658,25 @@ mod tests {
         assert!(own.is_own(world.path(), &folder.path));
         fs::write(world.path().join(&page.path), b"typed elsewhere\n").unwrap();
         assert!(!own.is_own(world.path(), &page.path));
+    }
+
+    #[test]
+    fn the_record_forgets_a_write_once_a_check_finds_it_gone() {
+        let (world, version) = world_with_page(b"one\n");
+        let mut own = own();
+        write_page(world.path(), &mut own, "Page.md", "two\n", &version).unwrap();
+        let folder = create_folder(world.path(), &mut own, None, "Factions").unwrap();
+
+        fs::remove_file(world.path().join("Page.md")).unwrap();
+        fs::remove_dir(world.path().join(&folder.path)).unwrap();
+        assert!(!own.is_own(world.path(), "Page.md"));
+        assert!(!own.is_own(world.path(), &folder.path));
+
+        // Another tool puts back what the application wrote, as a restore from a trash would.
+        fs::write(world.path().join("Page.md"), b"two\n").unwrap();
+        fs::create_dir(world.path().join(&folder.path)).unwrap();
+        assert!(!own.is_own(world.path(), "Page.md"));
+        assert!(!own.is_own(world.path(), &folder.path));
     }
 
     #[test]

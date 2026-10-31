@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { type Ref, useEffect, useState } from "react";
 import type { IpcError } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { type DiffLine, pageCompare } from "./commands";
 
 type CompareViewProps = {
+  /** Keep mine, which the opener focuses because the Compare button that opened it is gone. */
+  firstActionRef: Ref<HTMLButtonElement>;
   path: string;
   /** The editor's text when Compare opened. */
   text: string;
@@ -30,7 +32,14 @@ const spokenKinds: Record<DiffLine["kind"], string> = {
  * A read-only diff of the page on disk against the editor's text, from a comparison the core makes
  * when it opens, with the conflict's two resolutions.
  */
-export function CompareView({ path, text, onKeepMine, onLoadTheirs, onClose }: CompareViewProps) {
+export function CompareView({
+  firstActionRef,
+  path,
+  text,
+  onKeepMine,
+  onLoadTheirs,
+  onClose,
+}: CompareViewProps) {
   const [mine] = useState(text);
   const [result, setResult] = useState<{ lines: DiffLine[] } | { error: string } | null>(null);
 
@@ -55,7 +64,7 @@ export function CompareView({ path, text, onKeepMine, onLoadTheirs, onClose }: C
         <p className="ui min-w-0 flex-1 text-text-muted">
           Lines marked − are only on disk, and lines marked + only in your text.
         </p>
-        <Button variant="secondary" onClick={onKeepMine}>
+        <Button ref={firstActionRef} variant="secondary" onClick={onKeepMine}>
           Keep mine
         </Button>
         <Button variant="ghost" onClick={onLoadTheirs}>

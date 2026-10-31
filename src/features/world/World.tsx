@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { type IpcError, listenEvent } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
@@ -47,6 +47,30 @@ export function World() {
   const [failure, setFailure] = useState<Failure | null>(null);
   const [newWorldOpen, setNewWorldOpen] = useState(false);
   const { confirmSaved, failedSaveDialog } = useSaveConfirmation();
+  const root = useRef<HTMLDivElement>(null);
+  /** What had focus when the world change started, to return focus there if the world stays. */
+  const changeOpener = useRef<Element | null>(null);
+
+  // A change makes the root inert, and the browser then takes focus off it. The root turns inert
+  // only after the commit that starts the change, so a menu that started it has returned focus to
+  // its button first, which is the element remembered here. Dialogs render in portals outside the
+  // root, so they still take input while it is inert.
+  useEffect(() => {
+    if (!changingWorld) return;
+    changeOpener.current = document.activeElement;
+    root.current?.setAttribute("inert", "");
+  }, [changingWorld]);
+
+  // When the change ends without leaving the screen, focus that the root lost returns to where the
+  // change started, before a dialog that shows its failure records where to return focus.
+  useLayoutEffect(() => {
+    if (changingWorld) return;
+    root.current?.removeAttribute("inert");
+    const opener = changeOpener.current;
+    changeOpener.current = null;
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (lost && opener instanceof HTMLElement && opener.isConnected) opener.focus();
+  }, [changingWorld]);
 
   /** Saves every open page in tab order. False when the user cancels on a page that cannot save. */
   async function confirmAllSaved() {
@@ -241,10 +265,10 @@ export function World() {
   }
 
   return (
-    // Dialogs render in portals outside this element, so they still take input while it is inert.
-    <div className="h-screen" inert={changingWorld}>
+    <div ref={root} className="h-screen">
       {screen()}
-      {failure && (
+      {/* After the change that failed has ended, so it returns focus to where that change started. */}
+      {failure && !changingWorld && (
         <Dialog
           title={failure.title}
           onCancel={dismiss}

@@ -291,10 +291,15 @@ impl WorldState {
         let sink = Arc::clone(self.events.get()?);
         let shared = Arc::clone(&self.inner);
         watch::start(root, session, sink, move |events| {
-            let inner = lock(&shared);
-            let world = inner.world.as_ref().filter(|_| inner.session == session)?;
-            Some(watch::changes(&world.root, events, |relative| {
-                world.own_writes.is_own(&world.root, relative)
+            let mut inner = lock(&shared);
+            if inner.session != session {
+                return None;
+            }
+            let OpenWorld {
+                root, own_writes, ..
+            } = inner.world.as_mut()?;
+            Some(watch::changes(root, events, |relative| {
+                own_writes.is_own(root, relative)
             }))
         })
     }
