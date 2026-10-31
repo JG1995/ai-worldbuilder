@@ -236,7 +236,8 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
 
   createdPageShown: () => set({ createdPage: null }),
 
-  setTreeWidth: (treeWidth) => set({ treeWidth }),
+  // A drag on a scaled display gives a fractional width, and the core keeps whole pixels.
+  setTreeWidth: (treeWidth) => set({ treeWidth: Math.round(treeWidth) }),
 
   setTreeOverlayOpen: (treeOverlayOpen) => set({ treeOverlayOpen }),
 
