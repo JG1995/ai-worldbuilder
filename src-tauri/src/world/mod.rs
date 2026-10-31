@@ -1,25 +1,27 @@
 //! The `world` area: the open world and the commands that browse, read, save and create in it,
-//! and that open recent worlds and keep their workspaces.
+//! that open recent worlds and keep their workspaces, and the watcher that reports outside changes.
 
 mod dialog;
 mod names;
 mod page;
 mod paths;
 mod tree;
+mod watch;
 mod write;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
 use crate::recent::{Recent, RecentWorld, Workspace};
-use page::PageText;
+use page::{DiffLine, PageText};
 use tree::TreeEntry;
-use write::{NewEntry, PageVersion};
+pub use watch::{EventSink, WorldEvent};
+use write::{NewEntry, OwnWrites, PageVersion};
 
 const APP_TITLE: &str = "Grimoire.md";
 /// The limits on a workspace from the interface: the tree width range of `src/ui/Shell.tsx`, and
@@ -31,7 +33,10 @@ const MAX_EXPANDED: usize = 5_000;
 /// The open world, if any, the recent worlds, and what New world needs, managed by Tauri.
 #[derive(Default)]
 pub struct WorldState {
-    inner: Mutex<Inner>,
+    /// Shared with the open world's watcher, which reads the own-write record under this lock.
+    inner: Arc<Mutex<Inner>>,
+    /// Where the watcher sends its events. Without it, as in most tests, no watcher starts.
+    events: OnceLock<EventSink>,
 }
 
 #[derive(Default)]
@@ -51,6 +56,17 @@ struct OpenWorld {
     root: PathBuf,
     /// Its entry in the recent list, which holds its workspace; `None` when it cannot be stored.
     recent_id: Option<String>,
+    /// What the application wrote in it, so the watcher leaves those writes out.
+    own_writes: OwnWrites,
+    /// Lives exactly as long as this opening: replacing or clearing the open world drops it.
+    _watcher: Option<watch::Watcher>,
+}
+
+/// A page on disk compared with the editor's text.
+#[derive(Debug, Serialize)]
+pub struct Comparison {
+    version: String,
+    lines: Vec<DiffLine>,
 }
 
 /// Where New world will create its folder, as a path to show.
@@ -74,12 +90,18 @@ impl WorldState {
         self.lock().recent = recent;
     }
 
+    /// Takes where the watcher sends its events, once, at launch.
+    pub fn set_events(&self, sink: EventSink) {
+        let _ = self.events.set(sink);
+    }
+
     pub fn is_open(&self) -> bool {
         self.lock().world.is_some()
     }
 
     /// Opens the folder at `root`, replacing the open world, unless the folder cannot be read. The
-    /// world moves to the top of the recent list and opens with its stored workspace.
+    /// world moves to the top of the recent list and opens with its stored workspace, and a new
+    /// watcher starts for it.
     fn open(&self, root: PathBuf) -> Result<WorldOpened, AppError> {
         fs::read_dir(&root)?;
         let name = root.file_name().map_or_else(
@@ -88,7 +110,10 @@ impl WorldState {
         );
         let (session, stored) = {
             let mut inner = self.lock();
+            // The old world's watcher stops before the session changes.
+            inner.world = None;
             inner.session += 1;
+            let watcher = self.watch(&root, inner.session);
             let recent_id = inner.recent.opened(&root, &name);
             let stored = recent_id
                 .as_deref()
@@ -96,6 +121,8 @@ impl WorldState {
             inner.world = Some(OpenWorld {
                 root: root.clone(),
                 recent_id,
+                own_writes: OwnWrites::default(),
+                _watcher: watcher,
             });
             (inner.session, stored)
         };
@@ -151,7 +178,7 @@ impl WorldState {
         Ok(())
     }
 
-    /// Closes the world. The next launch then starts on the welcome screen.
+    /// Closes the world, which stops its watcher. The next launch then starts on the welcome screen.
     fn close(&self) {
         let mut inner = self.lock();
         inner.world = None;
@@ -208,11 +235,9 @@ impl WorldState {
     /// Holds the world lock while the entry is created, so it never overlaps a write.
     fn create_entry(
         &self,
-        create: impl FnOnce(&Path) -> Result<NewEntry, AppError>,
+        create: impl FnOnce(&Path, &mut OwnWrites) -> Result<NewEntry, AppError>,
     ) -> Result<NewEntry, AppError> {
-        let inner = self.lock();
-        let world = inner.world.as_ref().ok_or_else(no_world)?;
-        create(&world.root)
+        self.with_world(|world| create(&world.root, &mut world.own_writes))
     }
 
     fn tree(&self) -> Result<Vec<TreeEntry>, AppError> {
@@ -223,11 +248,25 @@ impl WorldState {
         page::read(&paths::existing_page(&self.root()?, path)?)
     }
 
+    /// The page on disk, line by line, against the editor's `text`, with the version on disk.
+    fn compare_page(&self, path: &str, text: &str) -> Result<Comparison, AppError> {
+        let page = self.read_page(path)?;
+        Ok(Comparison {
+            lines: page::compare(&page.text, text),
+            version: page.version,
+        })
+    }
+
     /// Holds the world lock for the whole write, so writes never overlap.
     fn write_page(&self, path: &str, text: &str, version: &str) -> Result<PageVersion, AppError> {
-        let inner = self.lock();
-        let world = inner.world.as_ref().ok_or_else(no_world)?;
-        write::write_page(&world.root, path, text, version)
+        self.with_world(|world| {
+            write::write_page(&world.root, &mut world.own_writes, path, text, version)
+        })
+    }
+
+    /// Writes a page that is gone back, under the world lock like a save.
+    fn restore_page(&self, path: &str, text: &str) -> Result<PageVersion, AppError> {
+        self.with_world(|world| write::restore_page(&world.root, &mut world.own_writes, path, text))
     }
 
     fn root(&self) -> Result<PathBuf, AppError> {
@@ -236,10 +275,38 @@ impl WorldState {
         Ok(world.root.clone())
     }
 
-    /// The state stays consistent after a panic, because every change to it is a whole field.
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Runs `write` on the open world with the world lock held.
+    fn with_world<T>(
+        &self,
+        write: impl FnOnce(&mut OpenWorld) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let mut inner = self.lock();
+        write(inner.world.as_mut().ok_or_else(no_world)?)
     }
+
+    /// Starts the watcher for the opening `session` of the world at `root`. Its batches are read
+    /// under the world lock, so a write of the application's is never half done when the watcher
+    /// compares a page with the own-write record.
+    fn watch(&self, root: &Path, session: u64) -> Option<watch::Watcher> {
+        let sink = Arc::clone(self.events.get()?);
+        let shared = Arc::clone(&self.inner);
+        watch::start(root, session, sink, move |events| {
+            let inner = lock(&shared);
+            let world = inner.world.as_ref().filter(|_| inner.session == session)?;
+            Some(watch::changes(&world.root, events, |relative| {
+                world.own_writes.is_own(&world.root, relative)
+            }))
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        lock(&self.inner)
+    }
+}
+
+/// The state stays consistent after a panic, because every change to it is a whole field.
+fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
+    inner.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Shows the folder dialog and opens the picked folder as the world. Cancelling returns `null`.
@@ -290,6 +357,27 @@ pub async fn page_write(
     guard(|| state.write_page(&path, &text, &version))
 }
 
+/// Compares a page on disk with the editor's text, line by line.
+#[tauri::command]
+pub async fn page_compare(
+    state: State<'_, WorldState>,
+    path: String,
+    text: String,
+) -> Result<Comparison, AppError> {
+    guard(|| state.compare_page(&path, &text))
+}
+
+/// Writes the editor's text back to a page that was deleted or moved outside the application,
+/// recreating its folders. Returns `conflict` when something is at its path again.
+#[tauri::command]
+pub async fn page_restore(
+    state: State<'_, WorldState>,
+    path: String,
+    text: String,
+) -> Result<PageVersion, AppError> {
+    guard(|| state.restore_page(&path, &text))
+}
+
 /// Creates an empty page `{name}.md` in `folder`, or at the world's top level when it is `null`.
 #[tauri::command]
 pub async fn page_create(
@@ -297,7 +385,9 @@ pub async fn page_create(
     folder: Option<String>,
     name: String,
 ) -> Result<NewEntry, AppError> {
-    guard(|| state.create_entry(|root| write::create_page(root, folder.as_deref(), &name)))
+    guard(|| {
+        state.create_entry(|root, own| write::create_page(root, own, folder.as_deref(), &name))
+    })
 }
 
 /// Creates an empty folder `name` in `folder`, or at the world's top level when it is `null`.
@@ -307,7 +397,9 @@ pub async fn folder_create(
     folder: Option<String>,
     name: String,
 ) -> Result<NewEntry, AppError> {
-    guard(|| state.create_entry(|root| write::create_folder(root, folder.as_deref(), &name)))
+    guard(|| {
+        state.create_entry(|root, own| write::create_folder(root, own, folder.as_deref(), &name))
+    })
 }
 
 /// Starts a New world dialog: forgets any location picked before and returns the default one.
@@ -481,7 +573,8 @@ fn set_title(app: &AppHandle, title: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::time::SystemTime;
+    use std::sync::mpsc;
+    use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
     fn world() -> TempDir {
@@ -548,10 +641,122 @@ mod tests {
         );
         assert_eq!(
             state
-                .create_entry(|root| write::create_page(root, None, "New"))
+                .create_entry(|root, own| write::create_page(root, own, None, "New"))
                 .unwrap_err()
                 .kind,
             ErrorKind::NoWorld
+        );
+    }
+
+    #[test]
+    fn reads_and_writes_after_the_world_s_folder_is_gone_are_world_missing() {
+        let state = WorldState::default();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("Kesh");
+        fs::create_dir_all(root.join("Places")).unwrap();
+        fs::write(root.join("Places/Saltmere.md"), "# Saltmere\n").unwrap();
+        state.open(root.clone()).unwrap();
+        let version = state.read_page("Places/Saltmere.md").unwrap().version;
+        fs::remove_dir_all(&root).unwrap();
+
+        let kinds = [
+            state.tree().map(drop),
+            state.read_page("Places/Saltmere.md").map(drop),
+            state.compare_page("Places/Saltmere.md", "mine\n").map(drop),
+            state
+                .write_page("Places/Saltmere.md", "mine\n", &version)
+                .map(drop),
+            state.restore_page("Places/Saltmere.md", "mine\n").map(drop),
+            state
+                .create_entry(|root, own| write::create_page(root, own, None, "New"))
+                .map(drop),
+            state
+                .create_entry(|root, own| write::create_folder(root, own, None, "New"))
+                .map(drop),
+        ]
+        .map(|result| result.unwrap_err().kind);
+
+        assert_eq!(kinds, [ErrorKind::WorldMissing; 7]);
+        assert!(!root.exists());
+    }
+
+    /// The next event the watcher sends, within five seconds.
+    fn next_event(events: &mpsc::Receiver<WorldEvent>) -> WorldEvent {
+        events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the watcher sent no event within five seconds")
+    }
+
+    /// A world state whose watcher sends its events to the returned receiver.
+    fn watched() -> (WorldState, mpsc::Receiver<WorldEvent>) {
+        let (sender, events) = mpsc::channel();
+        let state = WorldState::default();
+        state.set_events(Arc::new(move |event| {
+            let _ = sender.send(event);
+        }));
+        (state, events)
+    }
+
+    fn changed(session: u64, tree: bool, pages: &[&str]) -> WorldEvent {
+        WorldEvent::Changed {
+            session,
+            tree,
+            pages: pages.iter().map(|page| page.to_string()).collect(),
+        }
+    }
+
+    /// Each outside change below is followed by a sentinel page created outside: the next event
+    /// must name only the sentinel, so an event for the change before it would show up first or
+    /// alongside it.
+    #[test]
+    fn the_watcher_reports_outside_changes_but_not_the_application_s_writes_or_an_old_world() {
+        let (world, next) = (world(), world());
+        let (state, events) = watched();
+        let session = state.open(world.path().to_path_buf()).unwrap().session;
+
+        fs::write(world.path().join("Outside.md"), "# Outside\n").unwrap();
+        assert_eq!(next_event(&events), changed(session, true, &["Outside.md"]));
+
+        let page = state.read_page("Places/Saltmere.md").unwrap();
+        state
+            .write_page("Places/Saltmere.md", "# Saltmere harbour\n", &page.version)
+            .unwrap();
+        state
+            .create_entry(|root, own| write::create_page(root, own, Some("Places"), "Kesh Tor"))
+            .unwrap();
+        state
+            .create_entry(|root, own| write::create_folder(root, own, None, "Factions"))
+            .unwrap();
+        fs::write(world.path().join("Sentinel.md"), "").unwrap();
+        assert_eq!(
+            next_event(&events),
+            changed(session, true, &["Sentinel.md"])
+        );
+
+        let next_session = state.open(next.path().to_path_buf()).unwrap().session;
+        fs::write(world.path().join("Old world.md"), "").unwrap();
+        fs::write(next.path().join("Sentinel.md"), "").unwrap();
+        assert_eq!(
+            next_event(&events),
+            changed(next_session, true, &["Sentinel.md"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_watcher_follows_no_link_out_of_the_world() {
+        let world = world();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
+        let (state, events) = watched();
+        let session = state.open(world.path().to_path_buf()).unwrap().session;
+
+        fs::write(outside.path().join("Secret.md"), "secret").unwrap();
+        fs::write(world.path().join("Sentinel.md"), "").unwrap();
+
+        assert_eq!(
+            next_event(&events),
+            changed(session, true, &["Sentinel.md"])
         );
     }
 
@@ -562,7 +767,7 @@ mod tests {
         state.open(world.path().to_path_buf()).unwrap();
 
         let page = state
-            .create_entry(|root| write::create_page(root, Some("Places"), "Kesh Tor"))
+            .create_entry(|root, own| write::create_page(root, own, Some("Places"), "Kesh Tor"))
             .unwrap();
 
         assert_eq!(page.path, "Places/Kesh Tor.md");

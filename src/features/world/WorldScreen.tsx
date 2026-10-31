@@ -1,12 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef } from "react";
 import type { IpcError } from "../../lib/ipc";
+import { Button } from "../../ui/Button";
 import { FileTree, type TreeEntry, type TreeNameInput } from "../../ui/FileTree";
 import type { MenuItem } from "../../ui/Menu";
 import { Notice } from "../../ui/Notice";
 import { NoPageOpen } from "../../ui/PageView";
 import { Shell } from "../../ui/Shell";
 import { TabStrip } from "../../ui/TabStrip";
+import { ToastRegion } from "../../ui/Toast";
 import type { RecentWorld } from "../../ui/WelcomeScreen";
 import { folderCreate, pageCreate, worldTree, worldTreeKey } from "./commands";
 import { useSaveConfirmation } from "./FailedSaveDialog";
@@ -62,6 +64,8 @@ export function WorldScreen({
   const expanded = useWorldStore((store) => store.expanded);
   const treeWidth = useWorldStore((store) => store.treeWidth);
   const treeOverlayOpen = useWorldStore((store) => store.treeOverlayOpen);
+  const worldNotices = useWorldStore((store) => store.worldNotices);
+  const toasts = useWorldStore((store) => store.toasts);
   const {
     openPage,
     activate,
@@ -76,10 +80,17 @@ export function WorldScreen({
     cancelNaming,
     pageCreated,
     folderCreated,
+    showWorldNotice,
+    dismissToast,
   } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const treeKey = [...worldTreeKey, session];
   const tree = useQuery({ queryKey: treeKey, queryFn: worldTree });
+  const worldMissing = (tree.error as IpcError | null)?.kind === "world_missing";
+
+  useEffect(() => {
+    if (worldMissing) showWorldNotice(session, "missing");
+  }, [worldMissing, session, showWorldNotice]);
   const { confirmSaved, failedSaveDialog } = useSaveConfirmation();
   /** Where focus was when the name input opened, to return it there when the input closes. */
   const focusBeforeNaming = useRef<Element | null>(null);
@@ -261,9 +272,27 @@ export function WorldScreen({
             leading={treeToggle}
           />
         )}
+        toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} />}
         page={
           <div className="flex h-full flex-col">
-            {tree.isError && (
+            {worldNotices.has("missing") && (
+              <Notice
+                status="error"
+                actions={
+                  <Button variant="secondary" onClick={onCloseWorld}>
+                    Close world
+                  </Button>
+                }
+              >
+                The world's folder cannot be found.
+              </Notice>
+            )}
+            {worldNotices.has("watch_failed") && (
+              <Notice status="warning">
+                Outside changes may not appear until the world is reopened.
+              </Notice>
+            )}
+            {tree.isError && !worldMissing && (
               <Notice status="error">
                 The world's pages cannot be listed: {tree.error.message}
               </Notice>

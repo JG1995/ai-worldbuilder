@@ -1,12 +1,13 @@
-import type { EditorView } from "@codemirror/view";
-import { useEffect, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import type { IpcError } from "../../lib/ipc";
 import { Button } from "../../ui/Button";
 import { Notice } from "../../ui/Notice";
 import { PageView } from "../../ui/PageView";
 import { createPageState, MarkdownEditor, replaceDocument } from "../editor/MarkdownEditor";
-import { pageRead, pageWrite } from "./commands";
-import { isReadOnlyNotice, missingReason, PageSaver, type SaveNotice } from "./saving";
+import { CompareView } from "./CompareView";
+import { pageRead, pageRestore, pageWrite, worldTreeKey } from "./commands";
+import { isReadOnlyNotice, PageSaver, type SaveNotice } from "./saving";
 import { pageNameOf, useWorldStore } from "./store";
 
 const notUtf8Text =
@@ -20,6 +21,19 @@ type PageTabProps = {
   onClose: (path: string) => void;
 };
 
+/**
+ * Passes a command's result on, and shows the missing-world notice when the core answers that the
+ * world's folder is gone.
+ */
+function reportingMissingWorld<T>(session: number, command: Promise<T>) {
+  return command.catch((error: IpcError) => {
+    if (error.kind === "world_missing") {
+      useWorldStore.getState().showWorldNotice(session, "missing");
+    }
+    throw error;
+  });
+}
+
 /** One open page: it reads the page when it is loading and shows its editor or its notice. */
 export function PageTab({ path, session, onClose }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
@@ -27,8 +41,9 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
   // Only a page the user just created takes focus, so opening any other page leaves focus where
   // it was.
   const justCreated = useWorldStore((store) => store.createdPage === path);
-  const { setPage, setEditor, setNotice, createdPageShown } = useWorldStore.getState();
-  const view = useRef<EditorView>(null);
+  const { setPage, setEditor, setNotice, createdPageShown, closeTab } = useWorldStore.getState();
+  const queryClient = useQueryClient();
+  const [comparing, setComparing] = useState(false);
   const title = pageNameOf(path);
   const loading = page?.status === "loading";
   const ready = page?.status === "ready";
@@ -41,17 +56,19 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
   useEffect(() => {
     if (!loading) return;
     let current = true;
-    pageRead(path).then(
+    reportingMissingWorld(session, pageRead(path)).then(
       (read) => {
         if (!current) return;
         const saver = new PageSaver(path, read, {
-          read: pageRead,
-          write: pageWrite,
+          read: (page) => reportingMissingWorld(session, pageRead(page)),
+          write: (page, text, version) =>
+            reportingMissingWorld(session, pageWrite(page, text, version)),
           notify: (notice) => setNotice(session, path, notice),
         });
         setPage(session, path, {
           status: "ready",
           editor: createPageState(read.text, title),
+          view: { current: null },
           saver,
           notice: null,
         });
@@ -73,14 +90,28 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
   }, [path, session, title, loading, setPage, setNotice]);
 
   if (page?.status === "ready") {
-    const { saver, notice } = page;
-    const loadTheirs = () =>
-      saver.loadTheirs((text) => {
+    const { saver, notice, view } = page;
+    const showingCompare = comparing && notice?.kind === "conflict";
+    const keepMine = () => {
+      setComparing(false);
+      void saver.keepMine();
+    };
+    const loadTheirs = () => {
+      setComparing(false);
+      void saver.loadTheirs((text) => {
         // The tab may have stopped showing the page while its text was read.
-        if (!view.current) return false;
+        if (!view?.current) return false;
         replaceDocument(view.current, text);
         return true;
       });
+    };
+    const restore = async () => {
+      const restored = await saver.restore((page, text) =>
+        reportingMissingWorld(session, pageRestore(page, text)),
+      );
+      // The watcher leaves the application's own writes out, so the tree is refreshed here.
+      if (restored) void queryClient.invalidateQueries({ queryKey: [...worldTreeKey, session] });
+    };
     return (
       <PageView
         title={title}
@@ -88,22 +119,38 @@ export function PageTab({ path, session, onClose }: PageTabProps) {
           notice && (
             <SaveNoticeBar
               notice={notice}
+              comparing={showingCompare}
               onRetry={() => saver.flush()}
-              onKeepMine={() => saver.keepMine()}
+              onKeepMine={keepMine}
               onLoadTheirs={loadTheirs}
+              onCompare={() => setComparing(true)}
+              onRestore={() => void restore()}
+              onDiscard={() => closeTab(path)}
               onClose={() => onClose(path)}
             />
           )
         }
       >
-        <MarkdownEditor
-          state={page.editor}
-          readOnly={changingWorld || isReadOnlyNotice(notice)}
-          autoFocus={justCreated}
-          viewRef={view}
-          onChange={(editor) => saver.changed(editor.doc)}
-          onUnmount={(editor) => setEditor(session, path, editor)}
-        />
+        {showingCompare && (
+          <CompareView
+            path={path}
+            text={saver.text()}
+            onKeepMine={keepMine}
+            onLoadTheirs={loadTheirs}
+            onClose={() => setComparing(false)}
+          />
+        )}
+        {/* Hidden, not unmounted, while Compare shows, so Load theirs can still replace its text. */}
+        <div hidden={showingCompare}>
+          <MarkdownEditor
+            state={page.editor}
+            readOnly={changingWorld || isReadOnlyNotice(notice)}
+            autoFocus={justCreated}
+            viewRef={view}
+            onChange={(editor) => saver.changed(editor.doc)}
+            onUnmount={(editor) => setEditor(session, path, editor)}
+          />
+        </div>
       </PageView>
     );
   }
@@ -138,13 +185,30 @@ function ReadErrorNotice({ message, onClose }: { message: string; onClose: () =>
 
 type SaveNoticeBarProps = {
   notice: SaveNotice;
+  /** Compare shows the conflict's actions itself while it is open. */
+  comparing: boolean;
   onRetry: () => void;
   onKeepMine: () => void;
   onLoadTheirs: () => void;
+  onCompare: () => void;
+  onRestore: () => void;
+  /** Closes the tab without saving, dropping the text. */
+  onDiscard: () => void;
+  /** Closes the tab, saving first. */
   onClose: () => void;
 };
 
-function SaveNoticeBar({ notice, onRetry, onKeepMine, onLoadTheirs, onClose }: SaveNoticeBarProps) {
+function SaveNoticeBar({
+  notice,
+  comparing,
+  onRetry,
+  onKeepMine,
+  onLoadTheirs,
+  onCompare,
+  onRestore,
+  onDiscard,
+  onClose,
+}: SaveNoticeBarProps) {
   switch (notice.kind) {
     case "failed":
       return (
@@ -164,21 +228,42 @@ function SaveNoticeBar({ notice, onRetry, onKeepMine, onLoadTheirs, onClose }: S
         <Notice
           status="warning"
           actions={
-            <>
-              <Button variant="secondary" onClick={onKeepMine}>
-                Keep mine
-              </Button>
-              <Button variant="ghost" onClick={onLoadTheirs}>
-                Load theirs
-              </Button>
-            </>
+            !comparing && (
+              <>
+                <Button variant="secondary" onClick={onKeepMine}>
+                  Keep mine
+                </Button>
+                <Button variant="ghost" onClick={onLoadTheirs}>
+                  Load theirs
+                </Button>
+                <Button variant="ghost" onClick={onCompare}>
+                  Compare
+                </Button>
+              </>
+            )
           }
         >
           This page changed on disk while it had unsaved edits.
         </Notice>
       );
     case "missing":
-      return <Notice status="error">This page could not be saved: {missingReason}</Notice>;
+      return (
+        <Notice
+          status="error"
+          actions={
+            <>
+              <Button variant="secondary" onClick={onRestore}>
+                Restore
+              </Button>
+              <Button variant="ghost" onClick={onDiscard}>
+                Close
+              </Button>
+            </>
+          }
+        >
+          This page was deleted or moved outside Grimoire.md.
+        </Notice>
+      );
     case "not_utf8":
       return <Notice status="warning">{notUtf8Text}</Notice>;
     case "unreadable":

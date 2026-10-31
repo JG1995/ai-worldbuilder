@@ -2,7 +2,7 @@
 // `ipc.ts` loads this module behind `import.meta.env.DEV`, and `tools/check-dist.mjs` fails the
 // check if the marker below, which every version token carries, appears in a production bundle.
 import type { InvokeArgs } from "@tauri-apps/api/core";
-import type { PageText, WorldOpened } from "../features/world/commands";
+import type { DiffLine, PageText, WorldOpened } from "../features/world/commands";
 import type { TreeEntry } from "../ui/FileTree";
 import type { RecentWorld } from "../ui/WelcomeScreen";
 
@@ -229,6 +229,42 @@ function pageText(args: InvokeArgs | undefined) {
   return { open, path, text: page };
 }
 
+/** A text's lines, without the empty one after a final newline, as Rust's `str::lines` gives them. */
+const linesOf = (text: string) => (text === "" ? [] : text.replace(/\n$/, "").split("\n"));
+
+/**
+ * A line diff of `disk` against `text` from their longest common subsequence: enough for the
+ * preview's short pages. The core uses `similar`.
+ */
+function compareLines(disk: string, text: string): DiffLine[] {
+  const old = linesOf(disk);
+  const mine = linesOf(text);
+  // common[i][j]: the length of the longest common subsequence of old[i..] and mine[j..].
+  const common = Array.from({ length: old.length + 1 }, () => Array(mine.length + 1).fill(0));
+  for (let i = old.length - 1; i >= 0; i--) {
+    for (let j = mine.length - 1; j >= 0; j--) {
+      common[i][j] =
+        old[i] === mine[j]
+          ? common[i + 1][j + 1] + 1
+          : Math.max(common[i + 1][j], common[i][j + 1]);
+    }
+  }
+  const lines: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < old.length || j < mine.length) {
+    if (i < old.length && j < mine.length && old[i] === mine[j]) {
+      lines.push({ kind: "same", text: old[i++] });
+      j++;
+    } else if (j === mine.length || (i < old.length && common[i + 1][j] >= common[i][j + 1])) {
+      lines.push({ kind: "removed", text: old[i++] });
+    } else {
+      lines.push({ kind: "added", text: mine[j++] });
+    }
+  }
+  return lines;
+}
+
 /** Creates an empty page or folder like the core, refusing names that break a rule or clash. */
 function createEntry(args: InvokeArgs | undefined, kind: TreeEntry["kind"]) {
   const open = requireWorld();
@@ -286,6 +322,25 @@ export const previewFixtures: Record<string, unknown> = {
       open.pages[path] = edited;
       open.saves[path] = (open.saves[path] ?? 0) + 1;
     }
+    return { version: versionOf(open, path) };
+  },
+  // The preview simulates no outside changes, so neither is reached from its pages; both answer
+  // like the core.
+  page_compare: (args?: InvokeArgs): { version: string; lines: DiffLine[] } => {
+    const { open, path, text } = pageText(args);
+    const { text: mine } = args as { text: string };
+    return { version: versionOf(open, path), lines: compareLines(text, mine) };
+  },
+  page_restore: (args?: InvokeArgs): { version: string } => {
+    const open = requireWorld();
+    const { path, text } = args as { path: string; text: string };
+    if (Object.hasOwn(open.pages, path)) {
+      throw {
+        kind: "conflict",
+        message: "Something is at the page's path again, so it was not restored.",
+      };
+    }
+    open.pages[path] = text;
     return { version: versionOf(open, path) };
   },
   page_create: (args?: InvokeArgs) => createEntry(args, "page"),

@@ -1,13 +1,7 @@
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import {
-  Compartment,
-  EditorState,
-  RangeSetBuilder,
-  StateField,
-  type Text,
-} from "@codemirror/state";
+import { Compartment, EditorState, RangeSetBuilder, StateField, Text } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
@@ -57,10 +51,14 @@ function setReadOnly(editor: EditorView, readOnly: boolean) {
   editor.dispatch({ effects: readOnlyMode.reconfigure(EditorState.readOnly.of(readOnly)) });
 }
 
-/** The editor state for a page's text; `label` names the editor for assistive technology. */
-export function createPageState(text: string, label: string) {
+/**
+ * The editor state for a page's text, with the cursor at `cursor` (the start by default); `label`
+ * names the editor for assistive technology.
+ */
+export function createPageState(text: string, label: string, cursor = 0) {
   return EditorState.create({
     doc: text,
+    selection: { anchor: cursor },
     extensions: [
       markdown(),
       syntaxHighlighting(codeHighlight),
@@ -75,6 +73,25 @@ export function createPageState(text: string, label: string) {
       EditorView.cspNonce.of(styleNonce()),
     ],
   });
+}
+
+/**
+ * A fresh state for the page's new `text`, with no undo history, and the cursor at the line and
+ * column it had in `previous`, or at the nearest position the new text has.
+ */
+export function reloadedState(previous: EditorState, text: string, label: string) {
+  const head = previous.selection.main.head;
+  const { number, from } = previous.doc.lineAt(head);
+  const doc = Text.of(text.split("\n"));
+  const line = doc.line(Math.min(number, doc.lines));
+  return createPageState(text, label, Math.min(line.from + head - from, line.to));
+}
+
+/** Puts `state` in the running editor in place of its own, keeping whether it is read-only. */
+export function replaceState(editor: EditorView, state: EditorState) {
+  const readOnly = editor.state.readOnly;
+  editor.setState(state);
+  setReadOnly(editor, readOnly);
 }
 
 /** Replaces the whole document with `text` as one step that undo reverts on its own. */

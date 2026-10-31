@@ -1,19 +1,33 @@
 import type { EditorState } from "@codemirror/state";
+import type { EditorView } from "@codemirror/view";
+import type { RefObject } from "react";
 import { create } from "zustand";
 import type { TreeNameInput } from "../../ui/FileTree";
 import { defaultTreeWidth } from "../../ui/Shell";
+import type { Toast } from "../../ui/Toast";
 import { type Workspace, type WorldOpened, workspaceSave } from "./commands";
 import type { PageSaver, SaveNotice, SaveResult } from "./saving";
 
 /**
  * One open page. A ready page keeps its editor state, so switching tabs keeps cursor and undo, and
- * the saver of its edits with the notice the saver last reported.
+ * the saver of its edits with the notice the saver last reported. The tab that reads the page
+ * gives it `view`, which holds the running editor while the tab shows it; that editor's state is
+ * newer than `editor`, which is its state when the tab last stopped showing it.
  */
 export type PageStatus =
   | { status: "loading" }
-  | { status: "ready"; editor: EditorState; saver: PageSaver; notice: SaveNotice | null }
+  | {
+      status: "ready";
+      editor: EditorState;
+      view?: RefObject<EditorView | null>;
+      saver: PageSaver;
+      notice: SaveNotice | null;
+    }
   | { status: "not_utf8" }
   | { status: "read_error"; message: string };
+
+/** What the open world shows above the page region, about the world as a whole. */
+export type WorldNotice = "missing" | "watch_failed";
 
 type WorldStore = {
   world: { name: string; session: number } | null;
@@ -34,6 +48,9 @@ type WorldStore = {
   treeWidth: number;
   treeOverlayOpen: boolean;
   pages: Readonly<Record<string, PageStatus>>;
+  worldNotices: ReadonlySet<WorldNotice>;
+  /** Oldest first. */
+  toasts: Toast[];
   /**
    * True from the start of a world change until it ends: the pages save, then the folder dialog
    * shows. Nothing in the world can be edited or opened meanwhile, because the change drops every
@@ -74,6 +91,10 @@ type WorldStore = {
   /** Keeps a ready page's editor state, for example when its tab stops showing it. */
   setEditor: (session: number, path: string, editor: EditorState) => void;
   setNotice: (session: number, path: string, notice: SaveNotice | null) => void;
+  /** Shows a world-level notice until the world closes; ignored once that world is not open. */
+  showWorldNotice: (session: number, notice: WorldNotice) => void;
+  showToast: (session: number, message: string) => void;
+  dismissToast: (id: string) => void;
   /** Saves an open page's edits now. A page without an editor has none. */
   flush: (path: string) => Promise<SaveResult>;
   /** Stops every page's autosave, and returns the function that resumes it. */
@@ -91,7 +112,12 @@ const closedWorld = {
   treeWidth: defaultTreeWidth,
   treeOverlayOpen: false,
   pages: {},
+  worldNotices: new Set<WorldNotice>(),
+  toasts: [],
 };
+
+/** Numbers toasts, so each has its own id. */
+let toastCount = 0;
 
 /** How long after the tabs, the expanded folders or the tree width change the workspace saves. */
 export const workspaceSaveDelay = 500;
@@ -257,6 +283,23 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     const page = get().pages[path];
     if (page?.status === "ready") get().setPage(session, path, { ...page, notice });
   },
+
+  showWorldNotice: (session, notice) =>
+    set(({ world, worldNotices }) =>
+      world?.session === session && !worldNotices.has(notice)
+        ? { worldNotices: new Set([...worldNotices, notice]) }
+        : {},
+    ),
+
+  showToast: (session, message) =>
+    set(({ world, toasts }) =>
+      world?.session === session
+        ? { toasts: [...toasts, { id: `toast-${++toastCount}`, message }] }
+        : {},
+    ),
+
+  dismissToast: (id) =>
+    set(({ toasts }) => ({ toasts: toasts.filter((toast) => toast.id !== id) })),
 
   flush: (path) => {
     const page = get().pages[path];

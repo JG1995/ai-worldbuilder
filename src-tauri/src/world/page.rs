@@ -87,6 +87,47 @@ pub fn rebuild(current: &[u8], text: &str) -> Result<Vec<u8>, AppError> {
     Ok(bytes.into_bytes())
 }
 
+/// Whether a line of a comparison is on both sides, only in the editor's text, or only on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LineKind {
+    Same,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct DiffLine {
+    pub kind: LineKind,
+    pub text: String,
+}
+
+/// The lines of the page's text on disk, `disk`, compared with the editor's `text`, both with `\n`
+/// line endings: lines only in `text` are added, and lines only on disk removed.
+pub fn compare(disk: &str, text: &str) -> Vec<DiffLine> {
+    let old: Vec<&str> = disk.lines().collect();
+    let new: Vec<&str> = text.lines().collect();
+    let line = |kind, text: &str| DiffLine {
+        kind,
+        text: text.to_owned(),
+    };
+    let mut lines = Vec::with_capacity(old.len().max(new.len()));
+    for op in capture_diff_slices(Algorithm::Myers, &old, &new) {
+        let (_, removed, added) = op.as_tag_tuple();
+        if matches!(op, DiffOp::Equal { .. }) {
+            lines.extend(old[removed].iter().map(|text| line(LineKind::Same, text)));
+            continue;
+        }
+        lines.extend(
+            old[removed]
+                .iter()
+                .map(|text| line(LineKind::Removed, text)),
+        );
+        lines.extend(new[added].iter().map(|text| line(LineKind::Added, text)));
+    }
+    lines
+}
+
 /// A page's text split into line contents and the endings between them. There is always one more
 /// content than endings: the last content follows the last ending and may be empty.
 struct Lines<'a> {
@@ -303,6 +344,30 @@ mod tests {
         assert_eq!(
             rebuild(b"caf\xe9\n", "cafe\n").unwrap_err().kind,
             ErrorKind::NotUtf8
+        );
+    }
+
+    #[test]
+    fn a_comparison_marks_lines_only_in_the_editor_added_and_lines_only_on_disk_removed() {
+        let lines = compare("# Kesh\nOld line\nKept\n", "# Kesh\nNew line\nKept\nMore\n");
+
+        let view: Vec<(LineKind, &str)> = lines
+            .iter()
+            .map(|line| (line.kind, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            view,
+            [
+                (LineKind::Same, "# Kesh"),
+                (LineKind::Removed, "Old line"),
+                (LineKind::Added, "New line"),
+                (LineKind::Same, "Kept"),
+                (LineKind::Added, "More"),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&lines[1]).unwrap(),
+            serde_json::json!({ "kind": "removed", "text": "Old line" })
         );
     }
 

@@ -20,10 +20,14 @@ import {
 } from "./commands";
 import { useSaveConfirmation } from "./FailedSaveDialog";
 import { NewWorldDialog } from "./NewWorldDialog";
+import { followOutsideChanges } from "./outside-changes";
 import { saveWorkspace, useWorldStore } from "./store";
 import { WorldScreen } from "./WorldScreen";
 
 type Failure = { title: string; message: string };
+
+/** The query key of the launch's one `world_restore`. */
+const launchRestoreKey = ["world_restore"] as const;
 
 /**
  * The welcome screen or the open world, and the flows that open, switch and close worlds and the
@@ -85,7 +89,15 @@ export function World() {
 
   const restore = useEffectEvent(async (isCurrent: () => boolean) => {
     try {
-      const result = await worldRestore();
+      // The query cache makes it one restore per page load. React's StrictMode runs this effect
+      // twice in development, and two restores could finish out of order, leaving this screen on
+      // an older session than the core's, whose events it would then ignore.
+      const result = await queryClient.fetchQuery({
+        queryKey: launchRestoreKey,
+        queryFn: worldRestore,
+        staleTime: Infinity,
+        gcTime: Infinity,
+      });
       if (result && isCurrent()) show(result);
     } finally {
       if (isCurrent()) setLaunching(false);
@@ -99,6 +111,10 @@ export function World() {
       current = false;
     };
   }, []);
+
+  // From launch, not from each opening: the core can report an opening's first events before the
+  // interface has its result.
+  useEffect(() => followOutsideChanges(queryClient), [queryClient]);
 
   /** The user closed the window while a world is open: it closes once everything has saved. */
   const closeWindow = useEffectEvent(() =>
