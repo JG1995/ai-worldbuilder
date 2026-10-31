@@ -19,14 +19,16 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
-use crate::history::{self, History};
+use crate::history::{self, History, HistoryVersion, Kind};
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
 pub use watch::{EventSink, WorldEvent};
-use write::{NewEntry, OwnWrites, PageVersion, Recorder, Recording};
+use write::{NewEntry, OwnWrites, PageVersion, Recorder, Recording, RestoredPage};
 
 const APP_TITLE: &str = "Grimoire.md";
+/// Why an opening has no history when the application has no data folder to keep it in.
+const NO_APP_DATA: &str = "The application has no data folder to keep history in.";
 /// The limits on a workspace from the interface: the tree width range of `src/ui/Shell.tsx`, and
 /// more tabs and expanded folders than anyone opens.
 const TREE_WIDTHS: (u32, u32) = (200, 420);
@@ -64,8 +66,8 @@ struct OpenWorld {
     recent_id: Option<String>,
     /// What the application wrote in it, so the watcher leaves those writes out.
     own_writes: OwnWrites,
-    /// Its history, or `None` when there is no app data folder or the history could not open.
-    history: Option<History>,
+    /// Its history, or why it has none: there is no app data folder, or the history could not open.
+    history: Result<History, String>,
     /// Whether its writes are being recorded, as the interface was last told.
     recording: bool,
     /// Lives exactly as long as this opening: replacing or clearing the open world drops it.
@@ -156,7 +158,7 @@ impl WorldState {
                 .and_then(|id| inner.recent.workspace(id));
             let (history, recording) = match &inner.app_data {
                 Some(app_data) => self.open_history(app_data, &root, session),
-                None => (None, false),
+                None => (Err(NO_APP_DATA.to_owned()), false),
             };
             inner.world = Some(OpenWorld {
                 root: root.clone(),
@@ -178,8 +180,13 @@ impl WorldState {
     /// Opens the history of the world at `root` for the opening `session`, resolving the records
     /// that writes left pending with what is on disk now, and removing changes past retention. It
     /// tells the interface when a damaged history was set aside, or when changes are not being
-    /// recorded, and returns the history with whether it records.
-    fn open_history(&self, app_data: &Path, root: &Path, session: u64) -> (Option<History>, bool) {
+    /// recorded, and returns the history, or why there is none, with whether it records.
+    fn open_history(
+        &self,
+        app_data: &Path,
+        root: &Path,
+        session: u64,
+    ) -> (Result<History, String>, bool) {
         let opened = History::open(app_data, root, now(), |path| state_on_disk(root, path));
         if let Some(sink) = self.events.get() {
             if opened.set_aside {
@@ -192,7 +199,13 @@ impl WorldState {
                 });
             }
         }
-        (opened.history, opened.not_recording.is_none())
+        let recording = opened.not_recording.is_none();
+        let history = opened.history.ok_or_else(|| {
+            opened
+                .not_recording
+                .map_or_else(String::new, history::Failure::into_reason)
+        });
+        (history, recording)
     }
 
     /// Opens a world from the recent list: `not_found` for an id that is not in it, and
@@ -338,6 +351,75 @@ impl WorldState {
         self.with_world(|root, own, recorder| write::restore_page(root, own, recorder, path, text))
     }
 
+    /// The page's earlier versions, newest first, without the newest ones whose bytes the page
+    /// holds now, which the History view shows as Current. An opening without a history fails
+    /// with `io` and the reason it has none.
+    fn history_list(&self, path: &str) -> Result<Vec<HistoryVersion>, AppError> {
+        let inner = self.lock();
+        let world = inner.world.as_ref().ok_or_else(no_world)?;
+        let current = fs::read(paths::existing_page(&world.root, path)?)?;
+        let history = world
+            .history
+            .as_ref()
+            .map_err(|reason| AppError::new(ErrorKind::Io, reason.clone()))?;
+        Ok(history
+            .versions(path)?
+            .into_iter()
+            .skip_while(|(_, bytes)| *bytes == current)
+            .map(|(version, _)| version)
+            .collect())
+    }
+
+    /// The lines of the page's version `version` compared with the editor's `text`: lines only in
+    /// `text` are added, and lines only in the version removed.
+    fn history_compare(
+        &self,
+        path: &str,
+        version: &str,
+        text: &str,
+    ) -> Result<Vec<DiffLine>, AppError> {
+        let inner = self.lock();
+        let world = inner.world.as_ref().ok_or_else(no_world)?;
+        paths::existing_page(&world.root, path)?;
+        let bytes = match &world.history {
+            Ok(history) => history.version_bytes(path, version)?,
+            Err(_) => None,
+        };
+        let bytes = bytes.ok_or_else(unknown_version)?;
+        Ok(page::compare(&page::text_of(&bytes)?, text))
+    }
+
+    /// Writes the exact bytes of the page's version `version` over the page, if the page still has
+    /// the bytes of `page_version`, under the world lock like a save, and records it as a restore.
+    fn history_restore(
+        &self,
+        path: &str,
+        version: &str,
+        page_version: &str,
+    ) -> Result<RestoredPage, AppError> {
+        self.with_world(|root, own, recorder| {
+            let bytes = match recorder.history() {
+                Some(history) => history.version_bytes(path, version)?,
+                None => None,
+            };
+            let bytes = bytes.ok_or_else(unknown_version)?;
+            write::write_bytes(
+                root,
+                own,
+                recorder,
+                path,
+                &bytes,
+                page_version,
+                Kind::Restore,
+            )
+        })
+    }
+
+    /// Writes back what the change `change` replaced, under the world lock like a save.
+    fn history_undo(&self, change: &str) -> Result<RestoredPage, AppError> {
+        self.with_world(|root, own, recorder| write::undo(root, own, recorder, change))
+    }
+
     fn root(&self) -> Result<PathBuf, AppError> {
         let inner = self.lock();
         let world = inner.world.as_ref().ok_or_else(no_world)?;
@@ -354,7 +436,7 @@ impl WorldState {
         let mut inner = self.lock();
         let session = inner.session;
         let world = inner.world.as_mut().ok_or_else(no_world)?;
-        let mut recorder = Recorder::new(world.history.as_mut(), now());
+        let mut recorder = Recorder::new(world.history.as_mut().ok(), now());
         let result = write(&world.root, &mut world.own_writes, &mut recorder);
         let outcome = recorder.outcome();
         if let Some(event) = world.recorded(outcome, session)
@@ -463,6 +545,47 @@ pub async fn page_restore(
     text: String,
 ) -> Result<PageVersion, AppError> {
     guard(|| state.restore_page(&path, &text))
+}
+
+/// A page's earlier versions, newest first, without those equal to the page on disk.
+#[tauri::command]
+pub async fn history_list(
+    state: State<'_, WorldState>,
+    path: String,
+) -> Result<Vec<HistoryVersion>, AppError> {
+    guard(|| state.history_list(&path))
+}
+
+/// Compares a version of a page with the editor's text, line by line.
+#[tauri::command]
+pub async fn history_compare(
+    state: State<'_, WorldState>,
+    path: String,
+    version: String,
+    text: String,
+) -> Result<Vec<DiffLine>, AppError> {
+    guard(|| state.history_compare(&path, &version, &text))
+}
+
+/// Writes a version's exact bytes back to its page if the page still has the bytes of
+/// `page_version`, and returns the page's new text and version, with the change that recorded it.
+#[tauri::command]
+pub async fn history_restore(
+    state: State<'_, WorldState>,
+    path: String,
+    version: String,
+    page_version: String,
+) -> Result<RestoredPage, AppError> {
+    guard(|| state.history_restore(&path, &version, &page_version))
+}
+
+/// Undoes a restore: writes back the bytes it replaced if the page still holds the restored ones.
+#[tauri::command]
+pub async fn history_undo(
+    state: State<'_, WorldState>,
+    change: String,
+) -> Result<RestoredPage, AppError> {
+    guard(|| state.history_undo(&change))
 }
 
 /// Creates an empty page `{name}.md` in `folder`, or at the world's top level when it is `null`.
@@ -650,6 +773,13 @@ fn display(location: &Path) -> NewLocation {
 
 fn no_world() -> AppError {
     AppError::new(ErrorKind::NoWorld, "No world is open.")
+}
+
+fn unknown_version() -> AppError {
+    AppError::new(
+        ErrorKind::NotFound,
+        "This version is no longer in the page's history.",
+    )
 }
 
 /// What is at `relative` in the world at `root` now, for history's recovery. A path that
@@ -1334,6 +1464,128 @@ mod tests {
             state.open(world.path().to_path_buf()).unwrap();
 
             assert_eq!(stored(app_data.path(), world.path()).len(), 1);
+        }
+
+        const SALTMERE: &str = "Places/Saltmere.md";
+
+        fn ids(versions: &[HistoryVersion]) -> Vec<&str> {
+            versions.iter().map(|version| version.id.as_str()).collect()
+        }
+
+        #[test]
+        fn the_list_leaves_out_the_newest_versions_the_page_holds_and_compares_from_a_version() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            state.open(world.path().to_path_buf()).unwrap();
+            assert!(state.history_list(SALTMERE).unwrap().is_empty());
+            save(&state, "# Saltmere harbour\n");
+
+            let versions = state.history_list(SALTMERE).unwrap();
+            let lines = state
+                .history_compare(SALTMERE, "1-before", "# Saltmere harbour\n")
+                .unwrap();
+
+            // The edit's text is the page on disk, so only the text before it is listed.
+            assert_eq!(ids(&versions), ["1-before"]);
+            assert_eq!(
+                serde_json::to_value(&versions[0]).unwrap(),
+                json!({ "id": "1-before", "kind": "outside", "at": versions[0].at })
+            );
+            assert_eq!(
+                serde_json::to_value(&lines).unwrap(),
+                json!([
+                    { "kind": "removed", "text": "# Saltmere" },
+                    { "kind": "added", "text": "# Saltmere harbour" },
+                ])
+            );
+            assert_eq!(
+                state
+                    .history_compare(SALTMERE, "9-after", "")
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::NotFound
+            );
+            // Another tool writes the edit's text back as it was: the edit is listed again.
+            fs::write(world.path().join(SALTMERE), "# Other\n").unwrap();
+            assert_eq!(
+                ids(&state.history_list(SALTMERE).unwrap()),
+                ["1-after", "1-before"]
+            );
+        }
+
+        #[test]
+        fn after_a_relaunch_the_list_still_holds_the_versions_and_restoring_one_writes_its_bytes() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            state.open(world.path().to_path_buf()).unwrap();
+            save(&state, "# Saltmere harbour\n");
+            state.close();
+            drop(state);
+
+            let relaunched = launched(&app_data);
+            relaunched.open(world.path().to_path_buf()).unwrap();
+            let versions = relaunched.history_list(SALTMERE).unwrap();
+            let page = relaunched.read_page(SALTMERE).unwrap();
+            let restored = relaunched
+                .history_restore(SALTMERE, &versions[0].id, &page.version)
+                .unwrap();
+
+            assert_eq!(
+                fs::read(world.path().join(SALTMERE)).unwrap(),
+                "\u{feff}# Saltmere\r\n".as_bytes()
+            );
+            assert_eq!(restored.text, "# Saltmere\n");
+            assert_eq!(restored.change.as_deref(), Some("2"));
+            assert_eq!(
+                relaunched
+                    .history_restore(SALTMERE, "9-after", &restored.version)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::NotFound
+            );
+            let undone = relaunched.history_undo("2").unwrap();
+            assert_eq!(undone.text, "# Saltmere harbour\n");
+        }
+
+        #[test]
+        fn an_opening_without_a_history_says_why_its_history_cannot_be_read() {
+            let state = WorldState::default();
+            let world = world();
+            state.open(world.path().to_path_buf()).unwrap();
+
+            let error = state.history_list(SALTMERE).unwrap_err();
+
+            assert_eq!(error.kind, ErrorKind::Io);
+            assert_eq!(error.message, NO_APP_DATA);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn while_history_is_not_recording_a_restore_still_writes_and_names_no_change() {
+            use std::os::unix::fs::PermissionsExt;
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            state.open(world.path().to_path_buf()).unwrap();
+            save(&state, "# Saltmere harbour\n");
+            let folder = file(app_data.path(), world.path())
+                .parent()
+                .unwrap()
+                .to_path_buf();
+
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+            let page = state.read_page(SALTMERE).unwrap();
+            let restored = state.history_restore(SALTMERE, "1-before", &page.version);
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let restored = restored.unwrap();
+            assert_eq!(restored.change, None);
+            assert_eq!(
+                fs::read(world.path().join(SALTMERE)).unwrap(),
+                "\u{feff}# Saltmere\r\n".as_bytes()
+            );
         }
 
         #[test]

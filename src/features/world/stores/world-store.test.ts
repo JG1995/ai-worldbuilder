@@ -236,6 +236,49 @@ describe("savers", () => {
   });
 });
 
+describe("the History view", () => {
+  it("shows only for the active page, and closes when another page becomes active or the world changes", () => {
+    openWorld(["A.md", "B.md"], "A.md");
+
+    store().showHistory("B.md");
+    expect(store().historyPath).toBeNull();
+    store().showHistory("A.md");
+    store().activate("A.md");
+    expect(store().historyPath).toBe("A.md");
+
+    store().activate("B.md");
+    expect(store().historyPath).toBeNull();
+    store().showHistory("B.md");
+    store().closeTab("B.md");
+    expect(store().historyPath).toBeNull();
+
+    store().showHistory("A.md");
+    openWorld(["A.md"], "A.md", 2);
+    expect(store().historyPath).toBeNull();
+  });
+});
+
+describe("toasts", () => {
+  it("run their action once, and a dismissed toast's action goes with it", () => {
+    openWorld();
+    const undo = vi.fn();
+    const kept = vi.fn();
+    store().showToast(1, "Restored the version", { label: "Undo", run: undo });
+    store().showToast(1, "Another", { label: "Undo", run: kept });
+    const [first, second] = store().toasts;
+    expect(first).toMatchObject({ message: "Restored the version", action: "Undo" });
+
+    store().runToastAction(first.id);
+    store().runToastAction(first.id);
+    store().dismissToast(second.id);
+    store().runToastAction(second.id);
+
+    expect(undo).toHaveBeenCalledOnce();
+    expect(kept).not.toHaveBeenCalled();
+    expect(store().toasts).toEqual([]);
+  });
+});
+
 describe("the workspace", () => {
   const saves = (calls: { command: string; args?: unknown }[]) =>
     calls.filter(({ command }) => command === "workspace_save").map(({ args }) => args);

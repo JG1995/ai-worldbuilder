@@ -123,6 +123,11 @@ impl<'a> Recorder<'a> {
         self.started(result)
     }
 
+    /// The history the write records itself in, to read what it writes back from.
+    pub fn history(&self) -> Option<&History> {
+        self.history.as_deref()
+    }
+
     fn begin(&mut self, kind: Kind, entries: &[Entry]) -> Option<Record> {
         let now = self.now;
         let result = self.history.as_deref_mut()?.begin(kind, entries, now);
@@ -139,16 +144,23 @@ impl<'a> Recorder<'a> {
         self.ended(result);
     }
 
-    /// Completes `record` when its write happened, and abandons it when it did not.
-    fn finish(&mut self, record: Option<Record>, written: bool) {
+    /// Completes `record` when its write happened, and abandons it when it did not. Returns the id
+    /// of the change once it is complete.
+    fn finish(&mut self, record: Option<Record>, written: bool) -> Option<i64> {
         let (Some(record), Some(history)) = (record, self.history.as_deref_mut()) else {
-            return;
+            return None;
         };
+        let change = record.change();
         if written {
             let result = history.complete(record);
+            let completed = result.is_ok();
             self.ended(result);
-        } else if let Err(failure) = history.abandon(record) {
-            self.failed(failure);
+            completed.then_some(change)
+        } else {
+            if let Err(failure) = history.abandon(record) {
+                self.failed(failure);
+            }
+            None
         }
     }
 
@@ -174,6 +186,31 @@ impl<'a> Recorder<'a> {
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct PageVersion {
     pub version: String,
+}
+
+/// A page after Restore this version or Undo wrote it back.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct RestoredPage {
+    /// The page's new text as the editor shows it, as `page_read` would read it.
+    pub text: String,
+    pub version: String,
+    /// The id of the change that recorded the write, or none when it was not recorded.
+    pub change: Option<String>,
+}
+
+/// What a write puts in place of a page's bytes, and how history records it.
+enum Replacement<'a> {
+    /// The editor's text, rebuilt over the page's bytes; Keep mine's when `keep_mine` is set.
+    Text { text: &'a str, keep_mine: bool },
+    /// Exact bytes, for Restore this version (`Kind::Restore`) and Undo (`Kind::Undo`).
+    Bytes { bytes: &'a [u8], kind: Kind },
+}
+
+/// A page that a write replaced: the version of its bytes, and the change that recorded it.
+struct Replaced {
+    version: String,
+    change: Option<i64>,
 }
 
 /// Saves the editor's `text` to the page at `relative` inside `root`, if the page still has the
@@ -216,6 +253,149 @@ fn write_page_with(
     keep_mine: bool,
     put_in_place: impl FnOnce(&Path, &Path, &str) -> Result<(), AppError>,
 ) -> Result<PageVersion, AppError> {
+    let replacement = Replacement::Text { text, keep_mine };
+    let replaced = replace_page_with(
+        root,
+        own,
+        recorder,
+        relative,
+        version,
+        replacement,
+        put_in_place,
+    )?;
+    Ok(PageVersion {
+        version: replaced.version,
+    })
+}
+
+/// Writes `bytes` exactly over the page at `relative` inside `root`, if the page still has the
+/// bytes that `version` names, and records the write as `kind`: Restore this version or Undo. The
+/// caller holds the world lock, so writes and their records do not overlap.
+pub fn write_bytes(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    relative: &str,
+    bytes: &[u8],
+    version: &str,
+    kind: Kind,
+) -> Result<RestoredPage, AppError> {
+    write_bytes_with(
+        root,
+        own,
+        recorder,
+        relative,
+        bytes,
+        version,
+        kind,
+        check_and_rename,
+    )
+}
+
+/// `write_bytes`, with the step that puts the written temporary file in place given by the caller,
+/// as in `write_page_with`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test seam adds one step to write_bytes's arguments"
+)]
+fn write_bytes_with(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    relative: &str,
+    bytes: &[u8],
+    version: &str,
+    kind: Kind,
+    put_in_place: impl FnOnce(&Path, &Path, &str) -> Result<(), AppError>,
+) -> Result<RestoredPage, AppError> {
+    let text = page::text_of(bytes)?;
+    let replacement = Replacement::Bytes { bytes, kind };
+    let replaced = replace_page_with(
+        root,
+        own,
+        recorder,
+        relative,
+        version,
+        replacement,
+        put_in_place,
+    )?;
+    Ok(RestoredPage {
+        text,
+        version: replaced.version,
+        change: replaced.change.map(|change| change.to_string()),
+    })
+}
+
+/// Writes back the state before the change `change`, if the page it touched still holds the state
+/// the change left, and records the write as Undo. Only a change of one page that existed before
+/// and after it can be undone here; any other, and a change that history does not hold, is
+/// `not_found`. A page that changed since is a `conflict`, and nothing is written.
+pub fn undo(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    change: &str,
+) -> Result<RestoredPage, AppError> {
+    let entries = match (change.parse::<i64>(), recorder.history()) {
+        (Ok(id), Some(history)) => history.change_entries(id)?,
+        _ => None,
+    };
+    let Some(
+        [
+            Entry {
+                path,
+                before: State::Page(before),
+                after: State::Page(after),
+            },
+        ],
+    ) = entries.as_deref()
+    else {
+        return Err(AppError::new(
+            ErrorKind::NotFound,
+            "This change cannot be undone.",
+        ));
+    };
+    // Every entry is checked before any is written, so an undo stays all or nothing.
+    let current = match paths::existing_page(root, path) {
+        Ok(page) => Some(fs::read(page)?),
+        Err(error) if error.kind == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let Some(current) = current.filter(|current| current == after) else {
+        let name = Path::new(path).file_stem().unwrap_or_default();
+        return Err(AppError::new(
+            ErrorKind::Conflict,
+            format!(
+                "“{}” changed since the restore, so nothing was undone. Its history still holds \
+                 every version.",
+                name.to_string_lossy()
+            ),
+        ));
+    };
+    write_bytes(
+        root,
+        own,
+        recorder,
+        path,
+        before,
+        &page::version_of(&current),
+        Kind::Undo,
+    )
+}
+
+/// Replaces the page at `relative` inside `root` with `replacement`, if the page still has the
+/// bytes that `version` names. The bytes it replaces are recorded in history before anything is
+/// written; the record is completed once the new bytes are in place and removed when the write
+/// fails. `put_in_place` puts the written temporary file in place.
+fn replace_page_with(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    relative: &str,
+    version: &str,
+    replacement: Replacement,
+    put_in_place: impl FnOnce(&Path, &Path, &str) -> Result<(), AppError>,
+) -> Result<Replaced, AppError> {
     let page = paths::existing_page(root, relative)?;
     let current = fs::read(&page)?;
     if page::version_of(&current) != version {
@@ -226,15 +406,35 @@ fn write_page_with(
     if permissions.readonly() {
         return Err(AppError::new(ErrorKind::Io, "The page is read-only."));
     }
-    let bytes = page::rebuild(&current, text)?;
+    let bytes = match replacement {
+        Replacement::Text { text, .. } => page::rebuild(&current, text)?,
+        Replacement::Bytes { bytes, .. } => {
+            // A page that is not UTF-8 is never written, as a save refuses it.
+            page::text_of(&current)?;
+            bytes.to_vec()
+        }
+    };
     if bytes == current {
-        return Ok(PageVersion {
+        return Ok(Replaced {
             version: version.to_owned(),
+            change: None,
         });
     }
 
-    // The bytes the save replaces are in history before anything is written.
-    let record = recorder.begin_save(relative, &current, &bytes, keep_mine);
+    // The bytes the write replaces are in history before anything is written.
+    let record = match replacement {
+        Replacement::Text { keep_mine, .. } => {
+            recorder.begin_save(relative, &current, &bytes, keep_mine)
+        }
+        Replacement::Bytes { kind, .. } => {
+            let entry = Entry {
+                path: relative.to_owned(),
+                before: State::Page(current),
+                after: State::Page(bytes.clone()),
+            };
+            recorder.begin(kind, &[entry])
+        }
+    };
     let temporary = temporary_path(&page);
     let result = OpenOptions::new()
         .write(true)
@@ -251,11 +451,12 @@ fn write_page_with(
             }
             result
         });
-    recorder.finish(record, result.is_ok());
+    let change = recorder.finish(record, result.is_ok());
     result?;
     own.page(relative, &bytes);
-    Ok(PageVersion {
+    Ok(Replaced {
         version: page::version_of(&bytes),
+        change,
     })
 }
 
@@ -1278,6 +1479,208 @@ mod tests {
                     vec![entry("Page.md", page(b"one\n"), page(b"two\n"))]
                 )]
             );
+        }
+
+        #[test]
+        fn a_restore_writes_the_version_s_exact_bytes_and_returns_the_text_the_editor_shows() {
+            for bytes in [
+                b"# Kesh\nOld\n".as_slice(),
+                b"# Kesh\r\nOld\r\n",
+                b"# Kesh\r\nOld\nMixed\r",
+                b"\xef\xbb\xbf# Kesh\r\nOld\r\n",
+            ] {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, version) = world_with_page(b"# Kesh\nNew\n");
+                let mut history = history_of(&app_data, &world);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+                let own = &mut own();
+
+                let restored = write_bytes(
+                    world.path(),
+                    own,
+                    &mut recorder,
+                    "Page.md",
+                    bytes,
+                    &version,
+                    Kind::Restore,
+                )
+                .unwrap();
+
+                assert_eq!(page_bytes(&world), bytes, "{bytes:?}");
+                let text = page::read(&world.path().join("Page.md")).unwrap().text;
+                assert_eq!(
+                    restored,
+                    RestoredPage {
+                        text,
+                        version: page::version_of(bytes),
+                        change: Some("1".to_owned()),
+                    }
+                );
+                assert!(own.is_own(world.path(), "Page.md"));
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "restore".to_owned(),
+                        vec![entry("Page.md", page(b"# Kesh\nNew\n"), page(bytes))]
+                    )]
+                );
+                assert_eq!(entries(&world), ["Page.md"]);
+            }
+        }
+
+        #[test]
+        fn a_stale_version_a_read_only_page_and_a_failed_rename_refuse_a_restore_and_record_nothing()
+         {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, version) = world_with_page(b"current\n");
+            let mut history = history_of(&app_data, &world);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let own = &mut own();
+            let restore = |recorder: &mut Recorder, version: &str| {
+                write_bytes(
+                    world.path(),
+                    &mut OwnWrites::default(),
+                    recorder,
+                    "Page.md",
+                    b"earlier\n",
+                    version,
+                    Kind::Restore,
+                )
+            };
+
+            let stale = restore(&mut recorder, &page::version_of(b"before\n")).unwrap_err();
+            let failed_rename = write_bytes_with(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                b"earlier\n",
+                &version,
+                Kind::Restore,
+                |_, _, _| Err(io::Error::other("the rename failed").into()),
+            )
+            .unwrap_err();
+            let path = world.path().join("Page.md");
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&path, permissions).unwrap();
+            let read_only = restore(&mut recorder, &version).unwrap_err();
+
+            assert_eq!(stale.kind, ErrorKind::Conflict);
+            assert_eq!(failed_rename.message, "the rename failed");
+            assert_eq!(read_only.message, "The page is read-only.");
+            assert_eq!(recorder.outcome(), Recording::Nothing);
+            assert_eq!(page_bytes(&world), b"current\n");
+            assert_eq!(entries(&world), ["Page.md"]);
+            assert!(recorded(&app_data, &world).is_empty());
+        }
+
+        #[test]
+        fn undo_writes_back_the_replaced_bytes_and_a_later_save_starts_a_new_change() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, version) = world_with_page(b"current\r\n");
+            let mut history = history_of(&app_data, &world);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let own = &mut own();
+            let restored = write_bytes(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                b"earlier\n",
+                &version,
+                Kind::Restore,
+            )
+            .unwrap();
+
+            let undone = undo(world.path(), own, &mut recorder, "1").unwrap();
+            write_page(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                "current\nmore\n",
+                &undone.version,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(restored.change.as_deref(), Some("1"));
+            assert_eq!(
+                undone,
+                RestoredPage {
+                    text: "current\n".to_owned(),
+                    version: page::version_of(b"current\r\n"),
+                    change: Some("2".to_owned()),
+                }
+            );
+            assert_eq!(
+                recorded(&app_data, &world),
+                [
+                    (
+                        "restore".to_owned(),
+                        vec![entry("Page.md", page(b"current\r\n"), page(b"earlier\n"))]
+                    ),
+                    (
+                        "undo".to_owned(),
+                        vec![entry("Page.md", page(b"earlier\n"), page(b"current\r\n"))]
+                    ),
+                    (
+                        "edit".to_owned(),
+                        vec![entry(
+                            "Page.md",
+                            page(b"current\r\n"),
+                            page(b"current\r\nmore\r\n")
+                        )]
+                    ),
+                ]
+            );
+        }
+
+        #[test]
+        fn undo_after_the_page_changed_or_of_a_change_it_cannot_undo_writes_nothing() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, version) = world_with_page(b"current\n");
+            let mut history = history_of(&app_data, &world);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let own = &mut own();
+            write_bytes(
+                world.path(),
+                own,
+                &mut recorder,
+                "Page.md",
+                b"earlier\n",
+                &version,
+                Kind::Restore,
+            )
+            .unwrap();
+            create_page(world.path(), own, &mut recorder, None, "New").unwrap();
+            // Another tool changed the restored page.
+            fs::write(world.path().join("Page.md"), b"theirs\n").unwrap();
+
+            let changed = undo(world.path(), own, &mut recorder, "1").unwrap_err();
+            let new_page = undo(world.path(), own, &mut recorder, "2").unwrap_err();
+            let unknown = undo(world.path(), own, &mut recorder, "3").unwrap_err();
+            let garbage = undo(world.path(), own, &mut recorder, "../Page.md").unwrap_err();
+            fs::remove_file(world.path().join("Page.md")).unwrap();
+            let deleted = undo(world.path(), own, &mut recorder, "1").unwrap_err();
+
+            assert_eq!(changed.kind, ErrorKind::Conflict);
+            assert_eq!(
+                changed.message,
+                "“Page” changed since the restore, so nothing was undone. Its history still \
+                 holds every version."
+            );
+            assert_eq!(deleted.kind, ErrorKind::Conflict);
+            for error in [new_page, unknown, garbage] {
+                assert_eq!(error.kind, ErrorKind::NotFound);
+            }
+            assert_eq!(fs::read(world.path().join("New.md")).unwrap(), b"");
+            let kinds: Vec<String> = recorded(&app_data, &world)
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect();
+            assert_eq!(kinds, ["restore", "new_page"]);
         }
 
         /// SQLite cannot create its rollback journal in a folder it cannot write, so every write
