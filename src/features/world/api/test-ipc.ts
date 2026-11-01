@@ -4,7 +4,7 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { vi } from "vitest";
 import type { PageText, TreeEntry, WorldOpened } from "@/types/api";
-import { pageNameOf } from "../utils/paths";
+import { pageNameOf, parentOf } from "../utils/paths";
 
 type Handler = (args: Record<string, unknown>) => unknown;
 
@@ -69,6 +69,11 @@ const defaults: Record<string, Handler> = {
     change: "undo",
   }),
   backlinks_list: () => ({ state: "ready", pages: [] }),
+  links_in: () => ({ state: "ready", links: [] }),
+  link_create: ({ from, target }) => ({
+    state: "created",
+    path: entryPath(parentOf(String(from)), `${String(target)}.md`),
+  }),
 };
 
 function entryPath(folder: unknown, name: string) {

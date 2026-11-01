@@ -281,6 +281,33 @@ describe("opening a page at a place", () => {
     expect(store().createdPage).toBe("B.md");
     expect(store().takeCursorTarget("B.md")).toBeNull();
   });
+
+  it("moves a ready page's cursor to a linked heading or block, and leaves it for one not there", () => {
+    openWorld(["A.md", "B.md"], "A.md");
+    const text = "# B\n\nStart.\n\n## Docks\n\nA quay. ^quay\n";
+    const { page } = readyPage(text);
+    store().setPage(1, "B.md", page);
+    const head = () => {
+      const opened = store().pages["B.md"];
+      return opened?.status === "ready" ? opened.editor.selection.main.head : null;
+    };
+
+    store().openPage("B.md", { newTab: true, at: { heading: "docks", block: null } });
+    expect(head()).toBe(text.indexOf("## Docks"));
+    store().openPage("B.md", { newTab: true, at: { heading: null, block: "quay" } });
+    expect(head()).toBe(text.indexOf("A quay."));
+    store().openPage("B.md", { newTab: true, at: { heading: "Harbour", block: null } });
+    expect(head()).toBe(text.indexOf("A quay."));
+    expect(store().createdPage).toBe("B.md");
+  });
+
+  it("leaves a page being read a heading or block as its cursor target", () => {
+    openWorld(["A.md"], "A.md");
+
+    store().openPage("B.md", { newTab: true, at: { heading: "Docks", block: null } });
+
+    expect(store().takeCursorTarget("B.md")).toEqual({ heading: "Docks", block: null });
+  });
 });
 
 describe("the History view", () => {

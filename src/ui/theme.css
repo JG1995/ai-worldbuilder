@@ -310,6 +310,26 @@
   @apply mono;
 }
 
+/*
+ * Wiki links, with their syntax visible: a resolved link in accent, an unresolved one muted. The
+ * underline, solid or dashed, tells them apart without colour.
+ */
+.page-editor.cm-editor .cm-link,
+.page-editor.cm-editor .cm-link-unresolved {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+}
+
+.page-editor.cm-editor .cm-link {
+  color: var(--color-accent);
+  text-decoration-style: solid;
+}
+
+.page-editor.cm-editor .cm-link-unresolved {
+  color: var(--color-text-muted);
+  text-decoration-style: dashed;
+}
+
 /* Outside any layer, so it wins over the transition and animation utilities. */
 @media (prefers-reduced-motion: reduce) {
   *,

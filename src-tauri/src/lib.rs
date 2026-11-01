@@ -76,6 +76,8 @@ pub fn run() {
             world::history_restore,
             world::history_undo,
             world::backlinks_list,
+            world::links_in,
+            world::link_create,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

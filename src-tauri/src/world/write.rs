@@ -588,6 +588,221 @@ fn create_restored(
     Ok(())
 }
 
+/// What following an unresolved link created, or the page it found instead.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LinkedPage {
+    /// An empty page was created at `path`.
+    Created { path: String },
+    /// A page that the link names is at `path` already.
+    Existing { path: String },
+    /// The page index is still being built, so nothing was created.
+    NotReady,
+}
+
+/// Creates an empty page for an unresolved link at `relative` inside `root`, the path
+/// `index::creation_path` gives for the link's untrusted text, with each of its folders that is
+/// missing. Existing folders are matched by their names on disk ignoring letter case, so the page
+/// lands in the folder the tree shows, and a page already there in any letter case is `Existing`.
+/// Every segment is confined and every new name passes the naming rules before anything is
+/// created; nothing is ever replaced. The folders and the page are recorded as one new page
+/// before any of them is created. The caller holds the world lock, so writes do not overlap.
+pub fn create_linked_page(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    relative: &str,
+) -> Result<LinkedPage, AppError> {
+    create_linked_page_with(root, own, recorder, relative, create_restored_folder)
+}
+
+/// `create_linked_page`, with the step that creates one missing folder given by the caller, so
+/// tests can make it fail after an earlier folder was created.
+fn create_linked_page_with(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    relative: &str,
+    mut create_folder: impl FnMut(&Path) -> Result<(), AppError>,
+) -> Result<LinkedPage, AppError> {
+    let relative = match on_disk(root, relative)? {
+        OnDisk::Page(path) => return Ok(LinkedPage::Existing { path }),
+        OnDisk::Missing(path) => path,
+    };
+    let (page, missing) = paths::restorable_page(root, &relative)?;
+    let folders: Vec<String> = missing
+        .iter()
+        .filter_map(|folder| relative_to(root, folder))
+        .collect();
+    let entries: Vec<Entry> = folders
+        .iter()
+        .map(|path| Entry {
+            path: path.clone(),
+            before: State::Absent,
+            after: State::Folder,
+        })
+        .chain([Entry {
+            path: relative.clone(),
+            before: State::Absent,
+            after: State::Page(Vec::new()),
+        }])
+        .collect();
+    let record = recorder.begin(Kind::NewPage, &entries);
+    let mut created = 0;
+    let mut result = missing.iter().zip(&folders).try_for_each(|(folder, path)| {
+        create_folder(folder)?;
+        own.folder(path);
+        created += 1;
+        Ok(())
+    });
+    if result.is_ok() {
+        result = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&page)
+            .map(drop)
+            .map_err(creation_error);
+    }
+    recorder.finish(record, result.is_ok());
+    if let Err(error) = result {
+        // History holds what exists: the folders created before the failure, each on its own.
+        for path in &folders[..created] {
+            recorder.add(
+                Kind::NewFolder,
+                Entry {
+                    path: path.clone(),
+                    before: State::Absent,
+                    after: State::Folder,
+                },
+            );
+        }
+        // A page that appeared at the path since it was looked for, in any letter case, opens.
+        return match on_disk(root, &relative) {
+            Ok(OnDisk::Page(path)) if error.kind == ErrorKind::Exists => {
+                Ok(LinkedPage::Existing { path })
+            }
+            _ => Err(error),
+        };
+    }
+    own.page(&relative, b"");
+    Ok(LinkedPage::Created { path: relative })
+}
+
+/// A link's page path with each existing segment's name as it is on disk.
+enum OnDisk {
+    /// A page is at the path, in some letter case.
+    Page(String),
+    /// No page is there yet; each missing segment passes the naming rules.
+    Missing(String),
+}
+
+/// Maps `relative`, a page path from untrusted link text, to the names on disk, segment by segment
+/// from `root`. Every segment must pass confinement's check. An existing folder gives its name on
+/// disk, ignoring letter case and preferring an exact match; one that is a link or junction, or a
+/// name the file system finds but its listing does not show (a Windows short name such as
+/// `OBSIDI~1`), is refused as an invalid path. A missing folder or page must pass the naming rules,
+/// and another entry where a folder or the page would go is the clash New folder and New page give.
+fn on_disk(root: &Path, relative: &str) -> Result<OnDisk, AppError> {
+    let segments: Vec<&str> = relative.split('/').collect();
+    let Some((page_name, folders)) = segments.split_last() else {
+        return Err(outside_world());
+    };
+    let allowed = segments
+        .iter()
+        .all(|segment| paths::is_allowed_name(segment));
+    if !allowed || !paths::is_page_name(page_name) {
+        return Err(outside_world());
+    }
+    // `is_page_name` makes it end in a three-byte `.md`.
+    let stem = &page_name[..page_name.len() - 3];
+    paths::check_root(root)?;
+    let mut mapped: Vec<String> = Vec::new();
+    // The folder that holds the next segment, while it exists.
+    let mut parent = Some(root.to_path_buf());
+    for folder in folders {
+        let found = match &parent {
+            Some(parent) => entry_named(parent, folder)?,
+            None => None,
+        };
+        match found {
+            Some((name, kind)) if kind.is_dir() && !kind.is_symlink() => {
+                parent = parent.map(|parent| parent.join(&name));
+                mapped.push(name);
+            }
+            Some((_, kind)) if kind.is_symlink() => return Err(outside_world()),
+            Some(_) => return Err(exists()),
+            None => {
+                names::check_name(folder)?;
+                if let Some(parent) = &parent {
+                    refuse_unlisted(parent, folder)?;
+                }
+                parent = None;
+                mapped.push((*folder).to_owned());
+            }
+        }
+    }
+    let found = match &parent {
+        Some(parent) => entry_named(parent, page_name)?,
+        None => None,
+    };
+    match found {
+        Some((name, kind)) if kind.is_file() => {
+            mapped.push(name);
+            Ok(OnDisk::Page(mapped.join("/")))
+        }
+        Some(_) => Err(exists()),
+        None => {
+            names::check_name(stem)?;
+            if let Some(parent) = &parent {
+                refuse_unlisted(parent, page_name)?;
+            }
+            mapped.push((*page_name).to_owned());
+            Ok(OnDisk::Missing(mapped.join("/")))
+        }
+    }
+}
+
+/// The name and type, without following a link, of the entry in `folder` whose name equals `name`
+/// ignoring letter case (in Unicode lowercase, as the clash check compares), preferring an exact
+/// match.
+fn entry_named(folder: &Path, name: &str) -> Result<Option<(String, fs::FileType)>, AppError> {
+    let wanted = name.to_lowercase();
+    let mut found = None;
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if entry_name == name {
+            return Ok(Some((entry_name, entry.file_type()?)));
+        }
+        if found.is_none() && entry_name.to_lowercase() == wanted {
+            found = Some((entry_name, entry.file_type()?));
+        }
+    }
+    Ok(found)
+}
+
+/// Refuses `name`, which the listing of `folder` does not show, when the file system still finds
+/// it (a Windows short name such as `OBSIDI~1`). Runs after the naming rules, because Windows
+/// fails to look up a name they forbid with an I/O error rather than "not found".
+fn refuse_unlisted(folder: &Path, name: &str) -> Result<(), AppError> {
+    match fs::symlink_metadata(folder.join(name)) {
+        Ok(_) => Err(outside_world()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A link that leads outside the world, through a hidden segment or through a link or junction.
+pub fn outside_world() -> AppError {
+    AppError::new(
+        ErrorKind::InvalidPath,
+        "The link does not point to a page in this world.",
+    )
+}
+
 /// Creates one missing folder of a restored page. A folder that another program created meanwhile
 /// is used, unless it is a link.
 fn create_restored_folder(folder: &Path) -> Result<(), AppError> {
@@ -1749,6 +1964,273 @@ mod tests {
                     vec![entry("Page.md", page(b"two\n"), page(b"three\n"))]
                 )]
             );
+        }
+
+        /// A world with `Places/` and a page in it, and its history.
+        fn linking_world(app_data: &TempDir) -> (TempDir, History) {
+            let world = tempfile::tempdir().unwrap();
+            fs::create_dir(world.path().join("Places")).unwrap();
+            fs::write(world.path().join("Places/Saltmere.md"), b"# Saltmere\n").unwrap();
+            let history = history_of(app_data, &world);
+            (world, history)
+        }
+
+        /// Every entry below the world's folder, as paths relative to it.
+        fn tree_of(world: &TempDir) -> Vec<String> {
+            fn walk(root: &Path, folder: &Path, found: &mut Vec<String>) {
+                for entry in fs::read_dir(folder).unwrap() {
+                    let path = entry.unwrap().path();
+                    found.push(relative_to(root, &path).unwrap());
+                    if fs::symlink_metadata(&path).unwrap().is_dir() {
+                        walk(root, &path, found);
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            walk(world.path(), world.path(), &mut found);
+            found.sort();
+            found
+        }
+
+        #[test]
+        fn a_linked_page_is_created_with_its_missing_folders_as_one_new_page() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, mut history) = linking_world(&app_data);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let own = &mut own();
+
+            let bare = create_linked_page(world.path(), own, &mut recorder, "Places/Harbor.md");
+            let nested = create_linked_page(world.path(), own, &mut recorder, "Lore/Gods/Tide.md");
+
+            assert_eq!(
+                (bare.unwrap(), nested.unwrap()),
+                (
+                    LinkedPage::Created {
+                        path: "Places/Harbor.md".to_owned()
+                    },
+                    LinkedPage::Created {
+                        path: "Lore/Gods/Tide.md".to_owned()
+                    }
+                )
+            );
+            assert_eq!(
+                fs::read(world.path().join("Places/Harbor.md")).unwrap(),
+                b""
+            );
+            assert_eq!(
+                fs::read(world.path().join("Lore/Gods/Tide.md")).unwrap(),
+                b""
+            );
+            assert_eq!(recorder.outcome(), Recording::Recorded);
+            assert_eq!(
+                recorded(&app_data, &world),
+                [
+                    (
+                        "new_page".to_owned(),
+                        vec![entry("Places/Harbor.md", State::Absent, page(b""))]
+                    ),
+                    (
+                        "new_page".to_owned(),
+                        vec![
+                            entry("Lore", State::Absent, State::Folder),
+                            entry("Lore/Gods", State::Absent, State::Folder),
+                            entry("Lore/Gods/Tide.md", State::Absent, page(b"")),
+                        ]
+                    ),
+                ]
+            );
+            assert!(own.is_own(world.path(), "Lore/Gods"));
+            assert!(own.is_own(world.path(), "Lore/Gods/Tide.md"));
+        }
+
+        #[test]
+        fn a_linked_page_takes_the_names_on_disk_and_finds_a_page_in_any_letter_case() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, mut history) = linking_world(&app_data);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+
+            let created =
+                create_linked_page(world.path(), &mut own(), &mut recorder, "places/Harbor.md");
+            let existing = create_linked_page(
+                world.path(),
+                &mut own(),
+                &mut recorder,
+                "PLACES/saltmere.md",
+            );
+
+            assert_eq!(
+                created.unwrap(),
+                LinkedPage::Created {
+                    path: "Places/Harbor.md".to_owned()
+                }
+            );
+            assert_eq!(
+                existing.unwrap(),
+                LinkedPage::Existing {
+                    path: "Places/Saltmere.md".to_owned()
+                }
+            );
+            assert_eq!(
+                tree_of(&world),
+                ["Places", "Places/Harbor.md", "Places/Saltmere.md"]
+            );
+            assert_eq!(
+                recorded(&app_data, &world),
+                [(
+                    "new_page".to_owned(),
+                    vec![entry("Places/Harbor.md", State::Absent, page(b""))]
+                )]
+            );
+        }
+
+        #[test]
+        fn a_link_that_breaks_a_rule_or_leaves_the_world_creates_and_records_nothing() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, mut history) = linking_world(&app_data);
+            fs::create_dir(world.path().join(".obsidian")).unwrap();
+            fs::write(world.path().join("Docks"), b"a file").unwrap();
+            fs::create_dir(world.path().join("Places/Tide.md")).unwrap();
+            let before = tree_of(&world);
+            let cases = [
+                (" Harbor.md", ErrorKind::InvalidName, "a leading space"),
+                ("Harbor..md", ErrorKind::InvalidName, "a trailing dot"),
+                (
+                    "Har*bor.md",
+                    ErrorKind::InvalidName,
+                    "a forbidden character",
+                ),
+                (
+                    "Har#bor.md",
+                    ErrorKind::InvalidName,
+                    "a character that breaks links",
+                ),
+                ("CON.md", ErrorKind::InvalidName, "a Windows device name"),
+                (
+                    "Act?/Harbor.md",
+                    ErrorKind::InvalidName,
+                    "a folder breaking a rule",
+                ),
+                (
+                    ".obsidian/Harbor.md",
+                    ErrorKind::InvalidPath,
+                    "a hidden folder",
+                ),
+                ("Places/.Harbor.md", ErrorKind::InvalidPath, "a hidden page"),
+                ("../Harbor.md", ErrorKind::InvalidPath, "an escape"),
+                (
+                    "Places//Harbor.md",
+                    ErrorKind::InvalidPath,
+                    "an empty segment",
+                ),
+                ("Places/Harbor", ErrorKind::InvalidPath, "no .md"),
+                (
+                    "docks/Harbor.md",
+                    ErrorKind::Exists,
+                    "a file where a folder goes",
+                ),
+                (
+                    "Places/tide.md",
+                    ErrorKind::Exists,
+                    "a folder where the page goes",
+                ),
+            ];
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+
+            for (relative, kind, case) in cases {
+                let error = create_linked_page(world.path(), &mut own(), &mut recorder, relative)
+                    .unwrap_err();
+                assert_eq!(error.kind, kind, "{case}");
+            }
+
+            assert_eq!(tree_of(&world), before);
+            assert_eq!(recorder.outcome(), Recording::Nothing);
+            assert!(recorded(&app_data, &world).is_empty());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_linked_page_through_a_folder_link_is_refused_and_creates_nothing_behind_it() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, mut history) = linking_world(&app_data);
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+
+            for relative in ["Elsewhere/Harbor.md", "elsewhere/Deep/Harbor.md"] {
+                let error = create_linked_page(world.path(), &mut own(), &mut recorder, relative)
+                    .unwrap_err();
+                assert_eq!(error.kind, ErrorKind::InvalidPath, "{relative}");
+            }
+
+            assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+            assert!(recorded(&app_data, &world).is_empty());
+        }
+
+        #[test]
+        fn a_failure_after_a_folder_was_created_records_that_folder_and_nothing_pending() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, mut history) = linking_world(&app_data);
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+            let mut folders = 0;
+
+            let error = create_linked_page_with(
+                world.path(),
+                &mut own(),
+                &mut recorder,
+                "Lore/Gods/Tide.md",
+                |folder| {
+                    folders += 1;
+                    if folders == 1 {
+                        Ok(fs::create_dir(folder)?)
+                    } else {
+                        Err(AppError::new(ErrorKind::Io, "The disk is full."))
+                    }
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(error.message, "The disk is full.");
+            assert_eq!(tree_of(&world), ["Lore", "Places", "Places/Saltmere.md"]);
+            // `recorded` also checks that no change is left pending.
+            assert_eq!(
+                recorded(&app_data, &world),
+                [(
+                    "new_folder".to_owned(),
+                    vec![entry("Lore", State::Absent, State::Folder)]
+                )]
+            );
+        }
+
+        /// On a volume with 8.3 names, `OBSIDI~1` is the short name of `.obsidian`, which the
+        /// hidden-segment check alone lets through.
+        #[cfg(windows)]
+        #[test]
+        fn a_windows_short_name_for_a_hidden_folder_is_refused() {
+            let app_data = tempfile::tempdir().unwrap();
+            let (world, mut history) = linking_world(&app_data);
+            fs::create_dir(world.path().join(".obsidian")).unwrap();
+            assert!(
+                fs::symlink_metadata(world.path().join("OBSIDI~1")).is_ok(),
+                "the volume gives .obsidian no short name, so this test cannot prove the refusal"
+            );
+            let mut recorder = Recorder::new(Some(&mut history), 100);
+
+            let error = create_linked_page(
+                world.path(),
+                &mut own(),
+                &mut recorder,
+                "OBSIDI~1/Secret.md",
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind, ErrorKind::InvalidPath);
+            assert_eq!(
+                fs::read_dir(world.path().join(".obsidian"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert!(recorded(&app_data, &world).is_empty());
         }
     }
 

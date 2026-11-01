@@ -1,6 +1,8 @@
 import { EditorView } from "@codemirror/view";
-import { render, screen } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import type { EditorLink } from "@/types/api";
+import { setLinks } from "./editor-links";
 import { createPageState, MarkdownEditor } from "./MarkdownEditor";
 
 const page = [
@@ -101,4 +103,82 @@ it("reports its last state when it unmounts", () => {
   unmount();
 
   expect(last).toMatchObject({ doc: state.doc });
+});
+
+describe("following a link", () => {
+  const text = "Ruled by [[Mirela]] since spring.";
+  const link: EditorLink = {
+    from: text.indexOf("[["),
+    to: text.indexOf("]]") + 2,
+    state: "resolved",
+    target: "Mirela",
+    path: "Mirela.md",
+    heading: null,
+    block: null,
+  };
+
+  /** An editor showing `text` with its one link, the cursor at `cursor`, reporting follows. */
+  function renderLinked(cursor: number) {
+    const onFollow = vi.fn();
+    const state = createPageState(text, "Kesh Tor", cursor);
+    render(
+      <MarkdownEditor
+        state={state.update({ effects: setLinks([link]) }).state}
+        readOnly={false}
+        onFollow={onFollow}
+      />,
+    );
+    const textbox = screen.getByRole("textbox", { name: "Kesh Tor" });
+    const view = EditorView.findFromDOM(textbox);
+    if (!view) throw new Error("No editor");
+    return { onFollow, textbox, view };
+  }
+
+  /** jsdom lays out no text, so the editor's position under the pointer is given. */
+  function pointAt(position: number) {
+    vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue(position);
+  }
+
+  it("follows on Ctrl+click and Cmd+click over a link, and the click does nothing else", () => {
+    const { onFollow, textbox, view } = renderLinked(0);
+    pointAt(link.from + 3);
+
+    const ctrl = fireEvent.mouseDown(textbox, { button: 0, ctrlKey: true });
+    const cmd = fireEvent.mouseDown(textbox, { button: 0, metaKey: true });
+
+    expect(onFollow.mock.calls).toEqual([[link], [link]]);
+    expect([ctrl, cmd]).toEqual([false, false]);
+    expect(view.state.selection.main.head).toBe(0);
+  });
+
+  it("leaves a plain click, a click with other keys and a Ctrl+click beside a link alone", () => {
+    const { onFollow, textbox } = renderLinked(0);
+    // CodeMirror measures the selection it draws for a click; jsdom lays out nothing.
+    const range = Range.prototype as Partial<Range>;
+    range.getClientRects = () => [] as unknown as DOMRectList;
+    range.getBoundingClientRect = () => new DOMRect();
+    pointAt(link.from + 3);
+
+    fireEvent.mouseDown(textbox, { button: 0 });
+    fireEvent.mouseDown(textbox, { button: 0, ctrlKey: true, shiftKey: true });
+    pointAt(text.indexOf("since"));
+    fireEvent.mouseDown(textbox, { button: 0, ctrlKey: true });
+
+    expect(onFollow).not.toHaveBeenCalled();
+    delete range.getClientRects;
+    delete range.getBoundingClientRect;
+  });
+
+  it("follows on Alt+Enter with the cursor in a link, and leaves Alt+Enter elsewhere alone", () => {
+    const inside = renderLinked(link.to);
+    const followed = fireEvent.keyDown(inside.textbox, { key: "Enter", altKey: true });
+    cleanup();
+    const outside = renderLinked(text.length);
+    const ignored = fireEvent.keyDown(outside.textbox, { key: "Enter", altKey: true });
+
+    expect(inside.onFollow).toHaveBeenCalledWith(link);
+    expect(followed).toBe(false);
+    expect(outside.onFollow).not.toHaveBeenCalled();
+    expect(ignored).toBe(true);
+  });
 });
