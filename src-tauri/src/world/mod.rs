@@ -24,7 +24,9 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
 use crate::history::{self, History, HistoryVersion, Kind};
-use crate::index::{self, Backlinks, BuildState, Content, EditorLinks, Index, Stamp};
+use crate::index::{
+    self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, Stamp,
+};
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
@@ -582,6 +584,12 @@ impl WorldState {
     fn links_in(&self, path: &str, text: &str) -> Result<EditorLinks, AppError> {
         let parsed = index::parse(text, index::page_name(path));
         self.query_index(|index| index.links_in(path, &parsed))
+    }
+
+    /// The pages to suggest for a link whose page part so far is `query`, from the open world's
+    /// index, which while it is being built holds only the pages it has read so far.
+    fn link_suggest(&self, query: &str) -> Result<LinkSuggestions, AppError> {
+        self.query_index(|index| index.suggest(query))
     }
 
     /// Runs `query` on the open world's index, under the index's lock alone.
@@ -1193,6 +1201,16 @@ pub async fn link_create(
     target: String,
 ) -> Result<LinkedPage, AppError> {
     guard(|| state.link_create(&from, &target))
+}
+
+/// The pages to suggest for a link whose page part so far is `query`, and whether the index is
+/// still being built.
+#[tauri::command]
+pub async fn link_suggest(
+    state: State<'_, WorldState>,
+    query: String,
+) -> Result<LinkSuggestions, AppError> {
+    guard(|| state.link_suggest(&query))
 }
 
 /// Creates an empty folder `name` in `folder`, or at the world's top level when it is `null`.
@@ -2554,6 +2572,68 @@ mod tests {
             assert_eq!(links, EditorLinks::NotReady);
             assert!(!world.path().join("Places/Harbor.md").exists());
             assert!(crate::history::testing::stored(app_data.path(), world.path()).is_empty());
+        }
+
+        fn suggested(state: &WorldState, query: &str) -> (bool, Vec<String>) {
+            let suggestions = state.link_suggest(query).unwrap();
+            let inserts = suggestions.items.into_iter().map(|item| item.insert);
+            (suggestions.indexing, inserts.collect())
+        }
+
+        #[test]
+        fn suggestions_rank_saved_names_and_aliases_and_say_while_the_index_is_built() {
+            let world = kesh();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            save(&state, "Kesh Tor.md", "---\naliases: [Old Mire]\n---\n");
+            let expected = ["Mirela", "Kesh Tor|Old Mire"].map(str::to_owned).to_vec();
+            assert_eq!(suggested(&state, "mir"), (false, expected.clone()));
+
+            // While it is built, the pages stored so far are suggested.
+            lock_index(&index_of(&state)).set_state(BuildState::Building);
+            assert_eq!(suggested(&state, "mir"), (true, expected));
+        }
+
+        /// The DESIGN's suggestions in a large world, in a release build: `cargo test --release
+        /// --manifest-path src-tauri/Cargo.toml world:: -- --ignored`.
+        #[test]
+        #[ignore = "a release-mode scale check"]
+        fn suggestions_in_a_world_of_5000_pages_answer_within_100_ms() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = tempfile::tempdir().unwrap();
+            for folder in 0..300 {
+                fs::create_dir(world.path().join(format!("Folder {folder}"))).unwrap();
+            }
+            for number in 0..5_000usize {
+                let path = world
+                    .path()
+                    .join(format!("Folder {}/Page {number}.md", number % 300));
+                fs::write(path, format!("---\naliases: [Alias {number}]\n---\n")).unwrap();
+            }
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let mut slowest = Duration::ZERO;
+            for query in [
+                "",
+                "p",
+                "Page 4",
+                "age 12",
+                "alias 3",
+                "Folder 2/Page",
+                "nothing",
+            ] {
+                let asking = Instant::now();
+                let suggestions = state.link_suggest(query).unwrap();
+                slowest = slowest.max(asking.elapsed());
+                assert!(!suggestions.indexing);
+            }
+
+            eprintln!("slowest suggestions {slowest:?}");
+            assert!(slowest < Duration::from_millis(100));
         }
     }
 

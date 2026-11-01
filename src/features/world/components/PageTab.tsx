@@ -21,6 +21,7 @@ import {
   backlinksList,
   historyRestore,
   historyUndo,
+  linkSuggest,
   pageRead,
   pageRestore,
   pageWrite,
@@ -365,6 +366,7 @@ export function PageTab({
             }}
             onUnmount={(editor) => setEditor(session, path, editor)}
             onReplace={links.replaced}
+            suggest={linkSuggest}
             onFollow={(link) =>
               followLink(path, link, view?.current ?? null, {
                 open: (target, at) => onOpenPage(target, { newTab: true, at }),

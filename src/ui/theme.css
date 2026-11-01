@@ -330,6 +330,69 @@
   text-decoration-style: dashed;
 }
 
+/*
+ * The link suggestion list (src/ui/link-suggestions.ts), a popover on the menus layer with
+ * Search's rows: the name in ui-strong, the folder and alias in ui-small text-muted, and the
+ * selected row in the selected fill with the accent line, which forced colours repaint as a border.
+ */
+.page-editor.cm-editor .cm-tooltip.cm-tooltip-autocomplete {
+  z-index: var(--z-menu);
+  padding-block: 4px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background-color: var(--color-raised);
+  box-shadow: var(--level-2-shadow);
+}
+
+.page-editor.cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul {
+  max-height: none;
+  font-family: var(--font-text);
+}
+
+.page-editor.cm-editor .cm-tooltip-autocomplete > ul > li {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: var(--spacing-control-compact);
+  padding: 4px 12px;
+  color: var(--color-text);
+}
+
+.page-editor.cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background-color: var(--color-selected);
+  color: var(--color-text);
+}
+
+.page-editor.cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected]::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  border-left: 2px solid var(--color-accent);
+}
+
+.page-editor.cm-editor .cm-tooltip-autocomplete .cm-completionLabel {
+  @apply ui-strong;
+}
+
+.page-editor.cm-editor .cm-tooltip-autocomplete .cm-completionDetail,
+.page-editor.cm-editor .cm-tooltip-autocomplete .cm-completionAlias {
+  @apply ui-small;
+  margin: 0;
+  font-style: normal;
+  color: var(--color-text-muted);
+}
+
+/* "Indexing world…" above the rows while the index is built, as Search shows it. */
+.page-editor.cm-editor .cm-tooltip-autocomplete > ul > completion-section {
+  @apply ui-small;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--color-divider);
+  color: var(--color-info);
+  opacity: 1;
+}
+
 /* Outside any layer, so it wins over the transition and animation utilities. */
 @media (prefers-reduced-motion: reduce) {
   *,
