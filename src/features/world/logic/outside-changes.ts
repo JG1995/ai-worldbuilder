@@ -15,9 +15,10 @@ type WorldEvent = {
 }[keyof WorldEvents];
 
 /**
- * Follows the watcher's and the world history's events until the returned function is called. An
- * event for the open world refreshes the tree, checks its open pages, or shows or hides a
- * world-level notice; an event from a world that is no longer open is ignored. The core sends an
+ * Follows the watcher's, the world history's and the page index's events until the returned
+ * function is called. An event for the open world refreshes the tree, checks its open pages, shows
+ * or hides a world-level notice, or counts an index change; an event from a world that is no longer
+ * open is ignored. The core sends an
  * opening's first events, such as a watcher that could not start or a history that cannot record,
  * while it opens the world, so they can arrive before the interface knows the new session: those
  * wait until that world opens here.
@@ -34,7 +35,7 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
   }
 
   function apply(event: WorldEvent) {
-    const { showWorldNotice, setHistoryNotRecording } = useWorldStore.getState();
+    const { showWorldNotice, setHistoryNotRecording, indexChanged } = useWorldStore.getState();
     switch (event.name) {
       case "world:changed":
         return changed(queryClient, event.payload);
@@ -48,6 +49,10 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
         return setHistoryNotRecording(event.payload.session, null);
       case "world:history-set-aside":
         return showWorldNotice(event.payload.session, "history_set_aside");
+      // What is asked of the index, such as backlinks, is asked again, and shows a failure.
+      case "world:index-changed":
+      case "world:index-failed":
+        return indexChanged(event.payload.session);
     }
   }
 
@@ -78,6 +83,12 @@ export function followOutsideChanges(queryClient: QueryClient): () => void {
     ),
     listenEvent<WorldEvents["world:history-set-aside"]>("world:history-set-aside", (payload) =>
       receive({ name: "world:history-set-aside", payload }),
+    ),
+    listenEvent<WorldEvents["world:index-changed"]>("world:index-changed", (payload) =>
+      receive({ name: "world:index-changed", payload }),
+    ),
+    listenEvent<WorldEvents["world:index-failed"]>("world:index-failed", (payload) =>
+      receive({ name: "world:index-failed", payload }),
     ),
   ];
 

@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
-import type { TreeEntry } from "@/types/api";
+import type { Backlinks as BacklinksState, TreeEntry } from "@/types/api";
+import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
@@ -302,13 +303,75 @@ function PageViewSection() {
   );
 }
 
-/** The content surfaces: welcome screen, file tree and page view. Their demos keep local state. */
+const sampleBacklinks: BacklinksState = {
+  state: "ready",
+  pages: [
+    {
+      path: "People/Captain Mirela.md",
+      name: "Captain Mirela",
+      line: "Her ship, the Gull, waits at [[Saltmere]] for the spring tide.",
+      at: 31,
+    },
+    {
+      path: "Sessions/Session 2.md",
+      name: "Session 2",
+      line: "…the party reaches [[Saltmere|the salt town]] after three days on the coast road, and finds the harbour closed by order of the guild, which nobody there will explain.",
+      at: 40,
+    },
+    {
+      path: "Archive/Session 2.md",
+      name: "Session 2",
+      line: "An older draft: [[Saltmere#Docks]] before the fire.",
+      at: 16,
+    },
+  ],
+};
+
+function BacklinksSection() {
+  const [event, setEvent] = useState("none yet");
+  const onOpen = (path: string, at: number, { newTab }: { newTab: boolean }) =>
+    setEvent(`Open ${path} at ${at}${newTab ? " in a new tab" : ""}`);
+  const states: [string, BacklinksState][] = [
+    ["Ready: two rows share a name, so they show their folders", sampleBacklinks],
+    ["No backlinks", { state: "ready", pages: [] }],
+    ["The index is being built", { state: "building" }],
+    [
+      "The index cannot be built",
+      { state: "failed", message: "The world's folder cannot be read." },
+    ],
+  ];
+
+  return (
+    <Section
+      title="Backlinks"
+      use="Below each page. Click or Enter opens a row here; Ctrl+click, middle-click or Ctrl+Enter in a new tab."
+    >
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(400px,1fr))] gap-4">
+        {states.map(([title, backlinks]) => (
+          <div key={title} className="flex min-w-0 flex-col gap-2">
+            <h3 className="ui-small text-text-muted">{title}</h3>
+            <div className="border border-divider bg-page p-4">
+              <Backlinks backlinks={backlinks} onOpen={onOpen} />
+            </div>
+          </div>
+        ))}
+      </div>
+      <EventLine event={event} />
+    </Section>
+  );
+}
+
+/**
+ * The content surfaces: welcome screen, file tree, page view and backlinks. Their demos keep local
+ * state.
+ */
 export function SurfaceSections() {
   return (
     <>
       <WelcomeSection />
       <FileTreeSection />
       <PageViewSection />
+      <BacklinksSection />
     </>
   );
 }

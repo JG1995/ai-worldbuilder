@@ -1,16 +1,14 @@
 //! The world's file tree: its visible folders and Markdown pages, sorted.
 
-use std::cmp::Ordering;
 use std::fs;
 use std::io;
-use std::iter::Peekable;
 use std::path::Path;
-use std::str::Chars;
 
 use serde::Serialize;
 
 use super::paths::{check_root, is_allowed_name, is_page_name};
 use crate::error::AppError;
+use crate::order::natural_order;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -90,41 +88,6 @@ fn list_folder(folder: &Path, prefix: Option<&str>) -> io::Result<Vec<TreeEntry>
             .then_with(|| a.path.cmp(&b.path))
     });
     Ok(entries)
-}
-
-/// Compares names ignoring letter case (Unicode lowercase), with runs of digits compared as numbers.
-fn natural_order(a: &str, b: &str) -> Ordering {
-    let (a, b) = (a.to_lowercase(), b.to_lowercase());
-    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
-    loop {
-        let ordering = match (a.peek(), b.peek()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                let (x, y) = (digits(&mut a), digits(&mut b));
-                let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
-                x.len().cmp(&y.len()).then_with(|| x.cmp(y))
-            }
-            (Some(x), Some(y)) => {
-                let ordering = x.cmp(y);
-                a.next();
-                b.next();
-                ordering
-            }
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-}
-
-fn digits(chars: &mut Peekable<Chars>) -> String {
-    let mut run = String::new();
-    while let Some(digit) = chars.next_if(char::is_ascii_digit) {
-        run.push(digit);
-    }
-    run
 }
 
 #[cfg(test)]

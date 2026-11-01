@@ -53,6 +53,8 @@ The application keeps its own data in the `grimoire-data` folder, in the app dat
 
 `history/` holds one SQLite database per world, named by a hash of the world folder's path. It records every change the application makes to the world, with copies of the text of the pages it changed: the changes of the last 90 days, and at least the world's 100 most recent changes, whatever their age. Older changes are removed when the world opens. A world's history is kept when the world leaves the recent list, and it does not move with the world folder: a world opened from a new path starts an empty history. A damaged database is renamed with `.damaged-` and the time appended, and kept beside the new one.
 
+`index/` holds a cache of each world's pages, aliases and links, one SQLite database per world, named like its history. It only repeats what the world's files hold: the application rebuilds it when it is deleted, damaged or from another version, and deleting it loses nothing.
+
 On Linux, the webview keeps its own caches at the root of the same app data folder. The application writes nothing into a world folder except the pages and folders you create or edit.
 
 ## Continuous integration and releases

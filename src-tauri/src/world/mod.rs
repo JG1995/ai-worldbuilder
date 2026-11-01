@@ -1,5 +1,6 @@
 //! The `world` area: the open world and the commands that browse, read, save and create in it,
-//! that open recent worlds and keep their workspaces, and the watcher that reports outside changes.
+//! that open recent worlds and keep their workspaces, the watcher that reports outside changes,
+//! and the worker that keeps the open world's page index current.
 
 mod dialog;
 mod names;
@@ -10,9 +11,12 @@ mod tree;
 mod watch;
 mod write;
 
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -20,6 +24,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
 use crate::history::{self, History, HistoryVersion, Kind};
+use crate::index::{self, Backlinks, BuildState, Content, Index, Stamp};
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
@@ -72,9 +77,41 @@ struct OpenWorld {
     recording: bool,
     /// Lives exactly as long as this opening: replacing or clearing the open world drops it.
     _watcher: Option<watch::Watcher>,
+    /// Keeps `index` current; dropping it stops and joins the worker, before `index` goes.
+    worker: Worker,
+    /// The page index of this opening. Its lock may be taken while the world lock is held, never
+    /// the other way round.
+    index: Arc<Mutex<Index>>,
 }
 
 impl OpenWorld {
+    /// Takes the application's write of the page at `path`, which left `text` in it, into the index,
+    /// and returns whether the index changed. The caller holds the world lock, so no other write
+    /// of the application's runs; the page's stamp is compared again under the index lock, so an
+    /// outside change since the write is never overwritten (the watcher reports it).
+    fn index_written(&self, path: &str, text: &str) -> bool {
+        let Some(stamp) = stamp_of(&self.root, path) else {
+            return false;
+        };
+        let page = index::Page {
+            path: path.to_owned(),
+            stamp,
+            content: Content::Parsed(index::parse(text, index::page_name(path))),
+        };
+        let (changed, needs_worker) = {
+            let mut index = lock_index(&self.index);
+            let applied = index.apply(&[page], |path| stamp_of(&self.root, path));
+            (
+                applied.is_ok_and(|applied| applied.changed),
+                index.needs_worker(),
+            )
+        };
+        if needs_worker {
+            self.worker.send(Request::Wake);
+        }
+        changed
+    }
+
     /// Takes in what became of a write's record in the opening `session`, and returns the event
     /// that tells the interface when recording stopped or started again. It is sent once per change
     /// of state, not once per write.
@@ -147,7 +184,8 @@ impl WorldState {
         );
         let (session, stored) = {
             let mut inner = self.lock();
-            // The old world's watcher stops and its history closes before the session changes.
+            // The old world's watcher and index worker stop, and its history and index close,
+            // before the session changes, so a reopened world never meets its old index.
             inner.world = None;
             inner.session += 1;
             let session = inner.session;
@@ -160,6 +198,22 @@ impl WorldState {
                 Some(app_data) => self.open_history(app_data, &root, session),
                 None => (Err(NO_APP_DATA.to_owned()), false),
             };
+            // A path that is not Unicode has no history file name, so its index stays in memory.
+            let cache = inner
+                .app_data
+                .as_deref()
+                .zip(root.to_str())
+                .map(|(app_data, world)| index::file(app_data, world));
+            let index = Arc::new(Mutex::new(Index::open(
+                cache.as_deref(),
+                &root.to_string_lossy(),
+            )));
+            let worker = Worker::start(
+                root.clone(),
+                session,
+                self.events.get().cloned(),
+                Arc::clone(&index),
+            );
             inner.world = Some(OpenWorld {
                 root: root.clone(),
                 recent_id,
@@ -167,6 +221,8 @@ impl WorldState {
                 history,
                 recording,
                 _watcher: watcher,
+                worker,
+                index,
             });
             (session, stored)
         };
@@ -341,14 +397,28 @@ impl WorldState {
         version: &str,
         keep_mine: bool,
     ) -> Result<PageVersion, AppError> {
-        self.with_world(|root, own, recorder| {
-            write::write_page(root, own, recorder, path, text, version, keep_mine)
+        self.write_and_index(|root, own, recorder| {
+            let saved = write::write_page(root, own, recorder, path, text, version, keep_mine)?;
+            Ok((saved, Some((path.to_owned(), text.to_owned()))))
         })
     }
 
     /// Writes a page that is gone back, under the world lock like a save.
     fn restore_page(&self, path: &str, text: &str) -> Result<PageVersion, AppError> {
-        self.with_world(|root, own, recorder| write::restore_page(root, own, recorder, path, text))
+        self.write_and_index(|root, own, recorder| {
+            let restored = write::restore_page(root, own, recorder, path, text)?;
+            Ok((restored, Some((path.to_owned(), text.to_owned()))))
+        })
+    }
+
+    /// Creates an empty page `{name}.md` in `folder`, or at the world's top level, under the world
+    /// lock like a save.
+    fn create_page(&self, folder: Option<&str>, name: &str) -> Result<NewEntry, AppError> {
+        self.write_and_index(|root, own, recorder| {
+            let created = write::create_page(root, own, recorder, folder, name)?;
+            let written = (created.path.clone(), String::new());
+            Ok((created, Some(written)))
+        })
     }
 
     /// The page's earlier versions, newest first, without the newest ones whose bytes the page
@@ -397,13 +467,13 @@ impl WorldState {
         version: &str,
         page_version: &str,
     ) -> Result<RestoredPage, AppError> {
-        self.with_world(|root, own, recorder| {
+        self.write_and_index(|root, own, recorder| {
             let bytes = match recorder.history() {
                 Some(history) => history.version_bytes(path, version)?,
                 None => None,
             };
             let bytes = bytes.ok_or_else(unknown_version)?;
-            write::write_bytes(
+            let restored = write::write_bytes(
                 root,
                 own,
                 recorder,
@@ -411,13 +481,26 @@ impl WorldState {
                 &bytes,
                 page_version,
                 Kind::Restore,
-            )
+            )?;
+            let written = (path.to_owned(), restored.text.clone());
+            Ok((restored, Some(written)))
         })
     }
 
     /// Writes back what the change `change` replaced, under the world lock like a save.
     fn history_undo(&self, change: &str) -> Result<RestoredPage, AppError> {
-        self.with_world(|root, own, recorder| write::undo(root, own, recorder, change))
+        self.write_and_index(|root, own, recorder| {
+            // The page an undo can write is the one entry of the change it undoes.
+            let path = change
+                .parse::<i64>()
+                .ok()
+                .zip(recorder.history())
+                .and_then(|(id, history)| history.change_entries(id).ok().flatten())
+                .and_then(|entries| entries.first().map(|entry| entry.path.clone()));
+            let undone = write::undo(root, own, recorder, change)?;
+            let written = path.map(|path| (path, undone.text.clone()));
+            Ok((undone, written))
+        })
     }
 
     fn root(&self) -> Result<PathBuf, AppError> {
@@ -433,23 +516,69 @@ impl WorldState {
         &self,
         write: impl FnOnce(&Path, &mut OwnWrites, &mut Recorder) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        self.write_and_index(|root, own, recorder| Ok((write(root, own, recorder)?, None)))
+    }
+
+    /// `with_world` for a write that leaves a page: `write` also returns the page's path and the
+    /// text it left there, which the index takes in under the same world lock, right after the
+    /// write. The interface is told when the index changed.
+    fn write_and_index<T>(
+        &self,
+        write: impl FnOnce(
+            &Path,
+            &mut OwnWrites,
+            &mut Recorder,
+        ) -> Result<(T, Option<(String, String)>), AppError>,
+    ) -> Result<T, AppError> {
         let mut inner = self.lock();
         let session = inner.session;
         let world = inner.world.as_mut().ok_or_else(no_world)?;
         let mut recorder = Recorder::new(world.history.as_mut().ok(), now());
         let result = write(&world.root, &mut world.own_writes, &mut recorder);
         let outcome = recorder.outcome();
+        let sink = self.events.get();
         if let Some(event) = world.recorded(outcome, session)
-            && let Some(sink) = self.events.get()
+            && let Some(sink) = sink
         {
             sink(event);
         }
-        result
+        let (value, written) = result?;
+        if let Some((path, text)) = written
+            && world.index_written(&path, &text)
+            && let Some(sink) = sink
+        {
+            sink(WorldEvent::IndexChanged { session });
+        }
+        Ok(value)
+    }
+
+    /// The pages that link to the page at `path`, from the open world's index. It reads no file,
+    /// so a page that is not UTF-8 has its backlinks too.
+    fn backlinks(&self, path: &str) -> Result<Backlinks, AppError> {
+        let index = Arc::clone(&self.lock().world.as_ref().ok_or_else(no_world)?.index);
+        let (backlinks, needs_worker) = {
+            let mut index = lock_index(&index);
+            (index.backlinks(path), index.needs_worker())
+        };
+        // A storage failure can have emptied the index; the worker then builds it again. The world
+        // lock is taken only once the index lock is released.
+        if needs_worker
+            && let Some(world) = self.lock().world.as_ref()
+            && Arc::ptr_eq(&world.index, &index)
+        {
+            world.worker.send(Request::Wake);
+        }
+        backlinks.map_err(|error| {
+            AppError::new(
+                ErrorKind::Io,
+                format!("The page index reported an error: {error}."),
+            )
+        })
     }
 
     /// Starts the watcher for the opening `session` of the world at `root`. Its batches are read
     /// under the world lock, so a write of the application's is never half done when the watcher
-    /// compares a page with the own-write record.
+    /// compares a page with the own-write record. Each batch goes on to the index worker.
     fn watch(&self, root: &Path, session: u64) -> Option<watch::Watcher> {
         let sink = Arc::clone(self.events.get()?);
         let shared = Arc::clone(&self.inner);
@@ -459,11 +588,17 @@ impl WorldState {
                 return None;
             }
             let OpenWorld {
-                root, own_writes, ..
+                root,
+                own_writes,
+                worker,
+                ..
             } = inner.world.as_mut()?;
-            Some(watch::changes(root, events, |relative| {
-                own_writes.is_own(root, relative)
-            }))
+            let changes =
+                watch::changes(root, events, |relative| own_writes.is_own(root, relative));
+            if changes.tree || !changes.pages.is_empty() {
+                worker.send(Request::Changes(changes.clone()));
+            }
+            Some(changes)
         })
     }
 
@@ -475,6 +610,379 @@ impl WorldState {
 /// The state stays consistent after a panic, because every change to it is a whole field.
 fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
     inner.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The index stays consistent after a panic, because each change to its database is a transaction.
+fn lock_index(index: &Mutex<Index>) -> MutexGuard<'_, Index> {
+    index.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the index worker is asked to do.
+enum Request {
+    /// Take in a batch of outside changes: read its pages again whatever their stamp, and compare
+    /// every page's stamp when the tree may have changed.
+    Changes(watch::Changes),
+    /// Look for work the index asks for: a full pass after a write, or a rebuild after it lost its
+    /// rows.
+    Wake,
+    Stop,
+}
+
+/// The index worker of one opening: one thread that builds the index when the world opens and then
+/// keeps it current. It never takes the world lock, and it takes the index lock only to store or
+/// look up, never while it reads a file.
+struct Worker {
+    /// The only sender of the worker's requests. It lives in `OpenWorld`, which the watcher reaches
+    /// under the world lock, so no clone outlives the opening.
+    sender: mpsc::Sender<Request>,
+    shared: Arc<WorkerShared>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+/// What the worker and its owner share.
+#[derive(Default)]
+struct WorkerShared {
+    /// Set when the opening ends; the worker checks it before each file read and each index lock.
+    stop: AtomicBool,
+    /// How many pages the worker has read, for tests.
+    reads: AtomicU64,
+    /// Keeps the worker from running full passes, so a test can close a world before one runs.
+    #[cfg(test)]
+    hold_passes: AtomicBool,
+}
+
+impl Worker {
+    /// Starts the worker for the opening `session` of the world at `root`, which builds `index`
+    /// and sends its events to `sink`.
+    fn start(
+        root: PathBuf,
+        session: u64,
+        sink: Option<EventSink>,
+        index: Arc<Mutex<Index>>,
+    ) -> Self {
+        let (sender, requests) = mpsc::channel();
+        let shared = Arc::<WorkerShared>::default();
+        let job = Job {
+            root,
+            session,
+            sink,
+            index,
+            requests,
+            shared: Arc::clone(&shared),
+        };
+        // Without a thread the index stays `Building`, and the world still opens.
+        let thread = thread::Builder::new()
+            .name("page index".to_owned())
+            .spawn(move || job.run())
+            .ok();
+        Self {
+            sender,
+            shared,
+            thread,
+        }
+    }
+
+    fn send(&self, request: Request) {
+        // A worker that has ended takes no more requests, and needs none.
+        let _ = self.sender.send(request);
+    }
+}
+
+/// Every way an opening ends drops its worker: the flag stops the work in hand, the message wakes
+/// a worker that waits for requests, and the join makes sure that the worker is gone before the
+/// next opening opens the index's file.
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+        self.send(Request::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The opening ended, so the worker stops where it is.
+struct Stopped;
+
+/// What comparing the index with the files found.
+enum Synced {
+    /// Whether the index changed.
+    Done(bool),
+    /// The world could not be listed, for the reason given.
+    Unlisted(String),
+}
+
+/// The work of one index worker.
+struct Job {
+    root: PathBuf,
+    session: u64,
+    sink: Option<EventSink>,
+    index: Arc<Mutex<Index>>,
+    requests: mpsc::Receiver<Request>,
+    shared: Arc<WorkerShared>,
+}
+
+impl Job {
+    /// Builds the index, then serves requests, coalescing those that wait, until the opening ends.
+    fn run(self) {
+        if self.build().is_err() {
+            return;
+        }
+        while let Ok(first) = self.requests.recv() {
+            let mut pages: Vec<String> = Vec::new();
+            let mut tree = false;
+            let mut next = Some(first);
+            while let Some(request) = next {
+                match request {
+                    Request::Stop => return,
+                    Request::Changes(changes) => {
+                        tree |= changes.tree;
+                        pages.extend(changes.pages);
+                    }
+                    Request::Wake => {}
+                }
+                next = self.requests.try_recv().ok();
+            }
+            if self.serve(pages, tree).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Brings the index up to date with every page on disk, resolves every stored link, and makes it
+    /// ready; it starts again when the index lost its rows meanwhile. Tells the interface once it is
+    /// ready, or that the world cannot be listed.
+    fn build(&self) -> Result<(), Stopped> {
+        loop {
+            self.with_index(|index| index.set_state(BuildState::Building))?;
+            if let Synced::Unlisted(message) = self.sync(&[], true)? {
+                return self.fail(message);
+            }
+            self.with_index(Index::ask_full_pass)?;
+            self.full_passes()?;
+            if !self.with_index(Index::take_rebuild)? {
+                break;
+            }
+        }
+        self.with_index(|index| index.set_state(BuildState::Ready))?;
+        self.send(WorldEvent::IndexChanged {
+            session: self.session,
+        });
+        Ok(())
+    }
+
+    /// Takes in outside changes to `pages`, comparing every page's stamp too when the `tree` may
+    /// have changed, then runs the full passes the index asks for. A rebuild the index asks for, or
+    /// a tree change after the world could not be listed, builds it again.
+    fn serve(&self, pages: Vec<String>, tree: bool) -> Result<(), Stopped> {
+        let failed = self.with_index(|index| matches!(index.state(), BuildState::Failed(_)))?;
+        if self.with_index(Index::take_rebuild)? || (failed && tree) {
+            return self.build();
+        }
+        let changed = match self.sync(&pages, tree)? {
+            Synced::Done(changed) => changed,
+            Synced::Unlisted(message) => return self.fail(message),
+        };
+        let resolved = self.full_passes()?;
+        if self.with_index(Index::take_rebuild)? {
+            return self.build();
+        }
+        if changed || resolved {
+            self.send(WorldEvent::IndexChanged {
+                session: self.session,
+            });
+        }
+        Ok(())
+    }
+
+    fn fail(&self, message: String) -> Result<(), Stopped> {
+        let first = self.with_index(|index| {
+            let first = !matches!(index.state(), BuildState::Failed(_));
+            index.set_state(BuildState::Failed(message.clone()));
+            first
+        })?;
+        if first {
+            self.send(WorldEvent::IndexFailed {
+                session: self.session,
+                message,
+            });
+        }
+        Ok(())
+    }
+
+    /// Reads `forced` again, and with `full`, every listed page whose stamp differs from the stored
+    /// one, and removes the stored pages the tree no longer lists.
+    fn sync(&self, forced: &[String], full: bool) -> Result<Synced, Stopped> {
+        let mut to_read: Vec<String> = forced.to_vec();
+        let mut gone = Vec::new();
+        if full {
+            let listed = match tree::list(&self.root) {
+                Ok(tree) => page_paths(tree),
+                Err(error) => return Ok(Synced::Unlisted(error.message)),
+            };
+            // Stamps that cannot be read leave every page to be read.
+            let stored = self.with_index(Index::stamps)?.unwrap_or_default();
+            let forced: HashSet<&str> = forced.iter().map(String::as_str).collect();
+            for path in &listed {
+                self.check()?;
+                if !forced.contains(path.as_str())
+                    && stamp_of(&self.root, path) != stored.get(path).copied()
+                {
+                    to_read.push(path.clone());
+                }
+            }
+            let listed: HashSet<&str> = listed.iter().map(String::as_str).collect();
+            gone = stored
+                .into_keys()
+                .filter(|path| !listed.contains(path.as_str()))
+                .collect();
+        }
+        let mut changed = false;
+        for batch in gone.chunks(index::BATCH_PAGES) {
+            changed |= self
+                .with_index(|index| index.remove(batch))?
+                .unwrap_or(false);
+        }
+        changed |= self.read_and_apply(to_read)?;
+        Ok(Synced::Done(changed))
+    }
+
+    /// Reads the pages at `paths` without holding a lock and stores them in batches. A page that
+    /// changed between its read and its store is read again, a few times at most: the watcher
+    /// reports a page that keeps changing. A page that is gone is removed.
+    fn read_and_apply(&self, paths: Vec<String>) -> Result<bool, Stopped> {
+        const READS: u32 = 3;
+        let mut queue: VecDeque<(String, u32)> = paths.into_iter().map(|path| (path, 1)).collect();
+        let mut changed = false;
+        while !queue.is_empty() {
+            let mut pages = Vec::new();
+            let mut reads = Vec::new();
+            let mut gone = Vec::new();
+            while pages.len() + gone.len() < index::BATCH_PAGES
+                && let Some((path, read)) = queue.pop_front()
+            {
+                self.check()?;
+                self.shared.reads.fetch_add(1, Ordering::Relaxed);
+                match read_for_index(&self.root, &path) {
+                    Some(page) => {
+                        pages.push(page);
+                        reads.push(read);
+                    }
+                    None => gone.push(path),
+                }
+            }
+            let (applied, removed) = self.with_index(|index| {
+                let applied = index.apply(&pages, |path| stamp_of(&self.root, path));
+                (applied, index.remove(&gone))
+            })?;
+            changed |= removed.unwrap_or(false);
+            if let Ok(applied) = applied {
+                changed |= applied.changed;
+                for stale in applied.stale {
+                    let read = pages
+                        .iter()
+                        .zip(&reads)
+                        .find_map(|(page, read)| (page.path == stale).then_some(*read))
+                        .unwrap_or(READS);
+                    if read < READS {
+                        queue.push_back((stale, read + 1));
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Runs the full passes the index asks for, one step per hold of its lock, and returns whether
+    /// any link's page changed.
+    fn full_passes(&self) -> Result<bool, Stopped> {
+        #[cfg(test)]
+        if self.shared.hold_passes.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let mut changed = false;
+        while self.with_index(Index::take_full_pass)? {
+            let mut cursor = None;
+            while let Ok(step) = self.with_index(|index| index.resolve_step(cursor.as_ref()))? {
+                changed |= step.changed;
+                match step.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Runs `work` on the index under its lock, unless the opening ended.
+    fn with_index<T>(&self, work: impl FnOnce(&mut Index) -> T) -> Result<T, Stopped> {
+        self.check()?;
+        Ok(work(&mut lock_index(&self.index)))
+    }
+
+    fn check(&self) -> Result<(), Stopped> {
+        if self.shared.stop.load(Ordering::SeqCst) {
+            Err(Stopped)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn send(&self, event: WorldEvent) {
+        if let Some(sink) = &self.sink {
+            sink(event);
+        }
+    }
+}
+
+/// The paths of the pages in `tree`, in the tree's order.
+fn page_paths(tree: Vec<tree::TreeEntry>) -> Vec<String> {
+    let mut paths = Vec::new();
+    for entry in tree {
+        match entry.children {
+            Some(children) => paths.extend(page_paths(children)),
+            None => paths.push(entry.path),
+        }
+    }
+    paths
+}
+
+/// The size and modification time of the file at `relative` inside `root`, without following a
+/// link; `None` when no file is there.
+fn stamp_of(root: &Path, relative: &str) -> Option<Stamp> {
+    let metadata = fs::symlink_metadata(root.join(relative)).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos() as i64);
+    Some(Stamp {
+        size: metadata.len(),
+        modified,
+    })
+}
+
+/// The page at `relative` inside `root` for the index, read through confinement, with the stamp
+/// it had before it was read; `None` when it is gone or confinement refuses it. A page that is not
+/// UTF-8 or cannot be read is stored without links or aliases.
+fn read_for_index(root: &Path, relative: &str) -> Option<index::Page> {
+    let file = paths::existing_page(root, relative).ok()?;
+    let stamp = stamp_of(root, relative)?;
+    let text = fs::read(&file)
+        .ok()
+        .and_then(|bytes| page::text_of(&bytes).ok());
+    let content = match text {
+        Some(text) => Content::Parsed(index::parse(&text, index::page_name(relative))),
+        None => Content::Unreadable,
+    };
+    Some(index::Page {
+        path: relative.to_owned(),
+        stamp,
+        content,
+    })
 }
 
 /// Shows the folder dialog and opens the picked folder as the world. Cancelling returns `null`.
@@ -595,11 +1103,16 @@ pub async fn page_create(
     folder: Option<String>,
     name: String,
 ) -> Result<NewEntry, AppError> {
-    guard(|| {
-        state.create_entry(|root, own, recorder| {
-            write::create_page(root, own, recorder, folder.as_deref(), &name)
-        })
-    })
+    guard(|| state.create_page(folder.as_deref(), &name))
+}
+
+/// The pages that link to the page at `path`, or whether the index is still being built or failed.
+#[tauri::command]
+pub async fn backlinks_list(
+    state: State<'_, WorldState>,
+    path: String,
+) -> Result<Backlinks, AppError> {
+    guard(|| state.backlinks(&path))
 }
 
 /// Creates an empty folder `name` in `folder`, or at the world's top level when it is `null`.
@@ -932,11 +1445,17 @@ mod tests {
         assert!(!root.exists());
     }
 
-    /// The next event the watcher sends, within five seconds.
+    /// The next event the watcher sends, within five seconds, leaving out the index's events, which
+    /// the index worker sends whenever it is done.
     fn next_event(events: &mpsc::Receiver<WorldEvent>) -> WorldEvent {
-        events
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the watcher sent no event within five seconds")
+        loop {
+            let event = events
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the watcher sent no event within five seconds");
+            if !event.name().starts_with("world:index-") {
+                return event;
+            }
+        }
     }
 
     /// A world state whose watcher sends its events to the returned receiver.
@@ -1328,6 +1847,427 @@ mod tests {
         assert_eq!(kept.expanded, folders[..5_000]);
         assert_eq!(kept.tree_width, 420);
         assert_eq!(narrow.tree_width, 200);
+    }
+
+    mod links {
+        use super::*;
+        use crate::index::Backlink;
+        use std::time::Instant;
+
+        /// The next index event of the opening `session`, within ten seconds, leaving out every
+        /// other event.
+        fn index_event(events: &mpsc::Receiver<WorldEvent>, session: u64) -> WorldEvent {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let event = events
+                    .recv_timeout(left)
+                    .expect("the index sent no event within ten seconds");
+                match &event {
+                    WorldEvent::IndexChanged { session: of }
+                    | WorldEvent::IndexFailed { session: of, .. }
+                        if *of == session =>
+                    {
+                        return event;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        /// Waits until the index of the opening `session` says that it is built.
+        fn ready(state: &WorldState, events: &mpsc::Receiver<WorldEvent>, session: u64) {
+            loop {
+                assert_eq!(
+                    index_event(events, session),
+                    WorldEvent::IndexChanged { session }
+                );
+                if !matches!(state.backlinks(""), Ok(Backlinks::Building)) {
+                    return;
+                }
+            }
+        }
+
+        fn linking(state: &WorldState, path: &str) -> Vec<String> {
+            match state.backlinks(path).unwrap() {
+                Backlinks::Ready { pages } => pages.into_iter().map(|page| page.path).collect(),
+                other => panic!("the backlinks are not ready: {other:?}"),
+            }
+        }
+
+        fn save(state: &WorldState, path: &str, text: &str) {
+            let page = state.read_page(path).unwrap();
+            state.write_page(path, text, &page.version, false).unwrap();
+        }
+
+        fn reads(state: &WorldState) -> u64 {
+            let inner = state.lock();
+            let worker = &inner.world.as_ref().unwrap().worker;
+            worker.shared.reads.load(Ordering::SeqCst)
+        }
+
+        fn index_of(state: &WorldState) -> Arc<Mutex<Index>> {
+            Arc::clone(&state.lock().world.as_ref().unwrap().index)
+        }
+
+        fn kesh() -> TempDir {
+            let world = tempfile::tempdir().unwrap();
+            fs::create_dir(world.path().join("Places")).unwrap();
+            fs::write(world.path().join("Mirela.md"), "# Mirela\n").unwrap();
+            fs::write(world.path().join("Kesh Tor.md"), "# Kesh Tor\n").unwrap();
+            fs::write(
+                world.path().join("Places/Saltmere.md"),
+                "\u{feff}[[Mirela]] lives here.\r\n",
+            )
+            .unwrap();
+            world
+        }
+
+        /// A world of `count` pages in 50 folders, each linking to Mirela and the next page.
+        fn large(count: usize) -> TempDir {
+            let world = kesh();
+            for number in 0..count {
+                let folder = world.path().join(format!("Folder {}", number % 50));
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(
+                    folder.join(format!("Page {number}.md")),
+                    format!("[[Mirela]] and [[Page {}]]\n", number + 1),
+                )
+                .unwrap();
+            }
+            world
+        }
+
+        fn launched_and_watched(app_data: &TempDir) -> (WorldState, mpsc::Receiver<WorldEvent>) {
+            let (state, events) = watched();
+            state.load_recent(app_data.path());
+            (state, events)
+        }
+
+        #[test]
+        fn a_save_updates_the_index_at_once_and_its_page_shows_in_the_backlinks() {
+            let world = kesh();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            assert_eq!(linking(&state, "Mirela.md"), ["Places/Saltmere.md"]);
+
+            let text = "# Kesh Tor\n\nRuled by [[Mirela]].\n";
+            save(&state, "Kesh Tor.md", text);
+
+            assert!(
+                events
+                    .try_iter()
+                    .any(|event| event == WorldEvent::IndexChanged { session })
+            );
+            assert_eq!(
+                state.backlinks("Mirela.md").unwrap(),
+                Backlinks::Ready {
+                    pages: vec![
+                        Backlink {
+                            path: "Kesh Tor.md".to_owned(),
+                            name: "Kesh Tor".to_owned(),
+                            line: "Ruled by [[Mirela]].".to_owned(),
+                            at: text.find("[[").unwrap() as u64,
+                        },
+                        Backlink {
+                            path: "Places/Saltmere.md".to_owned(),
+                            name: "Saltmere".to_owned(),
+                            line: "[[Mirela]] lives here.".to_owned(),
+                            at: 0,
+                        },
+                    ]
+                }
+            );
+        }
+
+        #[test]
+        fn a_new_page_and_a_restore_and_undo_reach_the_index() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let created = state.create_page(Some("Places"), "Docks").unwrap();
+            save(&state, &created.path, "[[Mirela]] at the docks\n");
+            assert_eq!(
+                linking(&state, "Mirela.md"),
+                ["Places/Docks.md", "Places/Saltmere.md"]
+            );
+
+            let page = state.read_page(&created.path).unwrap();
+            let restored = state
+                .history_restore(&created.path, "1-after", &page.version)
+                .unwrap();
+            assert_eq!(linking(&state, "Mirela.md"), ["Places/Saltmere.md"]);
+            state
+                .history_undo(restored.change.as_deref().unwrap())
+                .unwrap();
+            assert_eq!(
+                linking(&state, "Mirela.md"),
+                ["Places/Docks.md", "Places/Saltmere.md"]
+            );
+        }
+
+        #[test]
+        fn a_reopen_with_nothing_changed_reads_no_page_and_keeps_the_backlinks() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            assert_eq!(reads(&state), 3);
+            let before = state.backlinks("Mirela.md").unwrap();
+            state.close();
+
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            assert_eq!(reads(&state), 0);
+            assert!(lock_index(&index_of(&state)).is_stored());
+            assert_eq!(state.backlinks("Mirela.md").unwrap(), before);
+            // The world folder holds only its pages, and the application data only its own files.
+            let mut in_world: Vec<String> = fs::read_dir(world.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            in_world.sort();
+            assert_eq!(in_world, ["Kesh Tor.md", "Mirela.md", "Places"]);
+            let mut data: Vec<String> = fs::read_dir(app_data.path().join("grimoire-data"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            data.sort();
+            assert_eq!(data, ["history", "index", "worlds.json"]);
+            assert_eq!(fs::read_dir(app_data.path()).unwrap().count(), 1);
+        }
+
+        #[test]
+        fn pages_changed_while_the_world_was_closed_are_taken_in_when_it_opens() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            fs::write(world.path().join("Gone.md"), "[[Mirela]]").unwrap();
+            fs::write(world.path().join("Docks.md"), "[[Saltmere]]").unwrap();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            assert_eq!(linking(&state, "Places/Saltmere.md"), ["Docks.md"]);
+            state.close();
+
+            fs::write(world.path().join("Kesh Tor.md"), "Ruled by [[Mirela]]").unwrap();
+            fs::write(world.path().join("Places/Notes.md"), "[[mirela]]").unwrap();
+            fs::remove_file(world.path().join("Gone.md")).unwrap();
+            fs::rename(
+                world.path().join("Places/Saltmere.md"),
+                world.path().join("Places/Saltmere Old.md"),
+            )
+            .unwrap();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            assert_eq!(
+                linking(&state, "Mirela.md"),
+                ["Kesh Tor.md", "Places/Notes.md", "Places/Saltmere Old.md"]
+            );
+            assert!(linking(&state, "Places/Saltmere.md").is_empty());
+            assert!(linking(&state, "Places/Saltmere Old.md").is_empty());
+        }
+
+        #[test]
+        fn outside_changes_reach_the_index_through_the_watcher() {
+            let world = kesh();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            fs::write(world.path().join("Outside.md"), "[[Mirela]]").unwrap();
+            index_event(&events, session);
+            assert_eq!(
+                linking(&state, "Mirela.md"),
+                ["Outside.md", "Places/Saltmere.md"]
+            );
+
+            fs::write(world.path().join("Places/Saltmere.md"), "No link now").unwrap();
+            index_event(&events, session);
+            assert_eq!(linking(&state, "Mirela.md"), ["Outside.md"]);
+
+            fs::remove_file(world.path().join("Outside.md")).unwrap();
+            index_event(&events, session);
+            assert!(linking(&state, "Mirela.md").is_empty());
+        }
+
+        #[test]
+        fn a_save_during_the_build_of_a_large_world_is_kept_and_does_not_deadlock() {
+            let world = large(2_000);
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            assert_eq!(*lock_index(&index_of(&state)).state(), BuildState::Building);
+
+            save(&state, "Kesh Tor.md", "Ruled by [[Mirela]]\n");
+            ready(&state, &events, session);
+
+            let linking = linking(&state, "Mirela.md");
+            assert_eq!(linking.len(), 2_002);
+            assert!(linking.contains(&"Kesh Tor.md".to_owned()));
+        }
+
+        #[test]
+        fn reopening_a_world_while_it_is_built_stops_the_old_worker_and_keeps_the_file() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = large(2_000);
+            let (state, events) = launched_and_watched(&app_data);
+            state.open(world.path().to_path_buf()).unwrap();
+
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            assert!(lock_index(&index_of(&state)).is_stored());
+            assert_eq!(linking(&state, "Mirela.md").len(), 2_001);
+        }
+
+        #[test]
+        fn closing_a_world_whose_worker_waits_returns_at_once() {
+            let world = kesh();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let started = Instant::now();
+            state.close();
+
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
+
+        #[test]
+        fn an_index_file_overwritten_while_open_is_built_again_after_the_next_save() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let file = index::file(app_data.path(), world.path().to_str().unwrap());
+
+            fs::write(&file, vec![0x5a; 16_384]).unwrap();
+            save(&state, "Kesh Tor.md", "Ruled by [[Mirela]]\n");
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Backlinks::Ready { pages } = state.backlinks("Mirela.md").unwrap() {
+                    let paths: Vec<String> = pages.into_iter().map(|page| page.path).collect();
+                    assert_eq!(paths, ["Kesh Tor.md", "Places/Saltmere.md"]);
+                    break;
+                }
+                assert!(Instant::now() < deadline, "the index was not built again");
+                index_event(&events, session);
+            }
+        }
+
+        #[test]
+        fn an_alias_whose_pass_a_close_cut_short_still_resolves_after_the_next_open() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            fs::write(world.path().join("Kesh Tor.md"), "[[Mira]]").unwrap();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            {
+                let inner = state.lock();
+                let worker = &inner.world.as_ref().unwrap().worker;
+                worker.shared.hold_passes.store(true, Ordering::SeqCst);
+            }
+
+            save(&state, "Mirela.md", "---\naliases: [Mira]\n---\n# Mirela\n");
+            assert_eq!(linking(&state, "Mirela.md"), ["Places/Saltmere.md"]);
+            state.close();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            assert_eq!(reads(&state), 0);
+            assert_eq!(
+                linking(&state, "Mirela.md"),
+                ["Kesh Tor.md", "Places/Saltmere.md"]
+            );
+        }
+
+        /// The DESIGN's large world, in a release build: `cargo test --release --manifest-path
+        /// src-tauri/Cargo.toml world:: -- --ignored`.
+        #[test]
+        #[ignore = "a release-mode scale check"]
+        fn a_world_of_5000_pages_is_indexed_within_the_design_s_limits() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = tempfile::tempdir().unwrap();
+            for folder in 0..300 {
+                fs::create_dir(world.path().join(format!("Folder {folder}"))).unwrap();
+            }
+            fs::write(world.path().join("Hub.md"), "# Hub\n").unwrap();
+            for number in 0..5_000usize {
+                // Ten links each: the first 1,000 pages link the hub; the rest names, aliases and
+                // paths across the world.
+                let mut links = vec![if number < 1_000 {
+                    "[[Hub]]".to_owned()
+                } else {
+                    format!("[[Page {}]]", (number * 7) % 5_000)
+                }];
+                links.extend((1..=5).map(|k| format!("[[Page {}]]", (number + k * 37) % 5_000)));
+                links.extend(
+                    (1..=3).map(|k| format!("[[Alias {}|by alias]]", (number + k * 101) % 5_000)),
+                );
+                let other = (number + 1) % 5_000;
+                links.push(format!("[[Folder {}/Page {other}#Heading]]", other % 300));
+                let text = format!(
+                    "---\naliases: [Alias {number}]\n---\n# Page {number}\n\n{}\n",
+                    links.join(" and then ")
+                );
+                let path = world
+                    .path()
+                    .join(format!("Folder {}/Page {number}.md", number % 300));
+                fs::write(path, text).unwrap();
+            }
+            let (state, events) = launched_and_watched(&app_data);
+
+            let opened = Instant::now();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            let saving = Instant::now();
+            save(&state, "Hub.md", "# Hub\n\nEdited during the build.\n");
+            let save_time = saving.elapsed();
+            let saved_during_build = *lock_index(&index_of(&state)).state() == BuildState::Building;
+            ready(&state, &events, session);
+            let first_build = opened.elapsed();
+
+            let asking = Instant::now();
+            let hub = linking(&state, "Hub.md");
+            let backlinks_time = asking.elapsed();
+            state.close();
+
+            let reopened = Instant::now();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let reopen = reopened.elapsed();
+            assert_eq!(reads(&state), 0);
+            assert_eq!(linking(&state, "Hub.md").len(), 1_000);
+            let cache = index::file(app_data.path(), world.path().to_str().unwrap());
+            let stored: (i64, i64) = rusqlite::Connection::open(cache)
+                .unwrap()
+                .query_row(
+                    "SELECT (SELECT count(*) FROM pages), (SELECT count(*) FROM links)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(stored, (5_001, 50_000));
+
+            eprintln!(
+                "first build {first_build:?}, save during it {save_time:?}, backlinks of 1,000 \
+                 {backlinks_time:?}, reopen {reopen:?}"
+            );
+            assert!(saved_during_build, "the save ran after the build");
+            assert_eq!(hub.len(), 1_000);
+            assert!(first_build < Duration::from_secs(10));
+            assert!(save_time < Duration::from_millis(200));
+            assert!(backlinks_time < Duration::from_secs(1));
+            assert!(reopen < Duration::from_secs(2));
+        }
     }
 
     mod history {

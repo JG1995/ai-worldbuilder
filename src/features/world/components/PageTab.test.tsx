@@ -16,7 +16,13 @@ function renderPage({ onDiscard = vi.fn() } = {}) {
   });
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <PageTab path={path} session={testWorld.session} onClose={vi.fn()} onDiscard={onDiscard} />
+      <PageTab
+        path={path}
+        session={testWorld.session}
+        onClose={vi.fn()}
+        onDiscard={onDiscard}
+        onOpenPage={vi.fn()}
+      />
     </QueryClientProvider>,
   );
   return screen.findByRole("textbox", { name: "Overview" });

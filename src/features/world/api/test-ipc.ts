@@ -68,6 +68,7 @@ const defaults: Record<string, Handler> = {
     version: `version after undoing ${String(change)}`,
     change: "undo",
   }),
+  backlinks_list: () => ({ state: "ready", pages: [] }),
 };
 
 function entryPath(folder: unknown, name: string) {

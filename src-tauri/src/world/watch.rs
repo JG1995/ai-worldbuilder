@@ -39,6 +39,11 @@ pub enum WorldEvent {
     HistoryRecording { session: u64 },
     /// The world's history database was damaged, so it was set aside and a new one started.
     HistorySetAside { session: u64 },
+    /// The page index was built, or what it holds changed.
+    IndexChanged { session: u64 },
+    /// The page index cannot be built, because the world cannot be listed, for the reason in
+    /// `message`.
+    IndexFailed { session: u64, message: String },
 }
 
 impl WorldEvent {
@@ -51,6 +56,8 @@ impl WorldEvent {
             Self::HistoryNotRecording { .. } => "world:history-not-recording",
             Self::HistoryRecording { .. } => "world:history-recording",
             Self::HistorySetAside { .. } => "world:history-set-aside",
+            Self::IndexChanged { .. } => "world:index-changed",
+            Self::IndexFailed { .. } => "world:index-failed",
         }
     }
 }
@@ -59,7 +66,7 @@ impl WorldEvent {
 pub type EventSink = Arc<dyn Fn(WorldEvent) + Send + Sync>;
 
 /// What one batch of outside changes means for the interface.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Changes {
     /// Whether the tree may have changed: an entry other than a non-Markdown file was created,
     /// removed or renamed.
@@ -415,6 +422,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&failed).unwrap(),
             serde_json::json!({ "session": 3, "message": "limit reached" })
+        );
+        let index_failed = WorldEvent::IndexFailed {
+            session: 3,
+            message: "Permission denied.".to_owned(),
+        };
+        assert_eq!(
+            WorldEvent::IndexChanged { session: 3 }.name(),
+            "world:index-changed"
+        );
+        assert_eq!(index_failed.name(), "world:index-failed");
+        assert_eq!(
+            serde_json::to_value(&index_failed).unwrap(),
+            serde_json::json!({ "session": 3, "message": "Permission denied." })
         );
     }
 }

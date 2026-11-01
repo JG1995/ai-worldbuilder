@@ -3,6 +3,8 @@
 // check if the marker below, which every version token carries, appears in a production bundle.
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
+  Backlink,
+  Backlinks,
   Comparison,
   DiffLine,
   HistoryVersion,
@@ -43,9 +45,9 @@ Each night of travel costs one water ration per rider. Roll on the table below f
 
 Use \`inline code\` for dice notation such as \`3d6\`.
 `,
-  "Characters/Brother Ketil.md": "# Brother Ketil\n\nKeeper of the shrine at Kesh Tor.\n",
+  "Characters/Brother Ketil.md": "# Brother Ketil\n\nKeeper of the shrine at [[Kesh Tor]].\n",
   "Characters/Captain Orlaith Venn.md":
-    "# Captain Orlaith Venn\n\nLeads the last caravan that still crosses in summer.\n",
+    "# Captain Orlaith Venn\n\nLeads the last caravan that still crosses in summer, guided by [[Brother Ketil|the old monk]].\n",
   "Characters/The salt merchant.md": "# The salt merchant\n\nNobody knows her name.\n",
   "Factions/Glasswrights' Guild.md": "# Glasswrights' Guild\n\nThey mine the steppe for lenses.\n",
   "Factions/Riders of the Dun Sky.md": "# Riders of the Dun Sky\n\nNomads who never camp twice.\n",
@@ -54,8 +56,10 @@ Use \`inline code\` for dice notation such as \`3d6\`.
     "# Locked chronicle\n\nIn the preview, another program holds this page open, so saving it always fails.\n",
   "Locations/Old trade ledger.md": { notUtf8: true },
   "Locations/The mirror lake.md": "# The mirror lake\n\nIts surface shows the sky of last night.\n",
-  "Session notes/Session 1.md": "# Session 1\n\nThe party joins Venn's caravan.\n",
-  "Session notes/Session 2.md": "# Session 2\n\nA glass storm strands the caravan at Kesh Tor.\n",
+  "Session notes/Session 1.md":
+    "# Session 1\n\nThe party joins [[Captain Orlaith Venn|Venn]]'s caravan.\n",
+  "Session notes/Session 2.md":
+    "# Session 2\n\nA glass storm strands the caravan at [[Kesh Tor#Shelter]].\n",
   "Session notes/Session 10.md": "# Session 10\n\nThe Guild's lens finally works.\n",
 };
 
@@ -331,6 +335,33 @@ const conflict = {
   message: "The page changed on disk since it was last read or saved.",
 };
 
+const escapedForPattern = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The pages that link to the page at `path`, found by scanning the other pages for `[[name]]`,
+ * `[[name|…]]` and `[[name#…]]` with the page's name, in any letter case. An approximation for the
+ * preview: the core's index also resolves paths and aliases, and leaves out code and frontmatter.
+ */
+function backlinksOf(open: PreviewWorld, path: string): Backlink[] {
+  const name = path.split("/").at(-1)?.replace(/\.md$/i, "") ?? path;
+  const link = new RegExp(`!?\\[\\[${escapedForPattern(name)}(?:[|#][^\\]\\n]*)?\\]\\]`, "i");
+  const pages: Backlink[] = [];
+  for (const [source, text] of Object.entries(open.pages)) {
+    if (source === path || typeof text !== "string") continue;
+    const found = link.exec(text);
+    if (!found) continue;
+    const lineStart = text.lastIndexOf("\n", found.index) + 1;
+    const lineEnd = text.indexOf("\n", found.index);
+    pages.push({
+      path: source,
+      name: source.split("/").at(-1)?.replace(/\.md$/i, "") ?? source,
+      line: text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd),
+      at: found.index,
+    });
+  }
+  return pages.sort((a, b) => byName.compare(a.name, b.name) || byName.compare(a.path, b.path));
+}
+
 /** Creates an empty page or folder like the core, refusing names that break a rule or clash. */
 function createEntry(args: InvokeArgs | undefined, kind: TreeEntry["kind"]) {
   const open = requireWorld();
@@ -499,4 +530,8 @@ export const previewFixtures: Record<string, unknown> = {
   },
   workspace_save: () => null,
   app_close: () => null,
+  backlinks_list: (args?: InvokeArgs): Backlinks => {
+    const { path } = args as { path: string };
+    return { state: "ready", pages: backlinksOf(requireWorld(), path) };
+  },
 };

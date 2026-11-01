@@ -1,5 +1,7 @@
 mod error;
 mod history;
+mod index;
+mod order;
 #[cfg(target_os = "linux")]
 mod theme;
 mod world;
@@ -73,6 +75,7 @@ pub fn run() {
             world::history_compare,
             world::history_restore,
             world::history_undo,
+            world::backlinks_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
