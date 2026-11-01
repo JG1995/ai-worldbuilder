@@ -76,6 +76,8 @@ describe("SearchDialog", () => {
     expect(box).toHaveAttribute("aria-activedescendant", options()[0].id);
     expect(options()[0]).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("status")).toHaveTextContent("2 pages match.");
+    // WebKit leaves out what is outside a modal dialog, so the live region is inside it.
+    expect(screen.getByRole("dialog")).toContainElement(screen.getByRole("status"));
   });
 
   it("shows each page's name, folder and alias with the matched characters underlined", () => {
@@ -114,7 +116,9 @@ describe("SearchDialog", () => {
 
     rerender({ results: { state: "failed", query: "mir", message: "Permission denied." } });
     expect(
-      within(screen.getByRole("dialog")).getByText("Pages cannot be searched: Permission denied."),
+      within(screen.getByRole("dialog")).getByText("Pages cannot be searched: Permission denied.", {
+        ignore: "[role=status]",
+      }),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Pages cannot be searched: Permission denied.",
