@@ -249,6 +249,21 @@ describe("following an unresolved link", () => {
     expect(tabNames()).toEqual(["Overview"]);
   });
 
+  it("lists the tree again after a failure, which can leave folders it created", async () => {
+    const { calls, textbox } = await openOverview({
+      link_create: () => {
+        throw { kind: "io", message: "The disk is full." };
+      },
+    });
+    const trees = callsOf(calls, "world_tree").length;
+
+    await follow(textbox, "[[Saltmere]]");
+
+    const toast = "The page could not be created: The disk is full.";
+    expect(await within(screen.getByRole("status")).findByText(toast)).toBeVisible();
+    await waitFor(() => expect(callsOf(calls, "world_tree").length).toBeGreaterThan(trees));
+  });
+
   it("shows the missing-world notice when the world's folder is gone", async () => {
     const { textbox } = await openOverview({
       link_create: () => {
