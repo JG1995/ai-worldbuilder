@@ -25,7 +25,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::{AppError, ErrorKind, guard};
 use crate::history::{self, History, HistoryVersion, Kind};
 use crate::index::{
-    self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, Stamp,
+    self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches, Stamp,
 };
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
@@ -643,6 +643,38 @@ impl WorldState {
         })
     }
 
+    /// The pages whose name, alias or path matches `query`, from the open world's index, which
+    /// while it is being built holds only the pages it has read so far.
+    fn search_pages(&self, query: &str) -> Result<PageMatches, AppError> {
+        self.query_index(|index| index.search_pages(query))
+    }
+
+    /// Creates an empty page for `query`, untrusted text typed in search that no page matched,
+    /// under the world lock like a save: `{query}.md` in the folder of the page at `from`, or at the
+    /// world's top level without one, or, for a query with a `/`, at that path from the top level.
+    /// Nothing is created while the index is not built, so a page that exists but is not indexed
+    /// yet is never created twice.
+    fn search_create(&self, from: Option<&str>, query: &str) -> Result<LinkedPage, AppError> {
+        self.write_with_index(|root, own, recorder, index| {
+            if lock_index(index).state() != &BuildState::Ready {
+                return Ok((LinkedPage::NotReady, None));
+            }
+            let query = query.trim();
+            let from = if query.contains('/') {
+                ""
+            } else {
+                from.unwrap_or("")
+            };
+            let relative = index::creation_path(from, query).ok_or_else(write::outside_world)?;
+            let linked = write::create_searched_page(root, own, recorder, &relative)?;
+            let written = match &linked {
+                LinkedPage::Created { path } => Some((path.clone(), String::new())),
+                _ => None,
+            };
+            Ok((linked, written))
+        })
+    }
+
     /// Starts the watcher for the opening `session` of the world at `root`. Its batches are read
     /// under the world lock, so a write of the application's is never half done when the watcher
     /// compares a page with the own-write record. Each batch goes on to the index worker.
@@ -1213,6 +1245,28 @@ pub async fn link_suggest(
     query: String,
 ) -> Result<LinkSuggestions, AppError> {
     guard(|| state.link_suggest(&from, &query))
+}
+
+/// Up to 10 pages whose name, alias or path matches `query`, best first, or whether the index is
+/// still being built or failed.
+#[tauri::command]
+pub async fn search_pages(
+    state: State<'_, WorldState>,
+    query: String,
+) -> Result<PageMatches, AppError> {
+    guard(|| state.search_pages(&query))
+}
+
+/// Creates an empty page for `query`, typed in search, in the folder of the page at `from` or at
+/// the path the query gives, or gives a page there in another letter case, or says that the index
+/// is still being built.
+#[tauri::command]
+pub async fn search_create(
+    state: State<'_, WorldState>,
+    from: Option<String>,
+    query: String,
+) -> Result<LinkedPage, AppError> {
+    guard(|| state.search_create(from.as_deref(), &query))
 }
 
 /// Creates an empty folder `name` in `folder`, or at the world's top level when it is `null`.
@@ -2615,16 +2669,7 @@ mod tests {
         #[ignore = "a release-mode scale check"]
         fn suggestions_in_a_world_of_5000_pages_answer_within_100_ms() {
             let app_data = tempfile::tempdir().unwrap();
-            let world = tempfile::tempdir().unwrap();
-            for folder in 0..300 {
-                fs::create_dir(world.path().join(format!("Folder {folder}"))).unwrap();
-            }
-            for number in 0..5_000usize {
-                let path = world
-                    .path()
-                    .join(format!("Folder {}/Page {number}.md", number % 300));
-                fs::write(path, format!("---\naliases: [Alias {number}]\n---\n")).unwrap();
-            }
+            let world = aliased_world();
             let (state, events) = launched_and_watched(&app_data);
             let session = state.open(world.path().to_path_buf()).unwrap().session;
             ready(&state, &events, session);
@@ -2646,6 +2691,330 @@ mod tests {
             }
 
             eprintln!("slowest suggestions {slowest:?}");
+            assert!(slowest < Duration::from_millis(100));
+        }
+
+        /// The DESIGN's large world: 5,000 pages in 300 folders, each with an alias.
+        fn aliased_world() -> TempDir {
+            let world = tempfile::tempdir().unwrap();
+            for folder in 0..300 {
+                fs::create_dir(world.path().join(format!("Folder {folder}"))).unwrap();
+            }
+            for number in 0..5_000usize {
+                let path = world
+                    .path()
+                    .join(format!("Folder {}/Page {number}.md", number % 300));
+                fs::write(path, format!("---\naliases: [Alias {number}]\n---\n")).unwrap();
+            }
+            world
+        }
+
+        /// The state and the paths of the pages that match `query`.
+        fn found(state: &WorldState, query: &str) -> (&'static str, Vec<String>) {
+            let (answer, pages) = match state.search_pages(query).unwrap() {
+                PageMatches::Building { pages } => ("building", pages),
+                PageMatches::Ready { pages } => ("ready", pages),
+                PageMatches::Failed { message } => panic!("search failed: {message}"),
+            };
+            (answer, pages.into_iter().map(|page| page.path).collect())
+        }
+
+        /// Every entry below the world's folder, as paths relative to it, sorted.
+        fn entries_of(world: &TempDir) -> Vec<String> {
+            fn walk(root: &Path, folder: &Path, found: &mut Vec<String>) {
+                for entry in fs::read_dir(folder).unwrap() {
+                    let path = entry.unwrap().path();
+                    let relative = path.strip_prefix(root).unwrap();
+                    found.push(relative.to_str().unwrap().replace('\\', "/"));
+                    if fs::symlink_metadata(&path).unwrap().is_dir() {
+                        walk(root, &path, found);
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            walk(world.path(), world.path(), &mut found);
+            found.sort();
+            found
+        }
+
+        /// Each change in the world's history, with the paths it touched.
+        fn changes(app_data: &TempDir, world: &TempDir) -> Vec<(String, Vec<String>)> {
+            crate::history::testing::stored(app_data.path(), world.path())
+                .into_iter()
+                .map(|change| {
+                    let paths = change.entries.into_iter().map(|e| e.entry.path).collect();
+                    (change.kind, paths)
+                })
+                .collect()
+        }
+
+        #[test]
+        fn page_matches_ignore_accents_mark_the_name_and_rank_a_name_before_an_alias() {
+            let world = tempfile::tempdir().unwrap();
+            fs::create_dir(world.path().join("People")).unwrap();
+            fs::write(
+                world.path().join("People/Mirëla.md"),
+                "---\naliases: [Mira]\n---\n",
+            )
+            .unwrap();
+            fs::write(world.path().join("Mirabel.md"), "").unwrap();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let by_name = serde_json::to_value(state.search_pages("mirela").unwrap()).unwrap();
+            let by_alias = serde_json::to_value(state.search_pages("mira").unwrap()).unwrap();
+
+            assert_eq!(
+                by_name,
+                json!({ "state": "ready", "pages": [{
+                    "path": "People/Mirëla.md",
+                    "name": "Mirëla",
+                    "field": "name",
+                    "alias": null,
+                    "mark": { "from": 0, "to": 6 },
+                }]})
+            );
+            assert_eq!(
+                by_alias,
+                json!({ "state": "ready", "pages": [
+                    {
+                        "path": "Mirabel.md",
+                        "name": "Mirabel",
+                        "field": "name",
+                        "alias": null,
+                        "mark": { "from": 0, "to": 4 },
+                    },
+                    {
+                        "path": "People/Mirëla.md",
+                        "name": "Mirëla",
+                        "field": "alias",
+                        "alias": "Mira",
+                        "mark": { "from": 0, "to": 4 },
+                    },
+                ]})
+            );
+        }
+
+        #[test]
+        fn page_matches_come_from_what_is_stored_and_say_while_it_is_built_and_when_it_failed() {
+            let world = kesh();
+            fs::write(world.path().join("Places/Ledger.md"), [0xff, 0xfe, 0x00]).unwrap();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            // A page that is not UTF-8 matches by its name, and a saved alias matches at once.
+            assert_eq!(
+                found(&state, "ledger"),
+                ("ready", vec!["Places/Ledger.md".to_owned()])
+            );
+            save(&state, "Kesh Tor.md", "---\naliases: [Old Mire]\n---\n");
+            let mir = vec!["Mirela.md".to_owned(), "Kesh Tor.md".to_owned()];
+            assert_eq!(found(&state, "mir"), ("ready", mir.clone()));
+
+            lock_index(&index_of(&state)).set_state(BuildState::Building);
+            assert_eq!(found(&state, "mir"), ("building", mir));
+
+            lock_index(&index_of(&state))
+                .set_state(BuildState::Failed("Permission denied.".into()));
+            assert_eq!(
+                serde_json::to_value(state.search_pages("mir").unwrap()).unwrap(),
+                json!({ "state": "failed", "message": "Permission denied." })
+            );
+        }
+
+        #[test]
+        fn creating_from_search_puts_a_name_in_the_active_page_s_folder_and_a_path_at_the_root() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let from = Some("Places/Saltmere.md");
+
+            let created = [
+                state.search_create(from, " Harbor "),
+                state.search_create(None, "Docks"),
+                state.search_create(from, "Lore/Gods/Tide"),
+                state.search_create(None, "Ledger.MD"),
+            ]
+            .map(Result::unwrap);
+
+            assert_eq!(
+                created,
+                [
+                    "Places/Harbor.md",
+                    "Docks.md",
+                    "Lore/Gods/Tide.md",
+                    "Ledger.md"
+                ]
+                .map(|path| {
+                    LinkedPage::Created {
+                        path: path.to_owned(),
+                    }
+                })
+            );
+            assert_eq!(
+                fs::read(world.path().join("Places/Harbor.md")).unwrap(),
+                b""
+            );
+            let page = |paths: &[&str]| {
+                let paths = paths.iter().map(|path| (*path).to_owned()).collect();
+                ("new_page".to_owned(), paths)
+            };
+            assert_eq!(
+                changes(&app_data, &world),
+                [
+                    page(&["Places/Harbor.md"]),
+                    page(&["Docks.md"]),
+                    page(&["Lore", "Lore/Gods", "Lore/Gods/Tide.md"]),
+                    page(&["Ledger.md"]),
+                ]
+            );
+            assert_eq!(
+                found(&state, "tide"),
+                ("ready", vec!["Lore/Gods/Tide.md".to_owned()])
+            );
+            assert_eq!(
+                entries_of(&world),
+                [
+                    "Docks.md",
+                    "Kesh Tor.md",
+                    "Ledger.md",
+                    "Lore",
+                    "Lore/Gods",
+                    "Lore/Gods/Tide.md",
+                    "Mirela.md",
+                    "Places",
+                    "Places/Harbor.md",
+                    "Places/Saltmere.md",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_query_that_breaks_a_rule_or_leads_nowhere_creates_and_records_nothing() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            fs::create_dir(world.path().join(".obsidian")).unwrap();
+            fs::write(world.path().join("Docks"), b"a file").unwrap();
+            fs::create_dir(world.path().join("Places/Tide.md")).unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere")).unwrap();
+            let before = entries_of(&world);
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let forbidden = "Names cannot contain / \\ : * ? \" < > | or control characters, \
+                             which some systems forbid.";
+            let from = Some("Places/Saltmere.md");
+            let mut cases = vec![
+                (None, "Har*bor", ErrorKind::InvalidName, forbidden),
+                (
+                    None,
+                    "Session 3: Harbour",
+                    ErrorKind::InvalidName,
+                    forbidden,
+                ),
+                (
+                    None,
+                    "Har#bor",
+                    ErrorKind::InvalidName,
+                    "Names cannot contain [ ] # or ^, which break wiki links.",
+                ),
+                (
+                    None,
+                    "CON",
+                    ErrorKind::InvalidName,
+                    "Windows reserves CON, PRN, AUX, NUL, COM1 to COM9 and LPT1 to LPT9, even \
+                     with an extension.",
+                ),
+                (
+                    None,
+                    "Harbor.",
+                    ErrorKind::InvalidName,
+                    "Names cannot end with a dot.",
+                ),
+                (None, "Act?/Harbor", ErrorKind::InvalidName, forbidden),
+                (
+                    None,
+                    "Lore /Harbor",
+                    ErrorKind::InvalidName,
+                    "Names cannot start or end with a space.",
+                ),
+                (
+                    from,
+                    "tide",
+                    ErrorKind::Exists,
+                    "Something with this name already exists here. Letter case does not count.",
+                ),
+                (None, ".obsidian/Harbor", ErrorKind::InvalidPath, ""),
+                (from, "Places/.Harbor", ErrorKind::InvalidPath, ""),
+                (None, "docks/Harbor", ErrorKind::InvalidPath, ""),
+                (from, "../Harbor", ErrorKind::InvalidPath, ""),
+            ];
+            if cfg!(unix) {
+                cases.push((None, "elsewhere/Harbor", ErrorKind::InvalidPath, ""));
+            }
+
+            for (from, query, kind, message) in cases {
+                let error = state.search_create(from, query).unwrap_err();
+                assert_eq!(error.kind, kind, "{query}");
+                if kind == ErrorKind::InvalidName || kind == ErrorKind::Exists {
+                    assert_eq!(error.message, message, "{query}");
+                }
+            }
+
+            assert_eq!(entries_of(&world), before);
+            assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+            assert!(changes(&app_data, &world).is_empty());
+        }
+
+        #[test]
+        fn creating_from_search_opens_a_page_in_another_letter_case_and_waits_for_the_index() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let existing = state.search_create(None, "MIRELA").unwrap();
+            lock_index(&index_of(&state)).set_state(BuildState::Building);
+            let building = state.search_create(None, "Harbor").unwrap();
+
+            assert_eq!(
+                existing,
+                LinkedPage::Existing {
+                    path: "Mirela.md".to_owned()
+                }
+            );
+            assert_eq!(building, LinkedPage::NotReady);
+            assert!(!world.path().join("Harbor.md").exists());
+            assert!(changes(&app_data, &world).is_empty());
+        }
+
+        /// The DESIGN's page matches in a large world, in a release build: `cargo test --release
+        /// --manifest-path src-tauri/Cargo.toml world:: -- --ignored`.
+        #[test]
+        #[ignore = "a release-mode scale check"]
+        fn page_matches_in_a_world_of_5000_pages_answer_within_100_ms() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = aliased_world();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let mut slowest = Duration::ZERO;
+            for query in ["p", "Page 4", "alias 3", "Folder 2/Page", "nothing"] {
+                let asking = Instant::now();
+                let matches = state.search_pages(query).unwrap();
+                slowest = slowest.max(asking.elapsed());
+                assert!(matches!(matches, PageMatches::Ready { .. }), "{query}");
+            }
+
+            eprintln!("slowest page matches {slowest:?}");
             assert!(slowest < Duration::from_millis(100));
         }
     }

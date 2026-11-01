@@ -1,5 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { type IpcError, listenEvent } from "@/lib/ipc";
 import type { WorldOpened } from "@/types/api";
 import { Button } from "@/ui/Button";
@@ -22,12 +29,20 @@ import { followOutsideChanges } from "../logic/outside-changes";
 import { saveWorkspace, useWorldStore } from "../stores/world-store";
 import { useSaveConfirmation } from "./FailedSaveDialog";
 import { NewWorldDialog } from "./NewWorldDialog";
-import { WorldScreen } from "./WorldScreen";
+import { type QuickOpenPorts, WorldScreen } from "./WorldScreen";
 
 type Failure = { title: string; message: string };
 
 /** The query key of the launch's one `world_restore`. */
 const launchRestoreKey = ["world_restore"] as const;
+
+type WorldProps = {
+  /**
+   * Renders the quick open dialog of the open world, which the world's screen opens from Ctrl/Cmd+O,
+   * Ctrl/Cmd+K and the tree's Search button. Without it, there is no quick open.
+   */
+  quickOpen?: (ports: QuickOpenPorts) => ReactNode;
+};
 
 /**
  * The welcome screen or the open world, and the flows that open, switch and close worlds and the
@@ -35,7 +50,7 @@ const launchRestoreKey = ["world_restore"] as const;
  * closes, every open page saves, with the failed-save dialog for each one that cannot, and then
  * the workspace saves.
  */
-export function World() {
+export function World({ quickOpen }: WorldProps) {
   const world = useWorldStore((store) => store.world);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
@@ -231,6 +246,7 @@ export function World() {
           onNewWorld={() => setNewWorldOpen(true)}
           onCloseWorld={closeWorld}
           confirmSaved={confirmSaved}
+          quickOpen={quickOpen}
         />
       );
     }

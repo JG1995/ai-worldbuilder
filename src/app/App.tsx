@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
+import { QuickOpen } from "@/features/search/components/QuickOpen";
 import { World } from "@/features/world/components/World";
 
 // Commands answer from the local core: a failure is reported at once rather than retried, and
@@ -13,7 +14,7 @@ export function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <World />
+      <World quickOpen={(ports) => <QuickOpen {...ports} />} />
     </QueryClientProvider>
   );
 }

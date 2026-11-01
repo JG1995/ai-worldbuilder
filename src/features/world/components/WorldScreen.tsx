@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
 import type { RecentWorld, TreeEntry } from "@/types/api";
@@ -20,6 +20,7 @@ import { PageTab } from "./PageTab";
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
 const historyShortcut = "Ctrl+Shift+H";
+const searchShortcut = "Ctrl+O";
 
 /** World menu items for recent worlds carry the world's id after this prefix. */
 const recentItemPrefix = "recent:";
@@ -35,6 +36,22 @@ const newEntryItems: MenuItem[] = [
   { id: "new-folder", label: "New folder", shortcut: newFolderShortcut },
 ];
 
+/**
+ * What the quick open dialog gets from the world's screen. `openPage` opens a page by the tab rules
+ * of the tree, saving the page it replaces first, with focus in its editor; `pageCreated` opens a
+ * page just created in a new tab; `close` hides the dialog.
+ */
+export type QuickOpenPorts = {
+  session: number;
+  activePage: string | null;
+  indexRevision: number;
+  openPage: (path: string, options: { newTab: boolean; at?: CursorTarget }) => void;
+  pageCreated: (path: string) => void;
+  refreshTree: () => void;
+  showWorldMissing: () => void;
+  close: () => void;
+};
+
 type WorldScreenProps = {
   /** The open world's session, which keys its tree and its pages' results. */
   session: number;
@@ -47,6 +64,8 @@ type WorldScreenProps = {
   onCloseWorld: () => void;
   /** Saves a page, asking with the failed-save dialog while it cannot; false on Cancel. */
   confirmSaved: (path: string) => Promise<boolean>;
+  /** Renders the quick open dialog; without it, Ctrl/Cmd+O and K and the Search button do nothing. */
+  quickOpen?: (ports: QuickOpenPorts) => ReactNode;
 };
 
 /**
@@ -62,6 +81,7 @@ export function WorldScreen({
   onNewWorld,
   onCloseWorld,
   confirmSaved,
+  quickOpen,
 }: WorldScreenProps) {
   const tabs = useWorldStore((store) => store.tabs);
   const active = useWorldStore((store) => store.active);
@@ -73,6 +93,11 @@ export function WorldScreen({
   const worldNotices = useWorldStore((store) => store.worldNotices);
   const historyNotRecording = useWorldStore((store) => store.historyNotRecording);
   const toasts = useWorldStore((store) => store.toasts);
+  const indexRevision = useWorldStore((store) => store.indexRevision);
+  const changingWorld = useWorldStore((store) => store.changingWorld);
+  const [searching, setSearching] = useState(false);
+  // A world change closes quick open; nothing from it reaches the next world.
+  if (searching && changingWorld) setSearching(false);
   const {
     openPage,
     activate,
@@ -137,7 +162,7 @@ export function WorldScreen({
    */
   async function openFromTree(
     path: string,
-    options: { newTab: boolean; at?: CursorTarget },
+    options: { newTab: boolean; at?: CursorTarget; focusEditor?: boolean },
   ): Promise<void> {
     const { tabs, active } = useWorldStore.getState();
     if (options.newTab || active === null || tabs.includes(path)) {
@@ -150,6 +175,32 @@ export function WorldScreen({
     }
     openPage(path, options);
   }
+
+  /** Opens quick open, once the active page's pending edits are saving. */
+  function openQuickOpen() {
+    const { active } = useWorldStore.getState();
+    if (active !== null) void flush(active);
+    setSearching(true);
+  }
+
+  /** Opens a page just created from quick open in a new tab, once the tree lists it. */
+  async function quickOpenCreated(path: string) {
+    await queryClient.invalidateQueries({ queryKey: treeKey });
+    if (useWorldStore.getState().world?.session !== session) return;
+    flushActiveBefore(path);
+    pageCreated(path);
+  }
+
+  const quickOpenPorts: QuickOpenPorts = {
+    session,
+    activePage: active,
+    indexRevision,
+    openPage: (path, { newTab, at }) => void openFromTree(path, { newTab, at, focusEditor: true }),
+    pageCreated: (path) => void quickOpenCreated(path),
+    refreshTree: () => void queryClient.invalidateQueries({ queryKey: treeKey }),
+    showWorldMissing: () => showWorldNotice(session, "missing"),
+    close: () => setSearching(false),
+  };
 
   /** Opens a page from the tree in the current tab, as a click does, then shows its history. */
   async function openHistory(path: string) {
@@ -206,12 +257,22 @@ export function WorldScreen({
 
   /**
    * Window shortcuts, wherever focus is outside a modal dialog: Ctrl/Cmd+S saves the active page
-   * at once, Ctrl/Cmd+N starts a new page, Ctrl/Cmd+Shift+N a new folder, and Ctrl/Cmd+Shift+H
-   * shows the active page's history.
+   * at once, Ctrl/Cmd+N starts a new page, Ctrl/Cmd+Shift+N a new folder, Ctrl/Cmd+Shift+H shows
+   * the active page's history, and Ctrl/Cmd+O and Ctrl/Cmd+K open quick open when there is one.
    */
   const shortcuts = useEffectEvent((event: KeyboardEvent) => {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
     const key = event.key.toLowerCase();
+    if (quickOpen && (key === "o" || key === "k") && !event.shiftKey) {
+      // Ctrl+O would otherwise open a file, and Ctrl+K go to the browser's search, so both are
+      // cancelled even where they open nothing.
+      event.preventDefault();
+      const { changingWorld } = useWorldStore.getState();
+      if (!changingWorld && !document.activeElement?.closest('[aria-modal="true"]')) {
+        openQuickOpen();
+      }
+      return;
+    }
     const history = key === "h" && event.shiftKey;
     if (key !== "s" && key !== "n" && !history) return;
     // Ctrl+N would otherwise open a browser window, and Ctrl+Shift+H a browser's history, so
@@ -268,106 +329,113 @@ export function WorldScreen({
   const closePage = (path: string) => void closeTabSaved(path);
 
   return (
-    <Shell
-      treeWidth={treeWidth}
-      onTreeWidthChange={setTreeWidth}
-      treeOverlayOpen={treeOverlayOpen}
-      onTreeOverlayOpenChange={setTreeOverlayOpen}
-      tree={
-        // Until the first listing arrives, an empty pane, not the empty-world message.
-        tree.isPending ? (
-          <div className="h-full bg-window" />
-        ) : (
-          <FileTree
-            worldName={worldName}
-            entries={tree.data ?? []}
-            expanded={expanded}
-            selected={selectedFolder ?? active ?? undefined}
-            worldMenuItems={worldMenuItems}
-            onWorldMenuSelect={onWorldMenuSelect}
-            contextMenuItems={contextMenuItems}
-            onContextMenuSelect={onContextMenuSelect}
-            nameInput={nameInput ?? undefined}
-            onOpen={(path, { newTab }) => {
-              setTreeOverlayOpen(false);
-              void openFromTree(path, { newTab });
-            }}
-            onToggle={toggleFolder}
-            onNewPage={() => startNew("page")}
-            onNewFolder={() => startNew("folder")}
-            newPageShortcut={newPageShortcut}
-            newFolderShortcut={newFolderShortcut}
-            onNameSubmit={(name) => void submitName(name)}
-            onNameCancel={cancelNew}
+    <>
+      <Shell
+        treeWidth={treeWidth}
+        onTreeWidthChange={setTreeWidth}
+        treeOverlayOpen={treeOverlayOpen}
+        onTreeOverlayOpenChange={setTreeOverlayOpen}
+        tree={
+          // Until the first listing arrives, an empty pane, not the empty-world message.
+          tree.isPending ? (
+            <div className="h-full bg-window" />
+          ) : (
+            <FileTree
+              worldName={worldName}
+              entries={tree.data ?? []}
+              expanded={expanded}
+              selected={selectedFolder ?? active ?? undefined}
+              worldMenuItems={worldMenuItems}
+              onWorldMenuSelect={onWorldMenuSelect}
+              contextMenuItems={contextMenuItems}
+              onContextMenuSelect={onContextMenuSelect}
+              nameInput={nameInput ?? undefined}
+              onOpen={(path, { newTab }) => {
+                setTreeOverlayOpen(false);
+                void openFromTree(path, { newTab });
+              }}
+              onToggle={toggleFolder}
+              onSearch={quickOpen && openQuickOpen}
+              searchShortcut={quickOpen && searchShortcut}
+              onNewPage={() => startNew("page")}
+              onNewFolder={() => startNew("folder")}
+              newPageShortcut={newPageShortcut}
+              newFolderShortcut={newFolderShortcut}
+              onNameSubmit={(name) => void submitName(name)}
+              onNameCancel={cancelNew}
+            />
+          )
+        }
+        tabStrip={(treeToggle) => (
+          <TabStrip
+            tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
+            activeId={active ?? undefined}
+            onActivate={activateTab}
+            onClose={closePage}
+            leading={treeToggle}
           />
-        )
-      }
-      tabStrip={(treeToggle) => (
-        <TabStrip
-          tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
-          activeId={active ?? undefined}
-          onActivate={activateTab}
-          onClose={closePage}
-          leading={treeToggle}
-        />
-      )}
-      toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />}
-      page={
-        <div className="flex h-full flex-col">
-          {worldNotices.has("missing") && (
-            <Notice
-              status="error"
-              actions={
-                <Button variant="secondary" onClick={onCloseWorld}>
-                  Close world
-                </Button>
-              }
-            >
-              The world's folder cannot be found.
-            </Notice>
-          )}
-          {worldNotices.has("watch_failed") && (
-            <Notice status="warning">
-              Outside changes may not appear until the world is reopened.
-            </Notice>
-          )}
-          {historyNotRecording !== null && (
-            <Notice status="warning">
-              Changes to this world are not being recorded in history and cannot be undone.{" "}
-              {historyNotRecording}
-            </Notice>
-          )}
-          {worldNotices.has("history_set_aside") && (
-            <Notice status="warning">
-              This world's earlier history could not be read and was set aside. New changes are
-              recorded.
-            </Notice>
-          )}
-          {tree.isError && !worldMissing && (
-            <Notice status="error">The world's pages cannot be listed: {tree.error.message}</Notice>
-          )}
-          <div className="min-h-0 flex-1">
-            {active ? (
-              <PageTab
-                key={active}
-                path={active}
-                session={session}
-                onClose={(path) => void closeFromPage(path, { save: true })}
-                onDiscard={(path) => void closeFromPage(path, { save: false })}
-                onOpenPage={(path, options) => void openFromTree(path, options)}
-                onCreateLink={(from, link) =>
-                  void createFromLink(session, from, link, {
-                    refreshTree: () => queryClient.invalidateQueries({ queryKey: treeKey }),
-                    open: (path, at) => void openFromTree(path, { newTab: true, at }),
-                  })
+        )}
+        toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />}
+        page={
+          <div className="flex h-full flex-col">
+            {worldNotices.has("missing") && (
+              <Notice
+                status="error"
+                actions={
+                  <Button variant="secondary" onClick={onCloseWorld}>
+                    Close world
+                  </Button>
                 }
-              />
-            ) : (
-              <NoPageOpen onNewPage={() => startNew("page")} />
+              >
+                The world's folder cannot be found.
+              </Notice>
             )}
+            {worldNotices.has("watch_failed") && (
+              <Notice status="warning">
+                Outside changes may not appear until the world is reopened.
+              </Notice>
+            )}
+            {historyNotRecording !== null && (
+              <Notice status="warning">
+                Changes to this world are not being recorded in history and cannot be undone.{" "}
+                {historyNotRecording}
+              </Notice>
+            )}
+            {worldNotices.has("history_set_aside") && (
+              <Notice status="warning">
+                This world's earlier history could not be read and was set aside. New changes are
+                recorded.
+              </Notice>
+            )}
+            {tree.isError && !worldMissing && (
+              <Notice status="error">
+                The world's pages cannot be listed: {tree.error.message}
+              </Notice>
+            )}
+            <div className="min-h-0 flex-1">
+              {active ? (
+                <PageTab
+                  key={active}
+                  path={active}
+                  session={session}
+                  onClose={(path) => void closeFromPage(path, { save: true })}
+                  onDiscard={(path) => void closeFromPage(path, { save: false })}
+                  onOpenPage={(path, options) => void openFromTree(path, options)}
+                  onCreateLink={(from, link) =>
+                    void createFromLink(session, from, link, {
+                      refreshTree: () => queryClient.invalidateQueries({ queryKey: treeKey }),
+                      open: (path, at) => void openFromTree(path, { newTab: true, at }),
+                    })
+                  }
+                />
+              ) : (
+                <NoPageOpen onNewPage={() => startNew("page")} />
+              )}
+            </div>
           </div>
-        </div>
-      }
-    />
+        }
+      />
+      {searching && quickOpen?.(quickOpenPorts)}
+    </>
   );
 }

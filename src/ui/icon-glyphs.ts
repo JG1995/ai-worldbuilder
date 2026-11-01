@@ -15,8 +15,9 @@ export const glyphs = {
   menu: "\u{e5d2}",
   more_horiz: "\u{e5d3}",
   note_add: "\u{e89c}",
+  search: "\u{e8b6}",
   warning: "\u{e002}",
 } as const;
 
 /** SHA-256 of src/assets/icons/material-symbols-sharp.woff2. */
-export const fontSha256 = "401c4d728eb3b37d56c21c90f054b4ec8a685e68561b28c2c55c03b6f9a12bee";
+export const fontSha256 = "05da1b147c6fee297bcad83e6c70e3b4b5634eb6572d515b170ce22d7b9e44ee";

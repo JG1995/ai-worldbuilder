@@ -94,9 +94,13 @@ type WorldStore = {
   setChangingWorld: (changing: boolean) => void;
   /**
    * Opens a page in the active tab, or in a new tab when asked or when no tab is active. With
-   * `at`, its editor takes focus with the cursor at that target.
+   * `at`, its editor takes focus with the cursor at that target; with `focusEditor`, its editor
+   * takes focus and an open page keeps its cursor.
    */
-  openPage: (path: string, options: { newTab: boolean; at?: CursorTarget }) => void;
+  openPage: (
+    path: string,
+    options: { newTab: boolean; at?: CursorTarget; focusEditor?: boolean },
+  ) => void;
   /** Takes the cursor target of the page at `path`, if it has one, so it applies once. */
   takeCursorTarget: (path: string) => CursorTarget | null;
   /** Counts a change of the page index of the world `session`; ignored once it is not open. */
@@ -243,6 +247,15 @@ function placeCursor(path: string, target: CursorTarget) {
   useWorldStore.setState(({ pages }) => ({ pages: { ...pages, [path]: { ...page, editor } } }));
 }
 
+/**
+ * Focuses the editor of the page at `path` while its tab shows it, which focuses itself only as it
+ * mounts; any other page's editor takes focus when it first shows.
+ */
+function focusRunningEditor(path: string) {
+  const page = useWorldStore.getState().pages[path];
+  if (page?.status === "ready") page.view?.current?.focus();
+}
+
 export const useWorldStore = create<WorldStore>()((set, get) => ({
   ...closedWorld,
   changingWorld: false,
@@ -267,7 +280,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
 
   setChangingWorld: (changingWorld) => set({ changingWorld }),
 
-  openPage: (path, { newTab, at }) => {
+  openPage: (path, { newTab, at, focusEditor = false }) => {
     const { tabs, active, pages, activate } = get();
     set({ cursorTarget: null });
     if (!tabs.includes(path)) {
@@ -281,7 +294,8 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       }
     }
     if (at !== undefined) placeCursor(path, at);
-    activate(path, { focusEditor: at !== undefined });
+    else if (focusEditor) focusRunningEditor(path);
+    activate(path, { focusEditor: focusEditor || at !== undefined });
   },
 
   takeCursorTarget: (path) => {
