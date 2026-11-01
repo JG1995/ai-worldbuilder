@@ -181,6 +181,20 @@ function swallowNextClick() {
 }
 
 /**
+ * Scrolls the row that becomes selected into the list, since focus stays in the input and the
+ * browser does not scroll to an active descendant; a group's first line brings the group's label,
+ * which comes just before it.
+ */
+function scrollIntoList(option: HTMLElement | null) {
+  // jsdom has no scrollIntoView.
+  if (!option?.scrollIntoView) return;
+  if (option.previousElementSibling?.getAttribute("aria-hidden") === "true") {
+    option.parentElement?.scrollIntoView({ block: "nearest" });
+  }
+  option.scrollIntoView({ block: "nearest" });
+}
+
+/**
  * The quick open dialog: an input that searches the world's pages, above the rows that answer it,
  * in a portal on the dialog layer. Focus stays in the input, a combobox whose active descendant is
  * the selected row. Up and Down move the selection, Enter and a click pick in the current tab, and
@@ -279,6 +293,7 @@ export function SearchDialog({
       <div
         key={row.key}
         id={optionId(index)}
+        ref={index === selectedIndex ? scrollIntoList : undefined}
         role="option"
         tabIndex={-1}
         aria-selected={index === selectedIndex}
