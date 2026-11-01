@@ -69,6 +69,21 @@ test("the tree's Search button opens the dialog, and Escape returns focus to it"
   await expect(button).toBeFocused();
 });
 
+test("a press on the dialog's own text keeps focus in the input, so Escape still closes it", async ({
+  page,
+}) => {
+  await openOverview(page);
+
+  await page.keyboard.press("Control+o");
+  await page.keyboard.type("zzzz");
+  await page.getByText('Nothing matches "zzzz".', { exact: true }).click();
+  await expect(query(page)).toBeFocused();
+  await page.keyboard.press("Escape");
+
+  await expect(dialog(page)).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Campaign overview" })).toBeFocused();
+});
+
 test("picking Create for a new name creates the page in the active page's folder and opens it", async ({
   page,
 }) => {

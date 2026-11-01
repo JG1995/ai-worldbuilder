@@ -237,10 +237,12 @@ export function SearchDialog({
       }}
       className="fixed inset-0 z-(--z-dialog) flex flex-col items-center bg-backdrop p-4 pt-[15vh] transition-opacity duration-(--duration-fade) starting:opacity-0"
     >
+      {/* A press anywhere in the dialog but the input leaves focus in the input. */}
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Search pages"
+        onMouseDown={(event) => event.target !== input.current && event.preventDefault()}
         className="flex max-h-full min-h-0 w-[640px] max-w-full flex-col rounded-md border border-divider bg-raised text-text shadow-(--level-2-shadow)"
       >
         <div className="flex flex-col gap-1 p-3">
@@ -288,7 +290,6 @@ export function SearchDialog({
                   role="option"
                   tabIndex={-1}
                   aria-selected={index === selectedIndex}
-                  onMouseDown={(event) => event.preventDefault()}
                   onClick={(event) => onRowClick(event, row)}
                   onAuxClick={(event) => {
                     if (event.button === 1) onPick(row.pick, { newTab: true });
@@ -305,10 +306,10 @@ export function SearchDialog({
             </div>
           </div>
         )}
+        <p role="status" className="sr-only">
+          {announcement(results, rows)}
+        </p>
       </div>
-      <p role="status" className="sr-only">
-        {announcement(results, rows)}
-      </p>
     </div>,
     document.body,
   );
