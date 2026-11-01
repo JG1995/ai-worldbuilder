@@ -74,6 +74,7 @@ const defaults: Record<string, Handler> = {
     state: "created",
     path: entryPath(parentOf(String(from)), `${String(target)}.md`),
   }),
+  link_suggest: () => ({ indexing: false, items: [] }),
 };
 
 function entryPath(folder: unknown, name: string) {

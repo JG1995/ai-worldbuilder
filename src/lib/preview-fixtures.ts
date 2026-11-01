@@ -11,6 +11,7 @@ import type {
   EditorLinks,
   HistoryVersion,
   LinkedPage,
+  LinkSuggestions,
   PageText,
   PageVersion,
   RecentWorld,
@@ -400,6 +401,21 @@ function linksOf(open: PreviewWorld, from: string, text: string): EditorLink[] {
   });
 }
 
+/**
+ * Up to 10 pages whose name starts with the query, then those whose name holds it elsewhere, each
+ * group in path order. An approximation for the preview: the core also matches aliases and paths,
+ * and writes the path of a page whose name another page shares.
+ */
+function suggestionsOf(open: PreviewWorld, query: string): LinkSuggestions {
+  const wanted = query.trim().toLowerCase();
+  const paths = Object.keys(open.pages).sort(byName.compare);
+  const at = (path: string) => nameOf(path).toLowerCase().indexOf(wanted);
+  const items = [...paths.filter((path) => at(path) === 0), ...paths.filter((path) => at(path) > 0)]
+    .slice(0, 10)
+    .map((path) => ({ path, name: nameOf(path), alias: null, insert: nameOf(path) }));
+  return { indexing: false, items };
+}
+
 /** Creates an empty page for an unresolved link like the core, without `./` and `../` paths. */
 function createLinked(args: InvokeArgs | undefined): LinkedPage {
   const open = requireWorld();
@@ -594,4 +610,8 @@ export const previewFixtures: Record<string, unknown> = {
     return { state: "ready", links: linksOf(requireWorld(), path, text) };
   },
   link_create: (args?: InvokeArgs) => createLinked(args),
+  link_suggest: (args?: InvokeArgs) => {
+    const { query } = args as { query: string };
+    return suggestionsOf(requireWorld(), query);
+  },
 };

@@ -7,6 +7,7 @@ import { tags } from "@lezer/highlight";
 import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
 import type { EditorLink } from "@/types/api";
 import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
+import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 const monoClass = "cm-mono";
@@ -44,6 +45,9 @@ function styleNonce() {
   return document.head.querySelector<HTMLStyleElement>("style[nonce]")?.nonce ?? "";
 }
 
+/** The function the link suggestion list asks, which `MarkdownEditor` sets from its `suggest`. */
+const suggestion = new Compartment();
+
 const readOnlyMode = new Compartment();
 function setReadOnly(editor: EditorView, readOnly: boolean) {
   if (editor.state.readOnly === readOnly) return;
@@ -63,6 +67,8 @@ export function createPageState(text: string, label: string, cursor = 0) {
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
+      linkSuggestions,
+      suggestion.of([]),
       EditorView.lineWrapping,
       history(),
       keymap.of([...defaultKeymap, ...historyKeymap]),
@@ -91,13 +97,15 @@ export function reloadedState(previous: EditorState, text: string, label: string
 const replaceListeners = new WeakMap<EditorView, (state: EditorState) => void>();
 
 /**
- * Puts `state` in the running editor in place of its own, keeping whether it is read-only, and
- * reports it through the editor's `onReplace`.
+ * Puts `state` in the running editor in place of its own, keeping whether it is read-only and the
+ * function its link suggestions ask, and reports it through the editor's `onReplace`.
  */
 export function replaceState(editor: EditorView, state: EditorState) {
   const readOnly = editor.state.readOnly;
+  const suggest = suggestion.get(editor.state);
   editor.setState(state);
   setReadOnly(editor, readOnly);
+  if (suggest) editor.dispatch({ effects: suggestion.reconfigure(suggest) });
   replaceListeners.get(editor)?.(editor.state);
 }
 
@@ -140,6 +148,11 @@ type MarkdownEditorProps = {
    * Either then does nothing else; elsewhere both do what they always do.
    */
   onFollow?: (link: EditorLink) => void;
+  /**
+   * Answers the suggestion list that typing a link opens. Whether there is one at mount turns the
+   * list on; each question goes to the current one.
+   */
+  suggest?: Suggest;
 };
 
 /** A plain CodeMirror editor for one page's Markdown, with the syntax visible. */
@@ -152,6 +165,7 @@ export function MarkdownEditor({
   onUnmount,
   onReplace,
   onFollow,
+  suggest,
 }: MarkdownEditorProps) {
   const parent = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -159,6 +173,7 @@ export function MarkdownEditor({
   // React remounted it, must not replace the running editor.
   const [initialState] = useState(state);
   const [focusAtMount] = useState(autoFocus);
+  const [suggestsAtMount] = useState(suggest !== undefined);
   const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const reportReplace = useEffectEvent((next: EditorState) => onReplace?.(next));
@@ -168,6 +183,11 @@ export function MarkdownEditor({
     if (!link || !onFollow) return false;
     onFollow(link);
     return true;
+  });
+  const askSuggest = useEffectEvent((query: string) => {
+    // The list treats a failed question as no suggestions.
+    if (!suggest) throw new Error("The editor no longer suggests pages.");
+    return suggest(query);
   });
   const applyReadOnly = useEffectEvent((editor: EditorView) => setReadOnly(editor, readOnly));
   const share = useEffectEvent((editor: EditorView | null) => {
@@ -186,6 +206,10 @@ export function MarkdownEditor({
     view.current = editor;
     share(editor);
     applyReadOnly(editor);
+    if (suggestsAtMount) {
+      const ask: Suggest = async (query) => askSuggest(query);
+      editor.dispatch({ effects: suggestion.reconfigure(suggestFacet.of(ask)) });
+    }
     replaceListeners.set(editor, reportReplace);
     // In the capture phase, before CodeMirror's own handlers, which leave alone an event whose
     // default is prevented: a click that follows a link does not also move the cursor.
@@ -212,7 +236,7 @@ export function MarkdownEditor({
       editor.destroy();
       view.current = null;
     };
-  }, [initialState, focusAtMount]);
+  }, [initialState, focusAtMount, suggestsAtMount]);
 
   useEffect(() => {
     if (view.current) setReadOnly(view.current, readOnly);

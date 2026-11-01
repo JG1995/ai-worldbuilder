@@ -13,6 +13,8 @@ export type { HistoryVersion } from "./generated/HistoryVersion";
 export type { LineKind } from "./generated/LineKind";
 export type { LinkedPage } from "./generated/LinkedPage";
 export type { LinkState } from "./generated/LinkState";
+export type { LinkSuggestion } from "./generated/LinkSuggestion";
+export type { LinkSuggestions } from "./generated/LinkSuggestions";
 export type { NewEntry } from "./generated/NewEntry";
 export type { NewLocation } from "./generated/NewLocation";
 export type { PageText } from "./generated/PageText";

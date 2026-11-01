@@ -1,3 +1,4 @@
+import { completionStatus, startCompletion } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
 import { type RefObject, useEffect, useRef } from "react";
 import type { IpcError } from "@/lib/ipc";
@@ -60,10 +61,18 @@ export class LinkRequests {
 }
 
 /**
+ * Asks the open suggestion list of `editor`, if any, again, so that it shows what the index holds
+ * now: the pages that outside changes added or removed, and no "Indexing world…" once it is built.
+ */
+function refreshSuggestions(editor: EditorView | null) {
+  if (editor && completionStatus(editor.state) === "active") startCompletion(editor);
+}
+
+/**
  * Keeps the links of the page at `path` current in its running editor, which `view` holds while
- * the page is ready: asked for when the editor mounts and whenever the world's index changes. The
- * editor reports its own changes through the returned `changed`, and a state put in it, as after a
- * reload, through `replaced`.
+ * the page is ready: asked for when the editor mounts and whenever the world's index changes, when
+ * an open suggestion list is asked again too. The editor reports its own changes through the
+ * returned `changed`, and a state put in it, as after a reload, through `replaced`.
  */
 export function usePageLinks(path: string, view: RefObject<EditorView | null> | undefined) {
   const indexRevision = useWorldStore((store) => store.indexRevision);
@@ -82,6 +91,7 @@ export function usePageLinks(path: string, view: RefObject<EditorView | null> | 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new index revision asks again.
   useEffect(() => {
     requests.current?.now();
+    refreshSuggestions(view?.current ?? null);
   }, [path, view, indexRevision]);
 
   return {

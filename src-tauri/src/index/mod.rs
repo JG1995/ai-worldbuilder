@@ -11,6 +11,7 @@
 mod database;
 mod parse;
 mod resolve;
+mod suggest;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ pub use database::file;
 pub use parse::{Parsed, parse};
 use resolve::Table;
 pub use resolve::creation_path;
+pub use suggest::LinkSuggestions;
 
 /// How many pages one `apply` should take, and how many links one step of a full pass resolves,
 /// which bounds how long the index's lock is held at a time.
@@ -311,6 +313,17 @@ impl Index {
             return Ok(None);
         }
         self.stored(|index| Ok(index.table()?.resolve(from, target).map(str::to_owned)))
+    }
+
+    /// The pages to suggest for a link whose page part so far is `query`, from the pages stored
+    /// now: while the index is being built, those it has read so far.
+    pub fn suggest(&mut self, query: &str) -> rusqlite::Result<LinkSuggestions> {
+        let (pages, aliases) = self.stored(|index| stored_pages(&index.connection))?;
+        Ok(LinkSuggestions {
+            // Checked after reading, because a storage failure can have emptied the index.
+            indexing: self.state == BuildState::Building,
+            items: suggest::suggest(&pages, &aliases, query),
+        })
     }
 
     /// The pages and aliases for resolving, loaded when they changed since they were last used.
@@ -631,15 +644,23 @@ fn store_links(
     Ok(())
 }
 
-fn load_table(connection: &Connection) -> rusqlite::Result<Table> {
-    let pages: Vec<String> = connection
+/// Every stored page's path, and every stored alias as (page path, alias).
+type Pages = (Vec<String>, Vec<(String, String)>);
+
+fn stored_pages(connection: &Connection) -> rusqlite::Result<Pages> {
+    let pages = connection
         .prepare("SELECT path FROM pages")?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let aliases: Vec<(String, String)> = connection
+    let aliases = connection
         .prepare("SELECT path, alias FROM aliases")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    Ok((pages, aliases))
+}
+
+fn load_table(connection: &Connection) -> rusqlite::Result<Table> {
+    let (pages, aliases) = stored_pages(connection)?;
     Ok(Table::new(
         pages.iter().map(String::as_str),
         aliases

@@ -1,9 +1,9 @@
 import { EditorView } from "@codemirror/view";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { EditorLink } from "@/types/api";
 import { setLinks } from "./editor-links";
-import { createPageState, MarkdownEditor } from "./MarkdownEditor";
+import { createPageState, MarkdownEditor, replaceState } from "./MarkdownEditor";
 
 const page = [
   "---",
@@ -103,6 +103,24 @@ it("reports its last state when it unmounts", () => {
   unmount();
 
   expect(last).toMatchObject({ doc: state.doc });
+});
+
+it("keeps asking its suggest function for a link typed after replaceState", async () => {
+  const suggest = vi.fn(async () => ({ indexing: false, items: [] }));
+  render(
+    <MarkdownEditor state={createPageState("", "Kesh Tor")} readOnly={false} suggest={suggest} />,
+  );
+  const view = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Kesh Tor" }));
+  if (!view) throw new Error("No editor");
+
+  replaceState(view, createPageState("See ", "Kesh Tor", 4));
+  view.dispatch({
+    changes: { from: 4, insert: "[[Mi" },
+    selection: { anchor: 8 },
+    userEvent: "input.type",
+  });
+
+  await waitFor(() => expect(suggest).toHaveBeenCalledWith("Mi"));
 });
 
 describe("following a link", () => {

@@ -118,3 +118,20 @@ test("Ctrl+Enter on a backlink opens it in a new tab", async ({ page }) => {
   await expect(tab(page, "Kesh Tor")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Session 2" })).toBeFocused();
 });
+
+test("typing [[ and part of a name, then Enter, inserts a link that resolves", async ({ page }) => {
+  const editor = await openPage(page, "Session notes", "Session 10");
+  await editor.locator(".cm-line").last().click();
+
+  await page.keyboard.type("[[kesh");
+  const list = page.getByRole("listbox");
+  await expect(list.getByRole("option")).toHaveText([/^Kesh Tor\s*Locations$/]);
+  await expect(editor).toHaveAttribute("aria-activedescendant", /.+/);
+  // The list ignores keys for its first 75 ms, so that a quick Enter does not pick by accident.
+  await page.waitForTimeout(100);
+  await page.keyboard.press("Enter");
+
+  await expect(list).toHaveCount(0);
+  await expect(editor.locator(".cm-line").last()).toHaveText("[[Kesh Tor]]");
+  await expect(editor.locator(".cm-link")).toHaveText("[[Kesh Tor]]");
+});
