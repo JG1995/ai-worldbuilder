@@ -136,7 +136,7 @@ export function followLink(
 
 /** What creating a page from a link does once the core has answered. */
 type CreatePorts = {
-  /** Lists the world's pages again, so the tree shows the new page. */
+  /** Lists the world's pages again, so the tree shows the new page or the folders a failure left. */
   refreshTree: () => Promise<unknown>;
   /** Opens a page that the link names by now in a new tab, with the cursor at `at`. */
   open: (path: string, at: LinkAnchor) => void;
@@ -159,6 +159,8 @@ export async function createFromLink(
     linked = await linkCreate(from, link.target);
   } catch (error) {
     reportCreateFailure(session, error as IpcError);
+    // Folders created before the failure stay, and the core's own writes raise no change event.
+    await ports.refreshTree();
     return;
   }
   if (useWorldStore.getState().world?.session !== session) return;
