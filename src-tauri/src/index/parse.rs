@@ -7,6 +7,8 @@
 //! Its metadata-block option is not used, because it takes any later `---` … `---` region for
 //! metadata and would lose the links between two thematic breaks.
 
+use std::ops::Range;
+
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use yaml_rust2::parser::{Event as YamlEvent, Parser as YamlParser};
 use yaml_rust2::{Yaml, YamlLoader};
@@ -16,10 +18,10 @@ const ATTACHMENTS: [&str; 20] = [
     "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "mp3", "wav", "m4a", "ogg", "flac",
     "3gp", "mp4", "webm", "ogv", "mov", "mkv", "pdf",
 ];
-/// A context line holds at most this many characters of its line, with at most `BEFORE_LINK` of
-/// them before the link.
-const CONTEXT_CHARS: usize = 160;
-const BEFORE_LINK: usize = 60;
+/// A cut line holds at most this many characters of its line, with at most `BEFORE_ANCHOR` of them
+/// before the place it is cut around: a link, or a search match.
+const CUT_CHARS: usize = 160;
+const BEFORE_ANCHOR: usize = 60;
 const CUT: &str = "…";
 
 /// What a page's text holds for the index.
@@ -223,25 +225,42 @@ fn is_attachment(target: &str) -> bool {
     })
 }
 
-/// The line of `text` that holds the link from `start` to `end` (in bytes), cut to at most
-/// `CONTEXT_CHARS` characters with at most `BEFORE_LINK` before the link, with `…` where cut.
+/// The line of `text` that holds the link from `start` to `end` (in bytes), cut around the link.
 fn context_line(text: &str, start: usize, end: usize) -> String {
     let line_start = text[..start].rfind('\n').map_or(0, |newline| newline + 1);
     let line_end = text[end..]
         .find('\n')
         .map_or(text.len(), |newline| end + newline);
-    let line = &text[line_start..line_end];
-    let before = text[line_start..start].chars().count();
-    let skip = before.saturating_sub(BEFORE_LINK);
-    let mut context = String::new();
-    if skip > 0 {
-        context.push_str(CUT);
+    cut_line(&text[line_start..line_end], start - line_start).text
+}
+
+/// A line cut around a place in it.
+pub struct Cut {
+    /// The cut line, with `…` where it was cut.
+    pub text: String,
+    /// The bytes of the line it keeps.
+    pub kept: Range<usize>,
+}
+
+/// `line` cut to at most `CUT_CHARS` characters with at most `BEFORE_ANCHOR` of them before the
+/// byte `at`, with `…` where cut.
+pub fn cut_line(line: &str, at: usize) -> Cut {
+    let skip = line[..at].chars().count().saturating_sub(BEFORE_ANCHOR);
+    let byte_at = |chars: usize| {
+        line.char_indices()
+            .nth(chars)
+            .map_or(line.len(), |(byte, _)| byte)
+    };
+    let kept = byte_at(skip)..byte_at(skip + CUT_CHARS);
+    let mut text = String::new();
+    if kept.start > 0 {
+        text.push_str(CUT);
     }
-    context.extend(line.chars().skip(skip).take(CONTEXT_CHARS));
-    if line.chars().count() > skip + CONTEXT_CHARS {
-        context.push_str(CUT);
+    text.push_str(&line[kept.clone()]);
+    if kept.end < line.len() {
+        text.push_str(CUT);
     }
-    context
+    Cut { text, kept }
 }
 
 /// Converts byte offsets into a text, given in increasing order, to UTF-16 code units.

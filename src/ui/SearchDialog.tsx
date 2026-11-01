@@ -8,19 +8,31 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import type { Mark, PageMatch } from "@/types/api";
+import type { Mark, PageMatch, TextMatch } from "@/types/api";
 import { Icon } from "./Icon";
 
 /**
  * What the dialog lists for `query`, the query an answer is for: the pages that match it, with the
- * Create row when `create` is set, or why pages cannot be searched.
+ * Create row when `create` is set, then the pages whose text matches; or why pages cannot be
+ * searched. `pending` says that an answer for the query is still on its way, so the dialog does not
+ * yet say that nothing matches.
  */
 export type SearchResults =
-  | { state: "ready" | "building"; query: string; pages: PageMatch[]; create: boolean }
+  | {
+      state: "ready" | "building";
+      query: string;
+      pages: PageMatch[];
+      create: boolean;
+      texts: TextMatch[];
+      pending: boolean;
+    }
   | { state: "failed"; query: string; message: string };
 
-/** A picked row: a page, or the Create row. */
-export type SearchPick = { kind: "page"; path: string } | { kind: "create" };
+/** A picked row: a page, a line of a page with where its first match starts, or the Create row. */
+export type SearchPick =
+  | { kind: "page"; path: string }
+  | { kind: "line"; path: string; at: number }
+  | { kind: "create" };
 
 type SearchDialogProps = {
   query: string;
@@ -35,48 +47,61 @@ type SearchDialogProps = {
   onClose: () => void;
 };
 
-type Row = { key: string; pick: SearchPick; content: ReactNode };
+/** A selectable row; a line of a text match also names the index of its group. */
+type Row = { key: string; pick: SearchPick; content: ReactNode; group?: number };
 
 const createKey = "create";
 
-/** `text` with the characters in `mark`, shifted by `offset`, underlined. */
-function marked(text: string, mark: Mark | null, offset = 0) {
-  const from = Math.max((mark?.from ?? 0) - offset, 0);
-  const to = Math.min((mark?.to ?? 0) - offset, text.length);
-  if (!mark || from >= to) return text;
-  return (
-    <>
-      {text.slice(0, from)}
-      <span className="underline decoration-1 underline-offset-2">{text.slice(from, to)}</span>
-      {text.slice(to)}
-    </>
-  );
+/** `text` with the characters in each of `marks`, in order and shifted by `offset`, underlined. */
+function marked(text: string, marks: Mark[], offset = 0) {
+  const parts: ReactNode[] = [];
+  let at = 0;
+  for (const mark of marks) {
+    const from = Math.max(mark.from - offset, at);
+    const to = Math.min(mark.to - offset, text.length);
+    if (from >= to) continue;
+    parts.push(
+      text.slice(at, from),
+      <span key={from} className="underline decoration-1 underline-offset-2">
+        {text.slice(from, to)}
+      </span>,
+    );
+    at = to;
+  }
+  if (parts.length === 0) return text;
+  parts.push(text.slice(at));
+  return parts;
 }
 
+const folderOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf("/"), 0));
+
 function PageRow({ page }: { page: PageMatch }) {
-  const slash = page.path.lastIndexOf("/");
-  const folder = slash === -1 ? "" : page.path.slice(0, slash);
+  const folder = folderOf(page.path);
   // A path match's mark runs through the path without `.md`: the folder, a `/` and the name.
   const nameStart = page.field === "path" && folder ? folder.length + 1 : 0;
-  const nameMark = page.field === "alias" ? null : page.mark;
+  const nameMarks = page.field === "alias" ? [] : [page.mark];
   return (
     <span className="flex min-w-0 items-baseline gap-2">
       <span className="ui-strong min-w-0 shrink-0 truncate text-text">
-        {marked(page.name, nameMark, nameStart)}
+        {marked(page.name, nameMarks, nameStart)}
       </span>
       {folder && (
         <span className="ui-small min-w-0 truncate text-text-muted">
-          {marked(folder, page.field === "path" ? page.mark : null)}
+          {marked(folder, page.field === "path" ? [page.mark] : [])}
         </span>
       )}
       {page.field === "alias" && page.alias !== null && (
         <span className="ui-small min-w-0 truncate text-text-muted">
-          alias: {marked(page.alias, page.mark)}
+          alias: {marked(page.alias, [page.mark])}
         </span>
       )}
     </span>
   );
 }
+
+/** A text match group's name, as a screen reader announces it: the page's name and folder. */
+const groupName = ({ path, name }: TextMatch) =>
+  folderOf(path) ? `${name}, ${folderOf(path)}` : name;
 
 function rowsOf(results: SearchResults | null): Row[] {
   if (!results || results.state === "failed") return [];
@@ -99,17 +124,38 @@ function rowsOf(results: SearchResults | null): Row[] {
       ),
     });
   }
+  results.texts.forEach((match, group) => {
+    for (const line of match.lines) {
+      rows.push({
+        // A line keeps its selection by its page and where its match is.
+        key: JSON.stringify([match.path, line.at]),
+        pick: { kind: "line", path: match.path, at: line.at },
+        content: <span className="ui min-w-0 truncate">{marked(line.text, line.marks)}</span>,
+        group,
+      });
+    }
+  });
   return rows;
 }
+
+const nothingMatches = (results: SearchResults) =>
+  results.state !== "failed" &&
+  !results.pending &&
+  results.pages.length === 0 &&
+  results.texts.length === 0;
 
 function announcement(results: SearchResults | null, rows: Row[]) {
   if (!results) return "";
   if (results.state === "failed") return `Pages cannot be searched: ${results.message}`;
   const pages = results.pages.length;
+  const texts = results.texts.length;
   const parts = [results.state === "building" ? "Indexing world…" : ""];
-  if (pages === 0) parts.push(`Nothing matches "${results.query}".`);
-  else parts.push(pages === 1 ? "1 page matches." : `${pages} pages match.`);
+  if (nothingMatches(results)) parts.push(`Nothing matches "${results.query}".`);
+  if (pages > 0) parts.push(pages === 1 ? "1 page matches." : `${pages} pages match.`);
   if (rows.some((row) => row.key === createKey)) parts.push(`Create page "${results.query}".`);
+  if (texts > 0) {
+    parts.push(texts === 1 ? "1 page matches by its text." : `${texts} pages match by their text.`);
+  }
   return parts.filter(Boolean).join(" ");
 }
 
@@ -219,11 +265,42 @@ export function SearchDialog({
             Indexing world…
           </p>
         )}
-        {results && results.pages.length === 0 && (
+        {results && nothingMatches(results) && (
           <p className="ui text-text-muted">Nothing matches "{results.query}".</p>
         )}
       </>
     );
+
+  function option(row: Row) {
+    const index = rows.indexOf(row);
+    return (
+      // The input keeps focus and handles the keyboard for every row.
+      // biome-ignore lint/a11y/useKeyWithClickEvents: the combobox input handles keys.
+      <div
+        key={row.key}
+        id={optionId(index)}
+        role="option"
+        tabIndex={-1}
+        aria-selected={index === selectedIndex}
+        onClick={(event) => onRowClick(event, row)}
+        onAuxClick={(event) => {
+          if (event.button === 1) onPick(row.pick, { newTab: true });
+        }}
+        className={`relative flex min-h-control-compact cursor-default items-center py-1 pr-3 transition-colors ${
+          row.group === undefined ? "pl-3 text-text" : "pl-6 text-text-muted"
+        } ${
+          index === selectedIndex
+            ? "bg-selected before:absolute before:inset-y-0 before:left-0 before:border-accent before:border-l-2"
+            : "hover:bg-hover"
+        }`}
+      >
+        {row.content}
+      </div>
+    );
+  }
+
+  const texts = results && results.state !== "failed" ? results.texts : [];
+  const pageRows = rows.filter((row) => row.group === undefined);
 
   return createPortal(
     // A press on the backdrop closes the dialog and does nothing else.
@@ -259,7 +336,7 @@ export function SearchDialog({
             aria-describedby={createError ? errorId : undefined}
             autoComplete="off"
             spellCheck={false}
-            placeholder="Search pages by name or alias"
+            placeholder="Search pages by name, alias or text"
             value={query}
             onChange={(event) => onQueryChange(event.currentTarget.value)}
             onKeyDown={onKeyDown}
@@ -281,26 +358,32 @@ export function SearchDialog({
               aria-label="Pages"
               className="flex flex-col empty:hidden"
             >
-              {rows.map((row, index) => (
-                // The input keeps focus and handles the keyboard for every row.
-                // biome-ignore lint/a11y/useKeyWithClickEvents: the combobox input handles keys.
+              {pageRows.map(option)}
+              {texts.map((match, group) => (
+                // The first group is set off from the page matches and the Create row above it.
+                // biome-ignore lint/a11y/useSemanticElements: a listbox groups options with role="group"; a fieldset groups form controls.
                 <div
-                  key={row.key}
-                  id={optionId(index)}
-                  role="option"
-                  tabIndex={-1}
-                  aria-selected={index === selectedIndex}
-                  onClick={(event) => onRowClick(event, row)}
-                  onAuxClick={(event) => {
-                    if (event.button === 1) onPick(row.pick, { newTab: true });
-                  }}
-                  className={`relative flex min-h-control-compact cursor-default items-center px-3 py-1 transition-colors ${
-                    index === selectedIndex
-                      ? "bg-selected before:absolute before:inset-y-0 before:left-0 before:border-accent before:border-l-2"
-                      : "hover:bg-hover"
-                  }`}
+                  key={match.path}
+                  role="group"
+                  aria-label={groupName(match)}
+                  className={
+                    group === 0 && pageRows.length > 0 ? "mt-2 border-divider border-t pt-2" : ""
+                  }
                 >
-                  {row.content}
+                  <div
+                    aria-hidden="true"
+                    className="flex min-w-0 items-baseline gap-2 px-3 pt-1 pb-0.5"
+                  >
+                    <span className="ui-strong min-w-0 shrink-0 truncate text-text">
+                      {match.name}
+                    </span>
+                    {folderOf(match.path) && (
+                      <span className="ui-small min-w-0 truncate text-text-muted">
+                        {folderOf(match.path)}
+                      </span>
+                    )}
+                  </div>
+                  {rows.filter((row) => row.group === group).map(option)}
                 </div>
               ))}
             </div>

@@ -26,6 +26,7 @@ use crate::error::{AppError, ErrorKind, guard};
 use crate::history::{self, History, HistoryVersion, Kind};
 use crate::index::{
     self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches, Stamp,
+    TextMatches,
 };
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
@@ -98,7 +99,10 @@ impl OpenWorld {
         let page = index::Page {
             path: path.to_owned(),
             stamp,
-            content: Content::Parsed(index::parse(text, index::page_name(path))),
+            content: Content::Text {
+                text: text.to_owned(),
+                parsed: index::parse(text, index::page_name(path)),
+            },
         };
         let (changed, needs_worker) = {
             let mut index = lock_index(&self.index);
@@ -649,6 +653,13 @@ impl WorldState {
         self.query_index(|index| index.search_pages(query))
     }
 
+    /// The pages whose saved text holds every word of `query`, other than its page matches, from
+    /// the open world's index, which while it is being built holds only the pages it has read so
+    /// far.
+    fn search_text(&self, query: &str) -> Result<TextMatches, AppError> {
+        self.query_index(|index| index.search_text(query))
+    }
+
     /// Creates an empty page for `query`, untrusted text typed in search that no page matched,
     /// under the world lock like a save: `{query}.md` in the folder of the page at `from`, or at the
     /// world's top level without one, or, for a query with a `/`, at that path from the top level.
@@ -1066,7 +1077,7 @@ fn stamp_of(root: &Path, relative: &str) -> Option<Stamp> {
 
 /// The page at `relative` inside `root` for the index, read through confinement, with the stamp
 /// it had before it was read; `None` when it is gone or confinement refuses it. A page that is not
-/// UTF-8 or cannot be read is stored without links or aliases.
+/// UTF-8 or cannot be read is stored without text, links or aliases.
 fn read_for_index(root: &Path, relative: &str) -> Option<index::Page> {
     let file = paths::existing_page(root, relative).ok()?;
     let stamp = stamp_of(root, relative)?;
@@ -1074,7 +1085,10 @@ fn read_for_index(root: &Path, relative: &str) -> Option<index::Page> {
         .ok()
         .and_then(|bytes| page::text_of(&bytes).ok());
     let content = match text {
-        Some(text) => Content::Parsed(index::parse(&text, index::page_name(relative))),
+        Some(text) => Content::Text {
+            parsed: index::parse(&text, index::page_name(relative)),
+            text,
+        },
         None => Content::Unreadable,
     };
     Some(index::Page {
@@ -1255,6 +1269,17 @@ pub async fn search_pages(
     query: String,
 ) -> Result<PageMatches, AppError> {
     guard(|| state.search_pages(&query))
+}
+
+/// Up to 10 pages whose text holds every word of `query`, most relevant first, each with its first
+/// lines that hold a match, leaving out the pages `search_pages` lists; or whether the index is
+/// still being built or failed.
+#[tauri::command]
+pub async fn search_text(
+    state: State<'_, WorldState>,
+    query: String,
+) -> Result<TextMatches, AppError> {
+    guard(|| state.search_text(&query))
 }
 
 /// Creates an empty page for `query`, typed in search, in the folder of the page at `from` or at
@@ -3016,6 +3041,290 @@ mod tests {
 
             eprintln!("slowest page matches {slowest:?}");
             assert!(slowest < Duration::from_millis(100));
+        }
+
+        /// The paths of the pages whose text matches `query`, once the index is built.
+        fn text_found(state: &WorldState, query: &str) -> Vec<String> {
+            match state.search_text(query).unwrap() {
+                TextMatches::Ready { pages } => pages.into_iter().map(|page| page.path).collect(),
+                other => panic!("the text matches are not ready: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn saves_outside_edits_and_edits_made_while_closed_are_found_by_their_text() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let before = entries_of(&world);
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            assert!(text_found(&state, "spared captain").is_empty());
+
+            // A save that changes only the text.
+            save(
+                &state,
+                "Kesh Tor.md",
+                "# Kesh Tor\n\nThe spared captain sleeps.\n",
+            );
+            assert!(
+                events
+                    .try_iter()
+                    .any(|event| event == WorldEvent::IndexChanged { session })
+            );
+            assert_eq!(text_found(&state, "spared captain"), ["Kesh Tor.md"]);
+
+            fs::write(world.path().join("Mirela.md"), "She spared the captain.\n").unwrap();
+            while text_found(&state, "spared captain").len() < 2 {
+                index_event(&events, session);
+            }
+            // The shorter page is the more relevant.
+            assert_eq!(
+                text_found(&state, "spared captain"),
+                ["Mirela.md", "Kesh Tor.md"]
+            );
+
+            state.close();
+            fs::write(world.path().join("Mirela.md"), "Nobody here.\n").unwrap();
+            fs::write(
+                world.path().join("Places/Saltmere.md"),
+                "The captain was spared.\n",
+            )
+            .unwrap();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let matches = serde_json::to_value(state.search_text("spared captain").unwrap());
+            assert_eq!(
+                matches.unwrap(),
+                json!({ "state": "ready", "pages": [
+                    {
+                        "path": "Places/Saltmere.md",
+                        "name": "Saltmere",
+                        "lines": [{
+                            "text": "The captain was spared.",
+                            "at": 4,
+                            "marks": [{ "from": 4, "to": 11 }, { "from": 16, "to": 22 }],
+                        }],
+                    },
+                    {
+                        "path": "Kesh Tor.md",
+                        "name": "Kesh Tor",
+                        "lines": [{
+                            "text": "The spared captain sleeps.",
+                            "at": 16,
+                            "marks": [{ "from": 4, "to": 10 }, { "from": 11, "to": 18 }],
+                        }],
+                    },
+                ]})
+            );
+            assert_eq!(entries_of(&world), before);
+        }
+
+        #[test]
+        fn a_deleted_or_format_1_cache_is_rebuilt_with_the_same_text_matches_and_no_notice() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            fs::write(world.path().join("Kesh Tor.md"), "Mirela lives here too.\n").unwrap();
+            let before = entries_of(&world);
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let found = serde_json::to_value(state.search_text("lives").unwrap()).unwrap();
+            assert_eq!(found["pages"].as_array().unwrap().len(), 2);
+            state.close();
+            let cache = index::file(app_data.path(), world.path().to_str().unwrap());
+            let history = crate::history::testing::file(app_data.path(), world.path());
+            let recorded = fs::read(&history).unwrap();
+
+            fs::remove_file(&cache).unwrap();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let rebuilt = serde_json::to_value(state.search_text("lives").unwrap()).unwrap();
+            state.close();
+
+            // The cache as PR `quick-open` left it: format 1, with pages but no text.
+            fs::remove_file(&cache).unwrap();
+            let format_1 = rusqlite::Connection::open(&cache).unwrap();
+            format_1
+                .execute_batch(
+                    "CREATE TABLE meta (world TEXT NOT NULL);
+                     CREATE TABLE pages (path TEXT PRIMARY KEY, size INTEGER NOT NULL,
+                         modified INTEGER NOT NULL, readable INTEGER NOT NULL);
+                     PRAGMA user_version = 1;",
+                )
+                .unwrap();
+            format_1
+                .execute(
+                    "INSERT INTO meta (world) VALUES (?1)",
+                    [world.path().to_str().unwrap()],
+                )
+                .unwrap();
+            drop(format_1);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let from_format_1 = serde_json::to_value(state.search_text("lives").unwrap()).unwrap();
+
+            assert_eq!(rebuilt, found);
+            assert_eq!(from_format_1, found);
+            assert!(lock_index(&index_of(&state)).is_stored());
+            // Only the index events; no notice of the rebuild.
+            assert!(events.try_iter().all(|event| matches!(
+                event,
+                WorldEvent::IndexChanged { .. } | WorldEvent::HistoryRecording { .. }
+            )));
+            assert_eq!(fs::read(&history).unwrap(), recorded);
+            assert_eq!(entries_of(&world), before);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn search_answers_from_memory_when_the_index_folder_is_not_writable() {
+            use std::os::unix::fs::PermissionsExt;
+            let app_data = tempfile::tempdir().unwrap();
+            let folder = app_data.path().join("grimoire-data/index");
+            fs::create_dir_all(&folder).unwrap();
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let stored = lock_index(&index_of(&state)).is_stored();
+            let found = text_found(&state, "lives");
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert!(!stored);
+            assert_eq!(found, ["Places/Saltmere.md"]);
+            assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+        }
+
+        /// The DESIGN's large world with text: 5,000 pages of about 500 words from a fixed
+        /// vocabulary in 300 folders, each with an alias, a few holding a rare word.
+        fn texted_world() -> TempDir {
+            const SYLLABLES: [&str; 16] = [
+                "sal", "mer", "ka", "tor", "ve", "lin", "dra", "mo", "ash", "ri", "en", "ul",
+                "the", "har", "bo", "qua",
+            ];
+            let vocabulary: Vec<String> = (0..SYLLABLES.len().pow(3))
+                .map(|word| {
+                    let syllable = |shift: u32| SYLLABLES[(word >> shift) % SYLLABLES.len()];
+                    format!("{}{}{}", syllable(0), syllable(4), syllable(8))
+                })
+                .collect();
+            let world = tempfile::tempdir().unwrap();
+            for folder in 0..300 {
+                fs::create_dir(world.path().join(format!("Folder {folder}"))).unwrap();
+            }
+            // A fixed linear congruential sequence, so every run writes the same world.
+            let mut seed: u64 = 7;
+            let mut next = move || {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                (seed >> 33) as usize
+            };
+            for number in 0..5_000usize {
+                let mut text = format!("---\naliases: [Alias {number}]\n---\n# Page {number}\n");
+                for word in 0..500 {
+                    text.push(if word % 12 == 0 { '\n' } else { ' ' });
+                    // Skewed towards the start of the vocabulary, as real words are.
+                    let index =
+                        next() % vocabulary.len() * (next() % vocabulary.len()) / vocabulary.len();
+                    text.push_str(&vocabulary[index]);
+                }
+                if number % 1_000 == 7 {
+                    text.push_str(" quillowisp");
+                }
+                let path = world
+                    .path()
+                    .join(format!("Folder {}/Page {number}.md", number % 300));
+                fs::write(path, text).unwrap();
+            }
+            world
+        }
+
+        /// The DESIGN's large world with text, in a release build: `cargo test --release
+        /// --manifest-path src-tauri/Cargo.toml world:: -- --ignored`.
+        #[test]
+        #[ignore = "a release-mode scale check"]
+        fn search_in_a_world_of_5000_pages_of_500_words_keeps_within_the_design_s_limits() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = texted_world();
+            let words: usize = fs::read_to_string(world.path().join("Folder 1/Page 1.md"))
+                .unwrap()
+                .split_whitespace()
+                .count();
+            let (state, events) = launched_and_watched(&app_data);
+
+            let opened = Instant::now();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            let saving = Instant::now();
+            save(&state, "Folder 0/Page 0.md", "Edited during the build.\n");
+            let save_time = saving.elapsed();
+            let saved_during_build = *lock_index(&index_of(&state)).state() == BuildState::Building;
+            ready(&state, &events, session);
+            let first_build = opened.elapsed();
+            state.close();
+
+            let reopened = Instant::now();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let reopen = reopened.elapsed();
+            assert_eq!(reads(&state), 0);
+
+            let paragraph = fs::read_to_string(world.path().join("Folder 9/Page 9.md")).unwrap();
+            let paragraph: Vec<&str> = paragraph.lines().nth(8).unwrap().split(' ').collect();
+            let paragraph = paragraph.join(" ").repeat(3);
+            let queries = [
+                ("one letter", "s"),
+                ("two letters", "sa"),
+                ("a common word", "salsalsal"),
+                ("two words", "salmersal harsalsal"),
+                ("a rare word", "quillowisp"),
+                ("a pasted paragraph", paragraph.as_str()),
+                ("no match", "zzzzqx"),
+            ];
+            let mut timings = Vec::new();
+            for (kind, query) in queries {
+                let asking = Instant::now();
+                let pages = state.search_pages(query).unwrap();
+                let page_time = asking.elapsed();
+                let asking = Instant::now();
+                let texts = state.search_text(query).unwrap();
+                let text_time = asking.elapsed();
+                assert!(matches!(pages, PageMatches::Ready { .. }), "{kind}");
+                let TextMatches::Ready { pages: texts } = texts else {
+                    panic!("{kind}: the text matches are not ready");
+                };
+                timings.push((kind, page_time, text_time, texts.len()));
+            }
+            let cache = index::file(app_data.path(), world.path().to_str().unwrap());
+            let size = fs::metadata(&cache).unwrap().len();
+
+            eprintln!(
+                "{words} words a page; first build {first_build:?}, save during it \
+                 {save_time:?}, reopen {reopen:?}, cache {} MB",
+                size / 1_000_000
+            );
+            for (kind, page_time, text_time, found) in &timings {
+                eprintln!("{kind}: page matches {page_time:?}, {found} text matches {text_time:?}");
+            }
+            assert!(words > 450);
+            assert_eq!(timings[4].3, 5, "the rare word");
+            assert_eq!(timings[6].3, 0, "no match");
+            assert!(saved_during_build, "the save ran after the build");
+            assert!(first_build < Duration::from_secs(10));
+            assert!(save_time < Duration::from_millis(200));
+            assert!(reopen < Duration::from_secs(2));
+            for (kind, page_time, text_time, _) in timings {
+                assert!(
+                    page_time < Duration::from_millis(100),
+                    "{kind}: page matches"
+                );
+                assert!(
+                    text_time < Duration::from_millis(300),
+                    "{kind}: text matches"
+                );
+            }
         }
     }
 

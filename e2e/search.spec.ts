@@ -1,7 +1,8 @@
 import { expect, type Page, test } from "@playwright/test";
 
 // The browser preview's sample world in src/lib/preview-fixtures.ts, whose search approximates the
-// core's: names, aliases and paths, with letter case and accents ignored.
+// core's: names, aliases and paths, and the words of the pages' text, with letter case and accents
+// ignored.
 const worldName = "The Glass Steppe";
 
 const row = (page: Page, name: string) => page.getByRole("treeitem", { name, exact: true });
@@ -53,6 +54,30 @@ test("Ctrl+K finds a page by its alias, and Ctrl+Enter opens it in a new tab", a
   await expect(tab(page, "Captain Orlaith Venn")).toHaveAttribute("aria-selected", "true");
   await expect(tab(page, "Campaign overview")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Captain Orlaith Venn" })).toBeFocused();
+});
+
+test("words from a page's text list its line, which opens the page with the cursor at the match", async ({
+  page,
+}) => {
+  await openOverview(page);
+
+  await page.keyboard.press("Control+o");
+  await page.keyboard.type("basalt spi");
+  const line = page
+    .getByRole("group", { name: "Kesh Tor, Locations" })
+    .getByRole("option", { name: "A basalt spire, the only shade for a day's ride." });
+  await expect(line).toBeVisible();
+  // No page has the name, so the Create row comes first.
+  await page.keyboard.press("ArrowDown");
+  await expect(line).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
+
+  await expect(dialog(page)).toHaveCount(0);
+  await expect(tab(page, "Kesh Tor")).toHaveAttribute("aria-selected", "true");
+  const editor = page.getByRole("textbox", { name: "Kesh Tor" });
+  await expect(editor).toBeFocused();
+  await page.keyboard.type("~");
+  await expect(editor).toContainText("A ~basalt spire");
 });
 
 test("the tree's Search button opens the dialog, and Escape returns focus to it", async ({

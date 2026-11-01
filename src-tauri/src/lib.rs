@@ -80,6 +80,7 @@ pub fn run() {
             world::link_create,
             world::link_suggest,
             world::search_pages,
+            world::search_text,
             world::search_create,
         ])
         .run(tauri::generate_context!())
