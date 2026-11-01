@@ -48,11 +48,17 @@ struct Rank {
     alias: bool,
 }
 
-/// The pages among `pages`, by path, with `aliases` as (page path, alias), that a link whose page
-/// part so far is `query` may name. Without a `/`, the query matches names and aliases; with one,
-/// paths from the world's root without `.md`. Letter case is ignored, a page appears once by its
-/// best match, and ties go by the tree's order. Pages that no link can name are left out.
-pub fn suggest(pages: &[String], aliases: &[(String, String)], query: &str) -> Vec<LinkSuggestion> {
+/// The pages among `pages`, by path, with `aliases` as (page path, alias), that a link in the page
+/// at `from` whose page part so far is `query` may name. Without a `/`, the query matches names and
+/// aliases; with one, paths from the world's root without `.md`. Letter case is ignored, a page
+/// appears once by its best match, and ties go by the tree's order. Pages that no link can name are
+/// left out, and so is the page at `from`, which still counts when another page shares its name.
+pub fn suggest(
+    pages: &[String],
+    aliases: &[(String, String)],
+    from: &str,
+    query: &str,
+) -> Vec<LinkSuggestion> {
     let query = query.trim().to_lowercase();
     let by_path = query.contains('/');
     let mut sharing: HashMap<String, usize> = HashMap::new();
@@ -65,7 +71,7 @@ pub fn suggest(pages: &[String], aliases: &[(String, String)], query: &str) -> V
     }
 
     let mut matches: Vec<(Rank, &str, Option<&str>)> = Vec::new();
-    for path in pages {
+    for path in pages.iter().filter(|path| *path != from) {
         let name = page_name(path);
         let best = if by_path {
             rank(without_extension(path), &query, false).map(|rank| (rank, None))
@@ -149,6 +155,9 @@ mod tests {
         "Places/Harbour.MD",
     ];
 
+    /// The page the link is typed in, which is none of `PAGES` unless a test says so.
+    const FROM: &str = "Overview.md";
+
     fn suggested(query: &str) -> Vec<LinkSuggestion> {
         let pages: Vec<String> = PAGES.iter().map(|path| (*path).to_owned()).collect();
         let aliases: Vec<(String, String)> = [
@@ -161,7 +170,7 @@ mod tests {
         .iter()
         .map(|(path, alias)| ((*path).to_owned(), (*alias).to_owned()))
         .collect();
-        suggest(&pages, &aliases, query)
+        suggest(&pages, &aliases, FROM, query)
     }
 
     fn inserts(query: &str) -> Vec<String> {
@@ -263,7 +272,7 @@ mod tests {
     fn at_most_ten_pages_are_suggested() {
         let pages: Vec<String> = (1..=12).map(|number| format!("Act {number}.md")).collect();
 
-        let first = suggest(&pages, &[], "act");
+        let first = suggest(&pages, &[], FROM, "act");
 
         assert_eq!(
             first
@@ -274,6 +283,26 @@ mod tests {
                 .map(|number| format!("Act {number}"))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn the_linking_page_is_not_suggested_but_still_shares_its_name() {
+        let saltmere = "Lore/Saltmere.md";
+        let alone = [saltmere.to_owned()];
+        let alias = [(saltmere.to_owned(), "Salt town".to_owned())];
+        for query in ["", "saltmere", "salt t", "lore/"] {
+            assert!(
+                suggest(&alone, &alias, saltmere, query).is_empty(),
+                "{query:?}"
+            );
+        }
+
+        let both = [saltmere.to_owned(), "Places/Saltmere.md".to_owned()];
+        let inserts: Vec<String> = suggest(&both, &[], saltmere, "saltm")
+            .into_iter()
+            .map(|suggestion| suggestion.insert)
+            .collect();
+        assert_eq!(inserts, ["Places/Saltmere".to_owned()]);
     }
 
     #[test]

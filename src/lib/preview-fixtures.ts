@@ -402,13 +402,15 @@ function linksOf(open: PreviewWorld, from: string, text: string): EditorLink[] {
 }
 
 /**
- * Up to 10 pages whose name starts with the query, then those whose name holds it elsewhere, each
- * group in path order. An approximation for the preview: the core also matches aliases and paths,
- * and writes the path of a page whose name another page shares.
+ * Up to 10 pages other than `from` whose name starts with the query, then those whose name holds it
+ * elsewhere, each group in path order. An approximation for the preview: the core also matches
+ * aliases and paths, and writes the path of a page whose name another page shares.
  */
-function suggestionsOf(open: PreviewWorld, query: string): LinkSuggestions {
+function suggestionsOf(open: PreviewWorld, from: string, query: string): LinkSuggestions {
   const wanted = query.trim().toLowerCase();
-  const paths = Object.keys(open.pages).sort(byName.compare);
+  const paths = Object.keys(open.pages)
+    .filter((path) => path !== from)
+    .sort(byName.compare);
   const at = (path: string) => nameOf(path).toLowerCase().indexOf(wanted);
   const items = [...paths.filter((path) => at(path) === 0), ...paths.filter((path) => at(path) > 0)]
     .slice(0, 10)
@@ -611,7 +613,7 @@ export const previewFixtures: Record<string, unknown> = {
   },
   link_create: (args?: InvokeArgs) => createLinked(args),
   link_suggest: (args?: InvokeArgs) => {
-    const { query } = args as { query: string };
-    return suggestionsOf(requireWorld(), query);
+    const { from, query } = args as { from: string; query: string };
+    return suggestionsOf(requireWorld(), from, query);
   },
 };

@@ -117,12 +117,12 @@ export const linkCreate = (from: string, target: string) =>
   invokeCommand<LinkedPage>("link_create", { from, target });
 
 /**
- * Up to 10 pages to suggest for a link whose page part so far is `query`, best first, with the text
- * each writes between the link's brackets, and whether the world's page index is still being
- * built, so that pages it has not read yet are missing.
+ * Up to 10 pages other than the page at `from` to suggest for a link in it whose page part so far
+ * is `query`, best first, with the text each writes between the link's brackets, and whether the
+ * world's page index is still being built, so that pages it has not read yet are missing.
  */
-export const linkSuggest = (query: string) =>
-  invokeCommand<LinkSuggestions>("link_suggest", { query });
+export const linkSuggest = (from: string, query: string) =>
+  invokeCommand<LinkSuggestions>("link_suggest", { from, query });
 
 /** Forgets any location picked before and returns the default one for a new world, to show. */
 export const worldNewLocation = () => invokeCommand<NewLocation>("world_new_location");

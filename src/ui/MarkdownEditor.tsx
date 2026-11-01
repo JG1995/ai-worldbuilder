@@ -1,3 +1,4 @@
+import { closeCompletion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -232,6 +233,9 @@ export function MarkdownEditor({
       container?.removeEventListener("keydown", followKey, true);
       replaceListeners.delete(editor);
       share(null);
+      // The page resumes from this state, as when its tab comes back: with no suggestion list open,
+      // since the list closes when the tab changes even while the editor keeps the focus.
+      closeCompletion(editor);
       reportUnmount(editor.state);
       editor.destroy();
       view.current = null;

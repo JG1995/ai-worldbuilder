@@ -586,10 +586,11 @@ impl WorldState {
         self.query_index(|index| index.links_in(path, &parsed))
     }
 
-    /// The pages to suggest for a link whose page part so far is `query`, from the open world's
-    /// index, which while it is being built holds only the pages it has read so far.
-    fn link_suggest(&self, query: &str) -> Result<LinkSuggestions, AppError> {
-        self.query_index(|index| index.suggest(query))
+    /// The pages to suggest for a link in the page at `from` whose page part so far is `query`,
+    /// from the open world's index, which while it is being built holds only the pages it has read
+    /// so far.
+    fn link_suggest(&self, from: &str, query: &str) -> Result<LinkSuggestions, AppError> {
+        self.query_index(|index| index.suggest(from, query))
     }
 
     /// Runs `query` on the open world's index, under the index's lock alone.
@@ -1203,14 +1204,15 @@ pub async fn link_create(
     guard(|| state.link_create(&from, &target))
 }
 
-/// The pages to suggest for a link whose page part so far is `query`, and whether the index is
-/// still being built.
+/// The pages other than the page at `from` to suggest for a link in it whose page part so far is
+/// `query`, and whether the index is still being built.
 #[tauri::command]
 pub async fn link_suggest(
     state: State<'_, WorldState>,
+    from: String,
     query: String,
 ) -> Result<LinkSuggestions, AppError> {
-    guard(|| state.link_suggest(&query))
+    guard(|| state.link_suggest(&from, &query))
 }
 
 /// Creates an empty folder `name` in `folder`, or at the world's top level when it is `null`.
@@ -2574,8 +2576,8 @@ mod tests {
             assert!(crate::history::testing::stored(app_data.path(), world.path()).is_empty());
         }
 
-        fn suggested(state: &WorldState, query: &str) -> (bool, Vec<String>) {
-            let suggestions = state.link_suggest(query).unwrap();
+        fn suggested(state: &WorldState, from: &str, query: &str) -> (bool, Vec<String>) {
+            let suggestions = state.link_suggest(from, query).unwrap();
             let inserts = suggestions.items.into_iter().map(|item| item.insert);
             (suggestions.indexing, inserts.collect())
         }
@@ -2589,11 +2591,22 @@ mod tests {
 
             save(&state, "Kesh Tor.md", "---\naliases: [Old Mire]\n---\n");
             let expected = ["Mirela", "Kesh Tor|Old Mire"].map(str::to_owned).to_vec();
-            assert_eq!(suggested(&state, "mir"), (false, expected.clone()));
+            assert_eq!(
+                suggested(&state, "Places/Saltmere.md", "mir"),
+                (false, expected.clone())
+            );
+            // The linking page is not suggested in its own links.
+            assert_eq!(
+                suggested(&state, "Mirela.md", "mir"),
+                (false, vec!["Kesh Tor|Old Mire".to_owned()])
+            );
 
             // While it is built, the pages stored so far are suggested.
             lock_index(&index_of(&state)).set_state(BuildState::Building);
-            assert_eq!(suggested(&state, "mir"), (true, expected));
+            assert_eq!(
+                suggested(&state, "Places/Saltmere.md", "mir"),
+                (true, expected)
+            );
         }
 
         /// The DESIGN's suggestions in a large world, in a release build: `cargo test --release
@@ -2627,7 +2640,7 @@ mod tests {
                 "nothing",
             ] {
                 let asking = Instant::now();
-                let suggestions = state.link_suggest(query).unwrap();
+                let suggestions = state.link_suggest("Folder 0/Page 0.md", query).unwrap();
                 slowest = slowest.max(asking.elapsed());
                 assert!(!suggestions.indexing);
             }
