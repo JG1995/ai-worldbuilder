@@ -131,3 +131,46 @@ test("picking Create for a new name creates the page in the active page's folder
   await expect(row(page, "Saltmere harbour office")).toHaveAttribute("aria-selected", "true");
   await expect(row(page, "Saltmere harbour office")).toHaveAttribute("aria-level", "2");
 });
+
+test("below 960px, a pick from the dialog opened in the tree overlay closes the overlay, and Escape keeps it", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 720, height: 800 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open world…" }).click();
+  const overlay = page.getByRole("complementary", { name: "File tree" });
+  const toggle = page.getByRole("button", { name: "File tree" });
+  const search = overlay.getByRole("button", { name: "Search pages" });
+
+  await toggle.click();
+  await search.click();
+  await expect(query(page)).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog(page)).toHaveCount(0);
+  await expect(overlay).toBeVisible();
+  await expect(search).toBeFocused();
+
+  await search.click();
+  await page.keyboard.type("basalt spi");
+  const line = page.getByRole("option", {
+    name: "A basalt spire, the only shade for a day's ride.",
+  });
+  await expect(line).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await expect(line).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
+
+  await expect(overlay).toBeHidden();
+  const editor = page.getByRole("textbox", { name: "Kesh Tor" });
+  await expect(editor).toBeFocused();
+  await page.keyboard.type("~");
+  await expect(editor).toContainText("A ~basalt spire");
+
+  await toggle.click();
+  await search.click();
+  await page.keyboard.type("Saltmere harbour office");
+  await page.getByRole("option", { name: 'Create page "Saltmere harbour office"' }).click();
+
+  await expect(overlay).toBeHidden();
+  await expect(page.getByRole("textbox", { name: "Saltmere harbour office" })).toBeFocused();
+});
