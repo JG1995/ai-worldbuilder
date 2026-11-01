@@ -4,7 +4,7 @@ import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-quer
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
-import type { HistoryVersion } from "@/types/api";
+import type { EditorLink, HistoryVersion } from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import {
@@ -26,6 +26,7 @@ import {
   pageWrite,
   worldTreeKey,
 } from "../api/commands";
+import { followLink, usePageLinks } from "../logic/links";
 import { reloadToast } from "../logic/outside-changes";
 import {
   isReadOnlyNotice,
@@ -34,7 +35,12 @@ import {
   type ReplaceResult,
   type SaveNotice,
 } from "../logic/saving";
-import { unreadablePage, useWorldStore } from "../stores/world-store";
+import {
+  type CursorTarget,
+  cursorOffset,
+  unreadablePage,
+  useWorldStore,
+} from "../stores/world-store";
 import { pageNameOf } from "../utils/paths";
 import { CompareView } from "./CompareView";
 import { HistoryView, versionTime } from "./HistoryView";
@@ -50,8 +56,10 @@ type PageTabProps = {
   onClose: (path: string) => void;
   /** Closes the tab without saving, dropping the text. */
   onDiscard: (path: string) => void;
-  /** Opens another page with the cursor at `at`, as a backlink row asks. */
-  onOpenPage: (path: string, options: { newTab: boolean; at: number }) => void;
+  /** Opens another page with the cursor at `at`, as a backlink row or a followed link asks. */
+  onOpenPage: (path: string, options: { newTab: boolean; at: CursorTarget }) => void;
+  /** Creates the page that `link`, unresolved in the page at `from`, names. */
+  onCreateLink: (from: string, link: EditorLink) => void;
 };
 
 /**
@@ -166,7 +174,14 @@ export async function undoChange(session: number, path: string, change: string) 
 }
 
 /** One open page: it reads the page when it is loading and shows its editor or its notice. */
-export function PageTab({ path, session, onClose, onDiscard, onOpenPage }: PageTabProps) {
+export function PageTab({
+  path,
+  session,
+  onClose,
+  onDiscard,
+  onOpenPage,
+  onCreateLink,
+}: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   // Only a page the user just created, or switched to from another page's editor, takes focus, so
@@ -187,6 +202,7 @@ export function PageTab({ path, session, onClose, onDiscard, onOpenPage }: PageT
   // The editor has focused itself as it mounted, which runs before this effect. Its cursor, which
   // may be at a backlink's link, scrolls into view once React has settled the mounted editor.
   const editorView = ready ? page.view : undefined;
+  const links = usePageLinks(path, editorView);
   useEffect(() => {
     if (!focusEditor || !editorView) return;
     createdPageShown();
@@ -210,10 +226,14 @@ export function PageTab({ path, session, onClose, onDiscard, onOpenPage }: PageT
             reportingMissingWorld(session, pageWrite(page, text, version, keepMine)),
           notify: (notice) => setNotice(session, path, notice),
         });
-        const at = useWorldStore.getState().takeCursorTarget(path) ?? 0;
+        const target = useWorldStore.getState().takeCursorTarget(path);
+        let editor = createPageState(read.text, title);
+        // A heading or block the page does not have leaves the cursor at the top.
+        const at = target === null ? null : cursorOffset(editor, target);
+        if (at !== null) editor = editor.update({ selection: { anchor: at } }).state;
         setPage(session, path, {
           status: "ready",
-          editor: createPageState(read.text, title, Math.min(at, read.text.length)),
+          editor,
           view: { current: null },
           saver,
           notice: null,
@@ -339,8 +359,18 @@ export function PageTab({ path, session, onClose, onDiscard, onOpenPage }: PageT
             readOnly={changingWorld || isReadOnlyNotice(notice)}
             autoFocus={focusEditor}
             viewRef={view}
-            onChange={(editor) => saver.changed(editor.doc)}
+            onChange={(editor) => {
+              saver.changed(editor.doc);
+              links.changed();
+            }}
             onUnmount={(editor) => setEditor(session, path, editor)}
+            onReplace={links.replaced}
+            onFollow={(link) =>
+              followLink(path, link, view?.current ?? null, {
+                open: (target, at) => onOpenPage(target, { newTab: true, at }),
+                create: (unresolved) => onCreateLink(path, unresolved),
+              })
+            }
           />
         </div>
         {!hidden && backlinks}

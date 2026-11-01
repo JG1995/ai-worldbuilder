@@ -174,7 +174,12 @@ function typeAtEnd(textbox: HTMLElement, text: string) {
   });
 }
 
-const commandsOf = (calls: { command: string }[]) => calls.map(({ command }) => command);
+/**
+ * The commands called, in order, without `links_in`: an editor asks for its links whenever its
+ * text pauses or the index changes, at no fixed point in a flow.
+ */
+const commandsOf = (calls: { command: string }[]) =>
+  calls.map(({ command }) => command).filter((command) => command !== "links_in");
 const writesOf = (calls: { command: string; args?: unknown }[]) =>
   calls.filter(({ command }) => command === "page_write").map(({ args }) => args);
 

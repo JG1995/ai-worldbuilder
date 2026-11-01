@@ -22,6 +22,7 @@ use crate::order::{natural_order, path_order};
 pub use database::file;
 pub use parse::{Parsed, parse};
 use resolve::Table;
+pub use resolve::creation_path;
 
 /// How many pages one `apply` should take, and how many links one step of a full pass resolves,
 /// which bounds how long the index's lock is held at a time.
@@ -105,6 +106,43 @@ pub enum Backlinks {
     Building,
     Failed { message: String },
     Ready { pages: Vec<Backlink> },
+}
+
+/// What a link in the editor leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    Resolved,
+    Unresolved,
+    /// It names an image, audio, video or PDF file, which the index leaves out.
+    Attachment,
+}
+
+/// A link in the editor's text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct EditorLink {
+    /// Where the whole link starts and ends in the text, in UTF-16 code units.
+    pub from: u64,
+    pub to: u64,
+    pub state: LinkState,
+    /// The link's page part, without surrounding whitespace and `.md`; empty for a link to the
+    /// page it is in.
+    pub target: String,
+    /// The path of the page it resolves to.
+    pub path: Option<String>,
+    pub heading: Option<String>,
+    pub block: Option<String>,
+}
+
+/// The links of the editor's text, once the index is built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum EditorLinks {
+    NotReady,
+    Ready { links: Vec<EditorLink> },
 }
 
 /// The index of one opening of a world.
@@ -243,6 +281,44 @@ impl Index {
             BuildState::Ready => Backlinks::Ready { pages },
             _ => self.not_ready(),
         })
+    }
+
+    /// The links of `parsed`, the parse of the editor's text of the page at `from`, each with the
+    /// page it resolves to.
+    pub fn links_in(&mut self, from: &str, parsed: &Parsed) -> rusqlite::Result<EditorLinks> {
+        if self.state != BuildState::Ready {
+            return Ok(EditorLinks::NotReady);
+        }
+        let links = self.stored(|index| {
+            let table = index.table()?;
+            Ok(parsed
+                .links
+                .iter()
+                .map(|link| editor_link(table, from, link))
+                .collect())
+        })?;
+        // A storage failure during the query can have emptied the index.
+        Ok(match self.state {
+            BuildState::Ready => EditorLinks::Ready { links },
+            _ => EditorLinks::NotReady,
+        })
+    }
+
+    /// The page that a link in the page at `from` to `target` resolves to now, while the index is
+    /// built; `None` when it is not built or nothing matches.
+    pub fn resolve(&mut self, from: &str, target: &str) -> rusqlite::Result<Option<String>> {
+        if self.state != BuildState::Ready {
+            return Ok(None);
+        }
+        self.stored(|index| Ok(index.table()?.resolve(from, target).map(str::to_owned)))
+    }
+
+    /// The pages and aliases for resolving, loaded when they changed since they were last used.
+    fn table(&mut self) -> rusqlite::Result<&Table> {
+        if self.table.is_none() {
+            self.table = Some(load_table(&self.connection)?);
+        }
+        Ok(self.table.as_ref().expect("the table was loaded above"))
     }
 
     fn not_ready(&self) -> Backlinks {
@@ -396,6 +472,26 @@ impl Index {
             natural_order(&a.name, &b.name).then_with(|| path_order(&a.path, &b.path))
         });
         Ok(pages)
+    }
+}
+
+fn editor_link(table: &Table, from: &str, link: &parse::Link) -> EditorLink {
+    let path = (!link.attachment)
+        .then(|| table.resolve(from, &link.target))
+        .flatten();
+    let state = match (link.attachment, &path) {
+        (true, _) => LinkState::Attachment,
+        (false, Some(_)) => LinkState::Resolved,
+        (false, None) => LinkState::Unresolved,
+    };
+    EditorLink {
+        from: link.start,
+        to: link.end,
+        state,
+        target: link.target.clone(),
+        path: path.map(str::to_owned),
+        heading: link.heading.clone(),
+        block: link.block.clone(),
     }
 }
 

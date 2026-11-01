@@ -24,12 +24,12 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, ErrorKind, guard};
 use crate::history::{self, History, HistoryVersion, Kind};
-use crate::index::{self, Backlinks, BuildState, Content, Index, Stamp};
+use crate::index::{self, Backlinks, BuildState, Content, EditorLinks, Index, Stamp};
 use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
 pub use watch::{EventSink, WorldEvent};
-use write::{NewEntry, OwnWrites, PageVersion, Recorder, Recording, RestoredPage};
+use write::{LinkedPage, NewEntry, OwnWrites, PageVersion, Recorder, Recording, RestoredPage};
 
 const APP_TITLE: &str = "Grimoire.md";
 /// Why an opening has no history when the application has no data folder to keep it in.
@@ -530,11 +530,30 @@ impl WorldState {
             &mut Recorder,
         ) -> Result<(T, Option<(String, String)>), AppError>,
     ) -> Result<T, AppError> {
+        self.write_with_index(|root, own, recorder, _| write(root, own, recorder))
+    }
+
+    /// `write_and_index` for a write that consults the index first: `write` also gets the index,
+    /// whose lock it may take under the world lock.
+    fn write_with_index<T>(
+        &self,
+        write: impl FnOnce(
+            &Path,
+            &mut OwnWrites,
+            &mut Recorder,
+            &Mutex<Index>,
+        ) -> Result<(T, Option<(String, String)>), AppError>,
+    ) -> Result<T, AppError> {
         let mut inner = self.lock();
         let session = inner.session;
         let world = inner.world.as_mut().ok_or_else(no_world)?;
         let mut recorder = Recorder::new(world.history.as_mut().ok(), now());
-        let result = write(&world.root, &mut world.own_writes, &mut recorder);
+        let result = write(
+            &world.root,
+            &mut world.own_writes,
+            &mut recorder,
+            &world.index,
+        );
         let outcome = recorder.outcome();
         let sink = self.events.get();
         if let Some(event) = world.recorded(outcome, session)
@@ -555,10 +574,25 @@ impl WorldState {
     /// The pages that link to the page at `path`, from the open world's index. It reads no file,
     /// so a page that is not UTF-8 has its backlinks too.
     fn backlinks(&self, path: &str) -> Result<Backlinks, AppError> {
+        self.query_index(|index| index.backlinks(path))
+    }
+
+    /// The links in `text`, the editor's text of the page at `path`, each with what it leads to.
+    /// It reads no file: the text is parsed before the index's lock is taken.
+    fn links_in(&self, path: &str, text: &str) -> Result<EditorLinks, AppError> {
+        let parsed = index::parse(text, index::page_name(path));
+        self.query_index(|index| index.links_in(path, &parsed))
+    }
+
+    /// Runs `query` on the open world's index, under the index's lock alone.
+    fn query_index<T>(
+        &self,
+        query: impl FnOnce(&mut Index) -> rusqlite::Result<T>,
+    ) -> Result<T, AppError> {
         let index = Arc::clone(&self.lock().world.as_ref().ok_or_else(no_world)?.index);
-        let (backlinks, needs_worker) = {
+        let (answer, needs_worker) = {
             let mut index = lock_index(&index);
-            (index.backlinks(path), index.needs_worker())
+            (query(&mut index), index.needs_worker())
         };
         // A storage failure can have emptied the index; the worker then builds it again. The world
         // lock is taken only once the index lock is released.
@@ -568,11 +602,35 @@ impl WorldState {
         {
             world.worker.send(Request::Wake);
         }
-        backlinks.map_err(|error| {
-            AppError::new(
-                ErrorKind::Io,
-                format!("The page index reported an error: {error}."),
-            )
+        answer.map_err(index_error)
+    }
+
+    /// Creates an empty page for the unresolved link in the page at `from` to `target`, the link's
+    /// untrusted page part, under the world lock like a save. Nothing is created while the index is
+    /// not built, so a page that exists but is not indexed yet is never created twice, and a target
+    /// that resolves by now gives its page.
+    fn link_create(&self, from: &str, target: &str) -> Result<LinkedPage, AppError> {
+        self.write_with_index(|root, own, recorder, index| {
+            let resolved = {
+                let mut index = lock_index(index);
+                let resolved = index.resolve(from, target).map_err(index_error)?;
+                // Checked after resolving, because a storage failure while resolving can have
+                // emptied the index, which then resolves nothing.
+                if index.state() != &BuildState::Ready {
+                    return Ok((LinkedPage::NotReady, None));
+                }
+                resolved
+            };
+            if let Some(path) = resolved {
+                return Ok((LinkedPage::Existing { path }, None));
+            }
+            let relative = index::creation_path(from, target).ok_or_else(write::outside_world)?;
+            let linked = write::create_linked_page(root, own, recorder, &relative)?;
+            let written = match &linked {
+                LinkedPage::Created { path } => Some((path.clone(), String::new())),
+                _ => None,
+            };
+            Ok((linked, written))
         })
     }
 
@@ -1115,6 +1173,28 @@ pub async fn backlinks_list(
     guard(|| state.backlinks(&path))
 }
 
+/// The links in `text`, the editor's text of the page at `path`, or whether the index is still
+/// being built.
+#[tauri::command]
+pub async fn links_in(
+    state: State<'_, WorldState>,
+    path: String,
+    text: String,
+) -> Result<EditorLinks, AppError> {
+    guard(|| state.links_in(&path, &text))
+}
+
+/// Creates an empty page for the unresolved link in the page at `from` to `target`, or gives the
+/// page it leads to by now, or says that the index is still being built.
+#[tauri::command]
+pub async fn link_create(
+    state: State<'_, WorldState>,
+    from: String,
+    target: String,
+) -> Result<LinkedPage, AppError> {
+    guard(|| state.link_create(&from, &target))
+}
+
 /// Creates an empty folder `name` in `folder`, or at the world's top level when it is `null`.
 #[tauri::command]
 pub async fn folder_create(
@@ -1282,6 +1362,13 @@ fn display(location: &Path) -> NewLocation {
     NewLocation {
         location: location.display().to_string(),
     }
+}
+
+fn index_error(error: rusqlite::Error) -> AppError {
+    AppError::new(
+        ErrorKind::Io,
+        format!("The page index reported an error: {error}."),
+    )
 }
 
 fn no_world() -> AppError {
@@ -1851,7 +1938,7 @@ mod tests {
 
     mod links {
         use super::*;
-        use crate::index::Backlink;
+        use crate::index::{Backlink, EditorLink, LinkState};
         use std::time::Instant;
 
         /// The next index event of the opening `session`, within ten seconds, leaving out every
@@ -2267,6 +2354,206 @@ mod tests {
             assert!(save_time < Duration::from_millis(200));
             assert!(backlinks_time < Duration::from_secs(1));
             assert!(reopen < Duration::from_secs(2));
+        }
+
+        /// The position of the byte `at` of `text` in UTF-16 code units, as the editor counts.
+        fn utf16(text: &str, at: usize) -> u64 {
+            text[..at].encode_utf16().count() as u64
+        }
+
+        /// Waits for index events until the backlinks of the page at `path` are `expected`.
+        fn wait_for_backlinks(
+            state: &WorldState,
+            events: &mpsc::Receiver<WorldEvent>,
+            session: u64,
+            path: &str,
+            expected: &[&str],
+        ) {
+            while linking(state, path) != expected {
+                index_event(events, session);
+            }
+        }
+
+        #[test]
+        fn the_editor_s_links_come_with_utf16_ranges_and_what_they_lead_to() {
+            let world = kesh();
+            let (state, events) = watched();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let text = "# Ünï 🐉 [[mirela#Ship]] [[Nowhere|x]] ![[map.png]] `[[Kesh Tor]]`\n";
+            let at = |link: &str| {
+                let start = text.find(link).unwrap();
+                (utf16(text, start), utf16(text, start + link.len()))
+            };
+
+            let links = state.links_in("Places/Saltmere.md", text).unwrap();
+
+            let link = |range: (u64, u64), state, target: &str, path: Option<&str>| EditorLink {
+                from: range.0,
+                to: range.1,
+                state,
+                target: target.to_owned(),
+                path: path.map(str::to_owned),
+                heading: None,
+                block: None,
+            };
+            assert_eq!(
+                links,
+                EditorLinks::Ready {
+                    links: vec![
+                        EditorLink {
+                            heading: Some("Ship".to_owned()),
+                            ..link(
+                                at("[[mirela#Ship]]"),
+                                LinkState::Resolved,
+                                "mirela",
+                                Some("Mirela.md")
+                            )
+                        },
+                        link(at("[[Nowhere|x]]"), LinkState::Unresolved, "Nowhere", None),
+                        link(at("![[map.png]]"), LinkState::Attachment, "map.png", None),
+                    ]
+                }
+            );
+        }
+
+        #[test]
+        fn following_an_unresolved_link_creates_records_and_indexes_its_page() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let text = "[[Harbor]] and [[places/Docks]]\n";
+            fs::write(world.path().join("Places/Saltmere.md"), text).unwrap();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let bare = state.link_create("Places/Saltmere.md", "Harbor").unwrap();
+            let path = state
+                .link_create("Places/Saltmere.md", "places/Docks")
+                .unwrap();
+
+            assert_eq!(
+                (bare, path),
+                (
+                    LinkedPage::Created {
+                        path: "Places/Harbor.md".to_owned()
+                    },
+                    LinkedPage::Created {
+                        path: "Places/Docks.md".to_owned()
+                    }
+                )
+            );
+            assert_eq!(
+                fs::read(world.path().join("Places/Harbor.md")).unwrap(),
+                b""
+            );
+            let changes: Vec<(String, Vec<String>)> =
+                crate::history::testing::stored(app_data.path(), world.path())
+                    .into_iter()
+                    .map(|change| {
+                        let paths = change.entries.into_iter().map(|e| e.entry.path).collect();
+                        (change.kind, paths)
+                    })
+                    .collect();
+            assert_eq!(
+                changes,
+                [
+                    ("new_page".to_owned(), vec!["Places/Harbor.md".to_owned()]),
+                    ("new_page".to_owned(), vec!["Places/Docks.md".to_owned()]),
+                ]
+            );
+            wait_for_backlinks(
+                &state,
+                &events,
+                session,
+                "Places/Harbor.md",
+                &["Places/Saltmere.md"],
+            );
+            wait_for_backlinks(
+                &state,
+                &events,
+                session,
+                "Places/Docks.md",
+                &["Places/Saltmere.md"],
+            );
+            let EditorLinks::Ready { links } = state.links_in("Places/Saltmere.md", text).unwrap()
+            else {
+                panic!("the index is not ready");
+            };
+            let paths: Vec<Option<&str>> = links.iter().map(|link| link.path.as_deref()).collect();
+            assert_eq!(paths, [Some("Places/Harbor.md"), Some("Places/Docks.md")]);
+        }
+
+        #[test]
+        fn a_link_that_resolves_or_leaves_the_world_creates_nothing() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+
+            let existing = state.link_create("Places/Saltmere.md", "MIRELA").unwrap();
+            let escape = state
+                .link_create("Places/Saltmere.md", "../../Outside")
+                .unwrap_err();
+
+            assert_eq!(
+                existing,
+                LinkedPage::Existing {
+                    path: "Mirela.md".to_owned()
+                }
+            );
+            assert_eq!(escape.kind, ErrorKind::InvalidPath);
+            assert_eq!(
+                state.tree().unwrap().len(),
+                3,
+                "Places, Kesh Tor and Mirela"
+            );
+            assert!(crate::history::testing::stored(app_data.path(), world.path()).is_empty());
+        }
+
+        #[test]
+        fn nothing_is_created_when_the_index_empties_while_the_link_is_resolved() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            // A new page leaves the pages for resolving to be loaded again, which the worker's
+            // pass would do unless held; the overwritten file then fails that load.
+            {
+                let inner = state.lock();
+                let worker = &inner.world.as_ref().unwrap().worker;
+                worker.shared.hold_passes.store(true, Ordering::SeqCst);
+            }
+            state.create_page(None, "Docks").unwrap();
+            let file = index::file(app_data.path(), world.path().to_str().unwrap());
+            fs::write(&file, vec![0x5a; 16_384]).unwrap();
+
+            let linked = state.link_create("Places/Saltmere.md", "Mirela").unwrap();
+
+            assert_eq!(linked, LinkedPage::NotReady);
+            assert!(!world.path().join("Places/Mirela.md").exists());
+        }
+
+        #[test]
+        fn nothing_is_created_or_styled_while_the_index_is_being_built() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            lock_index(&index_of(&state)).set_state(BuildState::Building);
+
+            let linked = state.link_create("Places/Saltmere.md", "Harbor").unwrap();
+            let links = state
+                .links_in("Places/Saltmere.md", "[[Mirela]] [[Harbor]]")
+                .unwrap();
+
+            assert_eq!(linked, LinkedPage::NotReady);
+            assert_eq!(links, EditorLinks::NotReady);
+            assert!(!world.path().join("Places/Harbor.md").exists());
+            assert!(crate::history::testing::stored(app_data.path(), world.path()).is_empty());
         }
     }
 

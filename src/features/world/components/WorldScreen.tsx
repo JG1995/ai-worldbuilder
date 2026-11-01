@@ -12,7 +12,8 @@ import { Shell } from "@/ui/Shell";
 import { TabStrip } from "@/ui/TabStrip";
 import { ToastRegion } from "@/ui/Toast";
 import { folderCreate, pageCreate, worldTree, worldTreeKey } from "../api/commands";
-import { useWorldStore } from "../stores/world-store";
+import { createFromLink } from "../logic/links";
+import { type CursorTarget, useWorldStore } from "../stores/world-store";
 import { pageNameOf } from "../utils/paths";
 import { PageTab } from "./PageTab";
 
@@ -131,12 +132,12 @@ export function WorldScreen({
   }
 
   /**
-   * Opens a page from the tree, or from a backlink with the cursor at `at`. Replacing the active
-   * tab's page closes that page, saving first.
+   * Opens a page from the tree, or from a backlink or a followed link with the cursor at `at`.
+   * Replacing the active tab's page closes that page, saving first.
    */
   async function openFromTree(
     path: string,
-    options: { newTab: boolean; at?: number },
+    options: { newTab: boolean; at?: CursorTarget },
   ): Promise<void> {
     const { tabs, active } = useWorldStore.getState();
     if (options.newTab || active === null || tabs.includes(path)) {
@@ -354,6 +355,12 @@ export function WorldScreen({
                 onClose={(path) => void closeFromPage(path, { save: true })}
                 onDiscard={(path) => void closeFromPage(path, { save: false })}
                 onOpenPage={(path, options) => void openFromTree(path, options)}
+                onCreateLink={(from, link) =>
+                  void createFromLink(session, from, link, {
+                    refreshTree: () => queryClient.invalidateQueries({ queryKey: treeKey }),
+                    open: (path, at) => void openFromTree(path, { newTab: true, at }),
+                  })
+                }
               />
             ) : (
               <NoPageOpen onNewPage={() => startNew("page")} />

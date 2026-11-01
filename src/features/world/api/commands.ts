@@ -3,7 +3,9 @@ import type {
   Backlinks,
   Comparison,
   DiffLine,
+  EditorLinks,
   HistoryVersion,
+  LinkedPage,
   NewEntry,
   NewLocation,
   PageText,
@@ -96,6 +98,22 @@ export const backlinksList = (path: string) => invokeCommand<Backlinks>("backlin
  * and the index revision it was asked at.
  */
 export const backlinksKey = ["backlinks_list"] as const;
+
+/**
+ * The links in `text`, the editor's text of the page at `path`, each with its range in UTF-16 code
+ * units and what it leads to, or `not_ready` while the world's page index is being built.
+ */
+export const linksIn = (path: string, text: string) =>
+  invokeCommand<EditorLinks>("links_in", { path, text });
+
+/**
+ * Creates an empty page for the unresolved link in the page at `from` to `target`, the link's page
+ * part. Returns the page a link that resolves by now leads to as `existing`, and `not_ready` while
+ * the index is being built. Rejects with `invalid_name` or `exists`, whose message names the
+ * broken rule, and with `invalid_path` for a link that does not point to a page in this world.
+ */
+export const linkCreate = (from: string, target: string) =>
+  invokeCommand<LinkedPage>("link_create", { from, target });
 
 /** Forgets any location picked before and returns the default one for a new world, to show. */
 export const worldNewLocation = () => invokeCommand<NewLocation>("world_new_location");

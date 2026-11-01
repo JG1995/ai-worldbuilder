@@ -19,7 +19,12 @@ function renderWorld() {
   );
 }
 
-const commandsOf = (calls: { command: string }[]) => calls.map(({ command }) => command);
+/**
+ * The commands called, in order, without `links_in`: an editor asks for its links whenever its
+ * text pauses or the index changes, at no fixed point in a flow.
+ */
+const commandsOf = (calls: { command: string }[]) =>
+  calls.map(({ command }) => command).filter((command) => command !== "links_in");
 const argsOf = (calls: { command: string; args?: unknown }[], command: string) =>
   calls.filter((call) => call.command === command).map(({ args }) => args);
 

@@ -22,6 +22,7 @@ function renderPage({ onDiscard = vi.fn() } = {}) {
         onClose={vi.fn()}
         onDiscard={onDiscard}
         onOpenPage={vi.fn()}
+        onCreateLink={vi.fn()}
       />
     </QueryClientProvider>,
   );

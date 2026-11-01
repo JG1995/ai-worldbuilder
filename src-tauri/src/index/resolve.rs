@@ -66,6 +66,26 @@ impl Table {
     }
 }
 
+/// The path, relative to the world, where a page is created for the unresolved link in the page at
+/// `from` to `target`: a bare name in `from`'s folder, a target starting with `./` or `../` joined
+/// to that folder, and any other path from the world's root, with `.md` added once. A join above
+/// the root is `None`. The path is only lexical: link text is untrusted, so the write path still
+/// confines every segment and applies the naming rules.
+pub fn creation_path(from: &str, target: &str) -> Option<String> {
+    let target = without_extension(target);
+    let path = if target.starts_with("./") || target.starts_with("../") {
+        join(folder_of(from), target)?
+    } else if target.contains('/') {
+        join("", target)?
+    } else {
+        match folder_of(from) {
+            "" => target.to_owned(),
+            folder => format!("{folder}/{target}"),
+        }
+    };
+    Some(format!("{path}.md"))
+}
+
 fn push(map: &mut HashMap<String, Vec<usize>>, key: String, index: usize) {
     let indexes = map.entry(key).or_default();
     if !indexes.contains(&index) {
@@ -278,6 +298,76 @@ mod tests {
         ];
         for (from, target, expected, rule) in cases {
             assert_eq!(table.resolve(from, target), expected, "{rule}");
+        }
+    }
+
+    #[test]
+    fn an_unresolved_link_s_page_is_created_where_the_design_says() {
+        let cases = [
+            (
+                "Kesh Tor.md",
+                "Harbor",
+                Some("Harbor.md"),
+                "a bare name at the top level",
+            ),
+            (
+                "Places/Kesh.md",
+                "Harbor",
+                Some("Places/Harbor.md"),
+                "a bare name in the linking page's folder",
+            ),
+            (
+                "Places/Kesh.md",
+                "Harbor.md",
+                Some("Places/Harbor.md"),
+                "a given .md is not added again",
+            ),
+            (
+                "Places/Kesh.md",
+                "Harbor.MD",
+                Some("Places/Harbor.md"),
+                "a given .md in any case",
+            ),
+            (
+                "Places/Kesh.md",
+                "./Docks/Harbor",
+                Some("Places/Docks/Harbor.md"),
+                "./ joins the linking page's folder",
+            ),
+            (
+                "Places/Coast/Cliffs.md",
+                "../Harbor",
+                Some("Places/Harbor.md"),
+                "../ goes up from it",
+            ),
+            (
+                "Places/Kesh.md",
+                "Lore/Gods/Harbor",
+                Some("Lore/Gods/Harbor.md"),
+                "a path is from the root",
+            ),
+            (
+                "Places/Kesh.md",
+                "Lore/./Harbor",
+                Some("Lore/Harbor.md"),
+                "a . segment stays where it is",
+            ),
+            ("Kesh Tor.md", "../Harbor", None, "../ above the root"),
+            (
+                "Places/Kesh.md",
+                "../../Harbor",
+                None,
+                "../ above the root from a folder",
+            ),
+            (
+                "Kesh Tor.md",
+                "Lore/../../Harbor",
+                None,
+                "a root path above the root",
+            ),
+        ];
+        for (from, target, expected, rule) in cases {
+            assert_eq!(creation_path(from, target).as_deref(), expected, "{rule}");
         }
     }
 

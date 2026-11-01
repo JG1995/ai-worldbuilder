@@ -4,6 +4,7 @@ import type { RefObject } from "react";
 import { create } from "zustand";
 import type { IpcError } from "@/lib/ipc";
 import type { Workspace, WorldOpened } from "@/types/api";
+import { findAnchor, type LinkAnchor } from "@/ui/editor-links";
 import type { TreeNameInput } from "@/ui/FileTree";
 import { defaultTreeWidth } from "@/ui/Shell";
 import type { Toast } from "@/ui/Toast";
@@ -76,10 +77,10 @@ type WorldStore = {
    */
   indexRevision: number;
   /**
-   * Where the cursor goes in the page at `path`, which is still being read, as an offset into its
-   * text in UTF-16 code units; the page's tab takes it when it creates the page's editor state.
+   * Where the cursor goes in the page at `path`, which is still being read; the page's tab takes
+   * it when it creates the page's editor state.
    */
-  cursorTarget: { path: string; at: number } | null;
+  cursorTarget: { path: string; at: CursorTarget } | null;
   /** Oldest first. */
   toasts: WorldToast[];
   /**
@@ -93,11 +94,11 @@ type WorldStore = {
   setChangingWorld: (changing: boolean) => void;
   /**
    * Opens a page in the active tab, or in a new tab when asked or when no tab is active. With
-   * `at`, its editor takes focus with the cursor at that offset.
+   * `at`, its editor takes focus with the cursor at that target.
    */
-  openPage: (path: string, options: { newTab: boolean; at?: number }) => void;
+  openPage: (path: string, options: { newTab: boolean; at?: CursorTarget }) => void;
   /** Takes the cursor target of the page at `path`, if it has one, so it applies once. */
-  takeCursorTarget: (path: string) => number | null;
+  takeCursorTarget: (path: string) => CursorTarget | null;
   /** Counts a change of the page index of the world `session`; ignored once it is not open. */
   indexChanged: (session: number) => void;
   /** Makes a page the active tab; with `focusEditor`, its editor takes focus when it shows. */
@@ -205,25 +206,40 @@ function savers(pages: WorldStore["pages"]) {
 const loading: PageStatus = { status: "loading" };
 
 /**
- * Puts the cursor of the open page at `path` at `at`: in its running editor while its tab shows
- * it, in the editor state its tab will show when it is ready, and otherwise as the cursor target
- * that the page's editor state is created with.
+ * Where a page's cursor goes when it opens: an offset into its text in UTF-16 code units, as a
+ * backlink gives it, or a heading or block, as a followed link names it.
  */
-function placeCursor(path: string, at: number) {
+export type CursorTarget = number | LinkAnchor;
+
+/** Where `target` is in `state`'s text, or null when it names a heading or block not there. */
+export function cursorOffset(state: EditorState, target: CursorTarget) {
+  return typeof target === "number"
+    ? Math.min(target, state.doc.length)
+    : findAnchor(state, target);
+}
+
+/**
+ * Puts the cursor of the open page at `path` at `target`: in its running editor while its tab
+ * shows it, in the editor state its tab will show when it is ready, and otherwise as the cursor
+ * target that the page's editor state is created with. A heading or block the page does not have
+ * leaves an open page's cursor where it was.
+ */
+function placeCursor(path: string, target: CursorTarget) {
   const page = useWorldStore.getState().pages[path];
   if (page?.status !== "ready") {
-    useWorldStore.setState({ cursorTarget: { path, at } });
+    useWorldStore.setState({ cursorTarget: { path, at: target } });
     return;
   }
   const view = page.view?.current;
   if (view) {
-    view.dispatch({ selection: { anchor: Math.min(at, view.state.doc.length) } });
+    const at = cursorOffset(view.state, target);
+    if (at !== null) view.dispatch({ selection: { anchor: at } });
     view.focus();
     return;
   }
-  const editor = page.editor.update({
-    selection: { anchor: Math.min(at, page.editor.doc.length) },
-  }).state;
+  const at = cursorOffset(page.editor, target);
+  if (at === null) return;
+  const editor = page.editor.update({ selection: { anchor: at } }).state;
   useWorldStore.setState(({ pages }) => ({ pages: { ...pages, [path]: { ...page, editor } } }));
 }
 

@@ -7,7 +7,10 @@ import type {
   Backlinks,
   Comparison,
   DiffLine,
+  EditorLink,
+  EditorLinks,
   HistoryVersion,
+  LinkedPage,
   PageText,
   PageVersion,
   RecentWorld,
@@ -48,7 +51,8 @@ Use \`inline code\` for dice notation such as \`3d6\`.
   "Characters/Brother Ketil.md": "# Brother Ketil\n\nKeeper of the shrine at [[Kesh Tor]].\n",
   "Characters/Captain Orlaith Venn.md":
     "# Captain Orlaith Venn\n\nLeads the last caravan that still crosses in summer, guided by [[Brother Ketil|the old monk]].\n",
-  "Characters/The salt merchant.md": "# The salt merchant\n\nNobody knows her name.\n",
+  "Characters/The salt merchant.md":
+    "# The salt merchant\n\nNobody knows her name. She buys salt in [[Saltmere]].\n",
   "Factions/Glasswrights' Guild.md": "# Glasswrights' Guild\n\nThey mine the steppe for lenses.\n",
   "Factions/Riders of the Dun Sky.md": "# Riders of the Dun Sky\n\nNomads who never camp twice.\n",
   "Locations/Kesh Tor.md": "# Kesh Tor\n\nA basalt spire, the only shade for a day's ride.\n",
@@ -362,6 +366,57 @@ function backlinksOf(open: PreviewWorld, path: string): Backlink[] {
   return pages.sort((a, b) => byName.compare(a.name, b.name) || byName.compare(a.path, b.path));
 }
 
+const nameOf = (path: string) => path.split("/").at(-1)?.replace(/\.md$/i, "") ?? path;
+
+/** The first page whose name equals a link's target in any letter case, by page name only. */
+function pageNamed(open: PreviewWorld, target: string) {
+  const wanted = target.toLowerCase();
+  return Object.keys(open.pages).find((path) => nameOf(path).toLowerCase() === wanted) ?? null;
+}
+
+const attachment =
+  /\.(png|jpe?g|gif|bmp|svg|webp|avif|mp3|wav|m4a|ogg|flac|3gp|mp4|webm|ogv|mov|mkv|pdf)$/i;
+
+/**
+ * The `[[…]]` links in a page's text, found with a regular expression and resolved by page name
+ * only. An approximation for the preview: the core also resolves paths and aliases, and leaves out
+ * code and frontmatter.
+ */
+function linksOf(open: PreviewWorld, from: string, text: string): EditorLink[] {
+  return [...text.matchAll(/!?\[\[([^\]\n]+)\]\]/g)].map((found) => {
+    const [part, anchor = ""] = found[1].split("|")[0].split("#");
+    const target = part.trim().replace(/\.md$/i, "");
+    const path = target === "" ? from : pageNamed(open, target);
+    const state = attachment.test(target) ? "attachment" : path ? "resolved" : "unresolved";
+    return {
+      from: found.index,
+      to: found.index + found[0].length,
+      state,
+      target,
+      path: state === "resolved" ? path : null,
+      heading: anchor && !anchor.startsWith("^") ? anchor.trim() : null,
+      block: anchor.startsWith("^") ? anchor.slice(1).trim() : null,
+    };
+  });
+}
+
+/** Creates an empty page for an unresolved link like the core, without `./` and `../` paths. */
+function createLinked(args: InvokeArgs | undefined): LinkedPage {
+  const open = requireWorld();
+  const { from, target } = args as { from: string; target: string };
+  const existing = pageNamed(open, target);
+  if (existing) return { state: "existing", path: existing };
+  const segments = target.replace(/\.md$/i, "").split("/");
+  const name = segments.pop() ?? "";
+  const folder = target.includes("/") ? segments.join("/") : from.split("/").slice(0, -1).join("/");
+  checkName(name);
+  checkFree(namesIn(open, folder || null), `${name}.md`);
+  const path = folder ? `${folder}/${name}.md` : `${name}.md`;
+  open.pages[path] = "";
+  record(open, path, "new_page", null, "");
+  return { state: "created", path };
+}
+
 /** Creates an empty page or folder like the core, refusing names that break a rule or clash. */
 function createEntry(args: InvokeArgs | undefined, kind: TreeEntry["kind"]) {
   const open = requireWorld();
@@ -534,4 +589,9 @@ export const previewFixtures: Record<string, unknown> = {
     const { path } = args as { path: string };
     return { state: "ready", pages: backlinksOf(requireWorld(), path) };
   },
+  links_in: (args?: InvokeArgs): EditorLinks => {
+    const { path, text } = args as { path: string; text: string };
+    return { state: "ready", links: linksOf(requireWorld(), path, text) };
+  },
+  link_create: (args?: InvokeArgs) => createLinked(args),
 };
