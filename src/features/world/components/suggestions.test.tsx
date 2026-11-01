@@ -1,3 +1,4 @@
+import { completionStatus } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { emit } from "@tauri-apps/api/event";
@@ -42,6 +43,12 @@ async function openOverview(overrides: Handler = {}) {
   if (!view) throw new Error("No editor");
   act(() => view.dispatch({ selection: { anchor: view.state.doc.length } }));
   return { calls, textbox, view };
+}
+
+function editorOf(textbox: HTMLElement) {
+  const view = EditorView.findFromDOM(textbox);
+  if (!view) throw new Error("No editor");
+  return view;
 }
 
 /** Types `text` at the cursor, as the keyboard does. */
@@ -102,7 +109,7 @@ describe("the link suggestion list", () => {
     type(view, "[[Mi");
 
     const list = await listOf(/^Mirela\s*People$/, /^Mira\s*alias: the captain$/);
-    expect(suggestCalls(calls)).toContainEqual({ query: "Mi" });
+    expect(suggestCalls(calls)).toContainEqual({ from: "Overview.md", query: "Mi" });
     const [first] = within(list).getAllByRole("option");
     expect(first).toHaveAttribute("aria-selected", "true");
     expect(textbox).toHaveAttribute("aria-activedescendant", first.id);
@@ -181,5 +188,47 @@ describe("the link suggestion list", () => {
     await waitFor(() => expect(screen.queryByText("Indexing world…")).toBeNull());
     expect(suggestCalls(calls)).toHaveLength(asked + 1);
     expect(screen.getByRole("option")).toHaveTextContent(/^Mirela/);
+  });
+
+  it("keeps the selected row when the index changes while the list is open", async () => {
+    let indexing = true;
+    const { textbox, view } = await openOverview({
+      link_suggest: (): LinkSuggestions => ({ indexing, items: [mirela, captain] }),
+    });
+    type(view, "[[Mi");
+    await listOf(/^Mirela/, /^Mira/);
+    fireEvent.keyDown(textbox, { key: "ArrowDown" });
+
+    indexing = false;
+    await act(() => emit("world:index-changed", { session: 1 }));
+    await waitFor(() => expect(screen.queryByText("Indexing world…")).toBeNull());
+
+    expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(view.state.doc.toString()).toBe("See [[Mira|the captain]]");
+  });
+
+  it("closes when the tab changes by keyboard, and stays closed when the tab comes back", async () => {
+    await openOverview();
+    fireEvent.click(screen.getByRole("treeitem", { name: "Places" }));
+    fireEvent.click(await screen.findByRole("treeitem", { name: "Kesh Tor" }), { ctrlKey: true });
+    await screen.findByRole("textbox", { name: "Kesh Tor" });
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    const overview = await screen.findByRole("textbox", { name: "Overview" });
+    type(editorOf(overview), "[[Mi");
+    await listOf(/^Mirela/, /^Mira/);
+
+    // Ctrl+Tab leaves the focus in the editor until the tab changes, so the list never blurs.
+    fireEvent.keyDown(overview, { key: "Tab", ctrlKey: true });
+    await screen.findByRole("textbox", { name: "Kesh Tor" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    const textbox = await screen.findByRole("textbox", { name: "Overview" });
+    const view = editorOf(textbox);
+
+    expect(completionStatus(view.state)).toBeNull();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(view.state.doc.toString()).toBe("See [[Mi\n");
   });
 });

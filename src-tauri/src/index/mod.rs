@@ -315,14 +315,14 @@ impl Index {
         self.stored(|index| Ok(index.table()?.resolve(from, target).map(str::to_owned)))
     }
 
-    /// The pages to suggest for a link whose page part so far is `query`, from the pages stored
-    /// now: while the index is being built, those it has read so far.
-    pub fn suggest(&mut self, query: &str) -> rusqlite::Result<LinkSuggestions> {
+    /// The pages to suggest for a link in the page at `from` whose page part so far is `query`,
+    /// from the pages stored now: while the index is being built, those it has read so far.
+    pub fn suggest(&mut self, from: &str, query: &str) -> rusqlite::Result<LinkSuggestions> {
         let (pages, aliases) = self.stored(|index| stored_pages(&index.connection))?;
         Ok(LinkSuggestions {
             // Checked after reading, because a storage failure can have emptied the index.
             indexing: self.state == BuildState::Building,
-            items: suggest::suggest(&pages, &aliases, query),
+            items: suggest::suggest(&pages, &aliases, from, query),
         })
     }
 

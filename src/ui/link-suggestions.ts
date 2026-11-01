@@ -71,23 +71,46 @@ function insertLink(view: EditorView, insert: string, from: number, to: number) 
   });
 }
 
-function suggestionRow(suggestion: LinkSuggestion, section: string | undefined): LinkCompletion {
+function suggestionRow(suggestion: LinkSuggestion): LinkCompletion {
   return {
     label: suggestion.name,
     detail: folderOf(suggestion.path) || undefined,
     alias: suggestion.alias ?? undefined,
-    section,
     apply: (view, _completion, from, to) => insertLink(view, suggestion.insert, from, to),
   };
 }
 
-const noMatchRow = (section: string | undefined): LinkCompletion => ({
+const noMatchRow = (): LinkCompletion => ({
   label: noMatchLabel,
-  section,
   apply: (view) => {
     closeCompletion(view);
   },
 });
+
+/**
+ * The rows of each editor's last answer, by query and row. The list keeps its selected row across
+ * a new answer only when that answer holds the very same row object, so an answer that the index
+ * changing asks for again reuses them; another query starts with new rows, selecting the first.
+ */
+const lastRows = new WeakMap<EditorView, Map<string, LinkCompletion>>();
+
+function rowsFor(view: EditorView | undefined, query: string, answer: LinkSuggestions) {
+  const previous = (view && lastRows.get(view)) || new Map<string, LinkCompletion>();
+  const rows = new Map<string, LinkCompletion>();
+  const section = answer.indexing ? indexingHeading : undefined;
+  const add = (key: string, row: () => LinkCompletion) => {
+    const reused = previous.get(key) ?? row();
+    // A row keeps its identity when the heading goes, once the index is built.
+    reused.section = section;
+    rows.set(key, reused);
+  };
+  for (const item of answer.items) {
+    add(JSON.stringify([query, item.path, item.alias, item.insert]), () => suggestionRow(item));
+  }
+  if (rows.size === 0) add(JSON.stringify([query]), noMatchRow);
+  if (view) lastRows.set(view, rows);
+  return [...rows.values()];
+}
 
 /**
  * Suggests pages while the text before the cursor on its line ends in `[[` or `![[` and the link's
@@ -102,18 +125,14 @@ export async function linkCompletions(
   if (!suggest || !typed) return null;
   if (inFrontmatter(context.state, context.pos) || inCode(context.state, context.pos)) return null;
   const from = typed.from + 2;
+  const query = context.state.sliceDoc(from, context.pos);
   let answer: LinkSuggestions;
   try {
-    answer = await suggest(context.state.sliceDoc(from, context.pos));
+    answer = await suggest(query);
   } catch {
     return null;
   }
-  const section = answer.indexing ? indexingHeading : undefined;
-  const options =
-    answer.items.length > 0
-      ? answer.items.map((item) => suggestionRow(item, section))
-      : [noMatchRow(section)];
-  return { from, options, filter: false };
+  return { from, options: rowsFor(context.view, query, answer), filter: false };
 }
 
 function aliasOf(completion: LinkCompletion) {
