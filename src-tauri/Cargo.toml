@@ -24,6 +24,8 @@ tauri-plugin-single-instance = "^2.5.5"
 notify = "^8.2.1"
 notify-debouncer-full = "^0.7.0"
 rusqlite = { version = "^0.41.1", features = ["bundled"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "^0.9.12"

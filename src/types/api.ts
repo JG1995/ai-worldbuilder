@@ -1,6 +1,8 @@
 // The shapes the Rust core sends and takes. ts-rs generates them from the Rust types into
 // ./generated/ when the Rust tests run (`pnpm bindings`); never edit those files by hand.
 
+export type { Backlink } from "./generated/Backlink";
+export type { Backlinks } from "./generated/Backlinks";
 export type { Comparison } from "./generated/Comparison";
 export type { DiffLine } from "./generated/DiffLine";
 export type { EntryKind } from "./generated/EntryKind";
@@ -19,7 +21,7 @@ export type { Workspace } from "./generated/Workspace";
 export type { WorldOpened } from "./generated/WorldOpened";
 
 /**
- * The watcher's and the world history's events, by the name each is sent under. Each carries the
+ * The watcher's, the world history's and the page index's events, by the name each is sent under. Each carries the
  * session of the opening it belongs to, so events from a world that is no longer open can be told
  * apart. Kept by hand: the core's `WorldEvent` is one untagged enum, and only `WorldEvent::name` in
  * `world/watch.rs` holds the names.
@@ -37,4 +39,8 @@ export type WorldEvents = {
   "world:history-recording": { session: number };
   /** The world's history database was damaged, so it was set aside and a new one started. */
   "world:history-set-aside": { session: number };
+  /** The page index was built, or what it holds changed. */
+  "world:index-changed": { session: number };
+  /** The page index cannot be built, because the world cannot be listed, for the reason given. */
+  "world:index-failed": { session: number; message: string };
 };

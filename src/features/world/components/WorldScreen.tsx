@@ -130,18 +130,24 @@ export function WorldScreen({
     document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
   }
 
-  /** Opens a page from the tree. Replacing the active tab's page closes that page, saving first. */
-  async function openFromTree(path: string, { newTab }: { newTab: boolean }): Promise<void> {
+  /**
+   * Opens a page from the tree, or from a backlink with the cursor at `at`. Replacing the active
+   * tab's page closes that page, saving first.
+   */
+  async function openFromTree(
+    path: string,
+    options: { newTab: boolean; at?: number },
+  ): Promise<void> {
     const { tabs, active } = useWorldStore.getState();
-    if (newTab || active === null || tabs.includes(path)) {
+    if (options.newTab || active === null || tabs.includes(path)) {
       flushActiveBefore(path);
     } else if (!(await confirmSaved(active))) {
       return;
     } else if (useWorldStore.getState().active !== active) {
       // Another tab became active during the save, and it has not been saved: start over for it.
-      return openFromTree(path, { newTab });
+      return openFromTree(path, options);
     }
-    openPage(path, { newTab });
+    openPage(path, options);
   }
 
   /** Opens a page from the tree in the current tab, as a click does, then shows its history. */
@@ -347,6 +353,7 @@ export function WorldScreen({
                 session={session}
                 onClose={(path) => void closeFromPage(path, { save: true })}
                 onDiscard={(path) => void closeFromPage(path, { save: false })}
+                onOpenPage={(path, options) => void openFromTree(path, options)}
               />
             ) : (
               <NoPageOpen onNewPage={() => startNew("page")} />

@@ -114,7 +114,13 @@ pub fn file(app_data: &Path, world: &str) -> PathBuf {
     app_data
         .join("grimoire-data")
         .join("history")
-        .join(format!("{:016x}.sqlite", fnv1a_64(world.as_bytes())))
+        .join(file_name(world))
+}
+
+/// The name of the database file of the world whose folder's path is `world`, `<16 hex
+/// digits>.sqlite`. The world's page index names its cache file the same.
+pub fn file_name(world: &str) -> String {
+    format!("{:016x}.sqlite", fnv1a_64(world.as_bytes()))
 }
 
 /// The 64-bit FNV-1a hash. It is written out here because std's `DefaultHasher` may change between

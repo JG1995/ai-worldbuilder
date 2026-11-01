@@ -10,6 +10,8 @@
 
 mod database;
 
+pub use database::file_name;
+
 use std::collections::HashMap;
 use std::path::Path;
 

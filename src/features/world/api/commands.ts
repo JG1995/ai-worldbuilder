@@ -1,5 +1,6 @@
 import { invokeCommand } from "@/lib/ipc";
 import type {
+  Backlinks,
   Comparison,
   DiffLine,
   HistoryVersion,
@@ -83,6 +84,18 @@ export const historyRestore = (path: string, version: string, pageVersion: strin
  */
 export const historyUndo = (change: string) =>
   invokeCommand<RestoredPage>("history_undo", { change });
+
+/**
+ * The pages that link to the page at `path`, from the world's page index, or whether the index is
+ * still being built or cannot be built.
+ */
+export const backlinksList = (path: string) => invokeCommand<Backlinks>("backlinks_list", { path });
+
+/**
+ * The TanStack Query key prefix of `backlinks_list` results; each adds the session, the page's path
+ * and the index revision it was asked at.
+ */
+export const backlinksKey = ["backlinks_list"] as const;
 
 /** Forgets any location picked before and returns the default one for a new world, to show. */
 export const worldNewLocation = () => invokeCommand<NewLocation>("world_new_location");

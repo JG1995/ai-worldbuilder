@@ -220,6 +220,20 @@ describe("world-level notices", () => {
     expect(screen.getByText(setAside)).toBeInTheDocument();
   });
 
+  it("count the open world's index changes and failures, and ignore an earlier world's", async () => {
+    mockDisk(overview);
+    await openWorld();
+    await screen.findByRole("textbox", { name: "Overview" });
+    const before = useWorldStore.getState().indexRevision;
+
+    await act(() => emit("world:index-changed", { session: 0 }));
+    expect(useWorldStore.getState().indexRevision).toBe(before);
+
+    await act(() => emit("world:index-changed", { session: 1 }));
+    await act(() => emit("world:index-failed", { session: 1, message: "Permission denied." }));
+    await waitFor(() => expect(useWorldStore.getState().indexRevision).toBe(before + 2));
+  });
+
   it("show a world whose folder is gone, with Close world", async () => {
     const calls = mockDisk(overview);
     await openWorld();

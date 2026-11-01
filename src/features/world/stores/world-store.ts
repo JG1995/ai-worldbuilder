@@ -70,6 +70,16 @@ type WorldStore = {
   historyNotRecording: string | null;
   /** The path of the active page while its History view shows in place of its editor. */
   historyPath: string | null;
+  /**
+   * Counts the open world's page index changes, so what is asked of the index is asked again
+   * when it changes.
+   */
+  indexRevision: number;
+  /**
+   * Where the cursor goes in the page at `path`, which is still being read, as an offset into its
+   * text in UTF-16 code units; the page's tab takes it when it creates the page's editor state.
+   */
+  cursorTarget: { path: string; at: number } | null;
   /** Oldest first. */
   toasts: WorldToast[];
   /**
@@ -81,8 +91,15 @@ type WorldStore = {
   opened: (world: WorldOpened) => void;
   closed: () => void;
   setChangingWorld: (changing: boolean) => void;
-  /** Opens a page in the active tab, or in a new tab when asked or when no tab is active. */
-  openPage: (path: string, options: { newTab: boolean }) => void;
+  /**
+   * Opens a page in the active tab, or in a new tab when asked or when no tab is active. With
+   * `at`, its editor takes focus with the cursor at that offset.
+   */
+  openPage: (path: string, options: { newTab: boolean; at?: number }) => void;
+  /** Takes the cursor target of the page at `path`, if it has one, so it applies once. */
+  takeCursorTarget: (path: string) => number | null;
+  /** Counts a change of the page index of the world `session`; ignored once it is not open. */
+  indexChanged: (session: number) => void;
   /** Makes a page the active tab; with `focusEditor`, its editor takes focus when it shows. */
   activate: (path: string, options?: { focusEditor?: boolean }) => void;
   closeTab: (path: string) => void;
@@ -148,6 +165,8 @@ const closedWorld = {
   worldNotices: new Set<WorldNotice>(),
   historyNotRecording: null,
   historyPath: null,
+  indexRevision: 0,
+  cursorTarget: null,
   toasts: [],
 };
 
@@ -185,6 +204,29 @@ function savers(pages: WorldStore["pages"]) {
 
 const loading: PageStatus = { status: "loading" };
 
+/**
+ * Puts the cursor of the open page at `path` at `at`: in its running editor while its tab shows
+ * it, in the editor state its tab will show when it is ready, and otherwise as the cursor target
+ * that the page's editor state is created with.
+ */
+function placeCursor(path: string, at: number) {
+  const page = useWorldStore.getState().pages[path];
+  if (page?.status !== "ready") {
+    useWorldStore.setState({ cursorTarget: { path, at } });
+    return;
+  }
+  const view = page.view?.current;
+  if (view) {
+    view.dispatch({ selection: { anchor: Math.min(at, view.state.doc.length) } });
+    view.focus();
+    return;
+  }
+  const editor = page.editor.update({
+    selection: { anchor: Math.min(at, page.editor.doc.length) },
+  }).state;
+  useWorldStore.setState(({ pages }) => ({ pages: { ...pages, [path]: { ...page, editor } } }));
+}
+
 export const useWorldStore = create<WorldStore>()((set, get) => ({
   ...closedWorld,
   changingWorld: false,
@@ -209,8 +251,9 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
 
   setChangingWorld: (changingWorld) => set({ changingWorld }),
 
-  openPage: (path, { newTab }) => {
+  openPage: (path, { newTab, at }) => {
     const { tabs, active, pages, activate } = get();
+    set({ cursorTarget: null });
     if (!tabs.includes(path)) {
       if (newTab || active === null) {
         set({ tabs: [...tabs, path], pages: { ...pages, [path]: loading } });
@@ -221,8 +264,21 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
         });
       }
     }
-    activate(path);
+    if (at !== undefined) placeCursor(path, at);
+    activate(path, { focusEditor: at !== undefined });
   },
+
+  takeCursorTarget: (path) => {
+    const { cursorTarget } = get();
+    if (cursorTarget?.path !== path) return null;
+    set({ cursorTarget: null });
+    return cursorTarget.at;
+  },
+
+  indexChanged: (session) =>
+    set(({ world, indexRevision }) =>
+      world?.session === session ? { indexRevision: indexRevision + 1 } : {},
+    ),
 
   activate: (path, { focusEditor = false } = {}) =>
     set(({ expanded, createdPage, historyPath }) => ({

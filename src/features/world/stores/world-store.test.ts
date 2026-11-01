@@ -236,6 +236,53 @@ describe("savers", () => {
   });
 });
 
+describe("index changes", () => {
+  it("count for the open world only, and start again with the next world", () => {
+    openWorld();
+
+    store().indexChanged(1);
+    store().indexChanged(0);
+    expect(store().indexRevision).toBe(1);
+
+    openWorld([], null, 2);
+    expect(store().indexRevision).toBe(0);
+  });
+});
+
+describe("opening a page at a place", () => {
+  it("leaves a page being read a cursor target, taken once, that a later opening or world drops", () => {
+    openWorld(["A.md"], "A.md");
+
+    store().openPage("B.md", { newTab: true, at: 42 });
+    expect(store().createdPage).toBe("B.md");
+    expect(store().takeCursorTarget("A.md")).toBeNull();
+    expect(store().takeCursorTarget("B.md")).toBe(42);
+    expect(store().takeCursorTarget("B.md")).toBeNull();
+
+    store().openPage("B.md", { newTab: false, at: 7 });
+    store().openPage("A.md", { newTab: true });
+    expect(store().takeCursorTarget("B.md")).toBeNull();
+
+    store().openPage("B.md", { newTab: false, at: 7 });
+    openWorld(["B.md"], "B.md", 2);
+    expect(store().takeCursorTarget("B.md")).toBeNull();
+  });
+
+  it("moves the cursor of a ready page in another tab, which takes focus when it shows", () => {
+    openWorld(["A.md", "B.md"], "A.md");
+    const { page } = readyPage("# B\n\nSee [[A]].\n");
+    store().setPage(1, "B.md", page);
+
+    store().openPage("B.md", { newTab: false, at: 9 });
+
+    const opened = store().pages["B.md"];
+    expect(opened?.status === "ready" && opened.editor.selection.main.head).toBe(9);
+    expect(store().active).toBe("B.md");
+    expect(store().createdPage).toBe("B.md");
+    expect(store().takeCursorTarget("B.md")).toBeNull();
+  });
+});
+
 describe("the History view", () => {
   it("shows only for the active page, and closes when another page becomes active or the world changes", () => {
     openWorld(["A.md", "B.md"], "A.md");

@@ -1,9 +1,11 @@
 import { isolateHistory } from "@codemirror/commands";
-import { useQueryClient } from "@tanstack/react-query";
+import { EditorView } from "@codemirror/view";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
 import type { HistoryVersion } from "@/types/api";
+import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import {
   createPageState,
@@ -15,6 +17,8 @@ import {
 import { Notice } from "@/ui/Notice";
 import { PageView } from "@/ui/PageView";
 import {
+  backlinksKey,
+  backlinksList,
   historyRestore,
   historyUndo,
   pageRead,
@@ -46,7 +50,36 @@ type PageTabProps = {
   onClose: (path: string) => void;
   /** Closes the tab without saving, dropping the text. */
   onDiscard: (path: string) => void;
+  /** Opens another page with the cursor at `at`, as a backlink row asks. */
+  onOpenPage: (path: string, options: { newTab: boolean; at: number }) => void;
 };
+
+/**
+ * The pages that link to the page at `path`, asked of the index again whenever it changes. The
+ * previous answer stays while the next one is on its way.
+ */
+function PageBacklinks({
+  path,
+  session,
+  onOpenPage,
+}: Pick<PageTabProps, "path" | "session" | "onOpenPage">) {
+  const indexRevision = useWorldStore((store) => store.indexRevision);
+  const backlinks = useQuery({
+    queryKey: [...backlinksKey, session, path, indexRevision],
+    queryFn: () => backlinksList(path),
+    placeholderData: keepPreviousData,
+  });
+  const answer = backlinks.isError
+    ? { state: "failed" as const, message: (backlinks.error as IpcError).message }
+    : backlinks.data;
+  if (!answer) return null;
+  return (
+    <Backlinks
+      backlinks={answer}
+      onOpen={(page, at, { newTab }) => onOpenPage(page, { newTab, at })}
+    />
+  );
+}
 
 /**
  * Passes a command's result on, and shows the missing-world notice when the core answers that the
@@ -133,7 +166,7 @@ export async function undoChange(session: number, path: string, change: string) 
 }
 
 /** One open page: it reads the page when it is loading and shows its editor or its notice. */
-export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
+export function PageTab({ path, session, onClose, onDiscard, onOpenPage }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   // Only a page the user just created, or switched to from another page's editor, takes focus, so
@@ -151,10 +184,19 @@ export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
   // Compare closes with its conflict, so a later conflict shows its notice until Compare is pressed.
   if (comparing && !(ready && page.notice?.kind === "conflict")) setComparing(false);
 
-  // The editor has focused itself as it mounted, which runs before this effect.
+  // The editor has focused itself as it mounted, which runs before this effect. Its cursor, which
+  // may be at a backlink's link, scrolls into view once React has settled the mounted editor.
+  const editorView = ready ? page.view : undefined;
   useEffect(() => {
-    if (ready && focusEditor) createdPageShown();
-  }, [ready, focusEditor, createdPageShown]);
+    if (!focusEditor || !editorView) return;
+    createdPageShown();
+    requestAnimationFrame(() => {
+      const editor = editorView.current;
+      editor?.dispatch({ effects: EditorView.scrollIntoView(editor.state.selection.main.head) });
+    });
+  }, [focusEditor, editorView, createdPageShown]);
+
+  const backlinks = <PageBacklinks path={path} session={session} onOpenPage={onOpenPage} />;
 
   useEffect(() => {
     if (!loading) return;
@@ -168,9 +210,10 @@ export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
             reportingMissingWorld(session, pageWrite(page, text, version, keepMine)),
           notify: (notice) => setNotice(session, path, notice),
         });
+        const at = useWorldStore.getState().takeCursorTarget(path) ?? 0;
         setPage(session, path, {
           status: "ready",
-          editor: createPageState(read.text, title),
+          editor: createPageState(read.text, title, Math.min(at, read.text.length)),
           view: { current: null },
           saver,
           notice: null,
@@ -300,11 +343,16 @@ export function PageTab({ path, session, onClose, onDiscard }: PageTabProps) {
             onUnmount={(editor) => setEditor(session, path, editor)}
           />
         </div>
+        {!hidden && backlinks}
       </PageView>
     );
   }
   if (page?.status === "not_utf8") {
-    return <PageView title={title} notices={<Notice status="warning">{notUtf8Text}</Notice>} />;
+    return (
+      <PageView title={title} notices={<Notice status="warning">{notUtf8Text}</Notice>}>
+        {backlinks}
+      </PageView>
+    );
   }
   if (page?.status === "read_error") {
     return (
