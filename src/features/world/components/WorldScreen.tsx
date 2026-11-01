@@ -187,6 +187,7 @@ export function WorldScreen({
   async function quickOpenCreated(path: string) {
     await queryClient.invalidateQueries({ queryKey: treeKey });
     if (useWorldStore.getState().world?.session !== session) return;
+    setTreeOverlayOpen(false);
     flushActiveBefore(path);
     pageCreated(path);
   }
@@ -195,7 +196,10 @@ export function WorldScreen({
     session,
     activePage: active,
     indexRevision,
-    openPage: (path, { newTab, at }) => void openFromTree(path, { newTab, at, focusEditor: true }),
+    openPage: (path, { newTab, at }) => {
+      setTreeOverlayOpen(false);
+      void openFromTree(path, { newTab, at, focusEditor: true });
+    },
     pageCreated: (path) => void quickOpenCreated(path),
     refreshTree: () => void queryClient.invalidateQueries({ queryKey: treeKey }),
     showWorldMissing: () => showWorldNotice(session, "missing"),
