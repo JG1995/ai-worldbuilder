@@ -2,13 +2,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { LinkedPage, PageMatch, PageMatches } from "@/types/api";
+import type { LinkedPage, PageMatch, PageMatches, TextMatch, TextMatches } from "@/types/api";
 import { QuickOpen, type QuickOpenProps } from "./QuickOpen";
 
 type Handler = (args: Record<string, unknown>) => unknown;
 
-/** Mocks the core with `handlers`, and returns the calls it receives, in order. */
-function mockCore(handlers: Record<string, Handler>) {
+/** No page's text matches. */
+const noText = () => ({ state: "ready", pages: [] });
+
+/**
+ * Mocks the core with `given`, where no page's text matches unless `search_text` is given, and
+ * returns the calls it receives, in order.
+ */
+function mockCore(given: Record<string, Handler>) {
+  const handlers: Record<string, Handler> = { search_text: noText, ...given };
   const calls: { command: string; args: Record<string, unknown> }[] = [];
   // `isTauri()` reads `globalThis.isTauri`, which the real runtime sets and `mockIPC` does not.
   vi.stubGlobal("isTauri", true);
@@ -68,6 +75,12 @@ function renderQuickOpen(props: QuickOpenProps) {
     );
 }
 
+const textMatch = (path: string, at: number): TextMatch => ({
+  path,
+  name: path.replace(/^.*\//, "").replace(/\.md$/, ""),
+  lines: [{ text: `line at ${at}`, at, marks: [{ from: 0, to: 4 }] }],
+});
+
 const input = () => screen.getByRole("combobox", { name: "Search pages" });
 const type = (text: string) => fireEvent.change(input(), { target: { value: text } });
 const createRow = () => screen.queryByRole("option", { name: /^Create page/ });
@@ -84,11 +97,15 @@ describe("QuickOpen", () => {
     expect(await screen.findByRole("option", { name: "mir" })).toBeInTheDocument();
     type(" mir ");
     rerender({ indexRevision: 1 });
-    await waitFor(() => expect(calls).toHaveLength(2));
+    await waitFor(() => expect(calls).toHaveLength(4));
 
-    expect(calls).toEqual([
+    expect(calls.filter((call) => call.command === "search_pages")).toEqual([
       { command: "search_pages", args: { query: "mir" } },
       { command: "search_pages", args: { query: "mir" } },
+    ]);
+    expect(calls.filter((call) => call.command === "search_text")).toEqual([
+      { command: "search_text", args: { query: "mir" } },
+      { command: "search_text", args: { query: "mir" } },
     ]);
     type("");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
@@ -156,6 +173,114 @@ describe("QuickOpen", () => {
       ["openPage", "Mirela.md", { newTab: false }],
       ["close"],
       ["openPage", "Mirela.md", { newTab: true }],
+    ]);
+  });
+
+  it("shows page matches before a delayed text answer, and the text groups once it comes", async () => {
+    let answerText: (matches: TextMatches) => void = () => {};
+    mockCore({
+      search_pages: () => ({ state: "ready", pages: [page("Mirela.md")] }),
+      search_text: () =>
+        new Promise((resolve) => {
+          answerText = resolve;
+        }),
+    });
+    renderQuickOpen(ports().props);
+
+    type("spared");
+    expect(await screen.findByRole("option", { name: "Mirela" })).toBeVisible();
+    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+
+    await act(async () => answerText({ state: "ready", pages: [textMatch("Log/Arrival.md", 9)] }));
+    expect(await screen.findByRole("group", { name: "Arrival, Log" })).toBeVisible();
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Mirela",
+      "line at 9",
+    ]);
+  });
+
+  it("never shows an older query's text answer once a newer query's has come", async () => {
+    const answers: Record<string, (matches: TextMatches) => void> = {};
+    mockCore({
+      search_pages: () => ({ state: "ready", pages: [] }),
+      search_text: ({ query }) =>
+        new Promise((resolve) => {
+          answers[String(query)] = resolve;
+        }),
+    });
+    renderQuickOpen(ports().props);
+
+    type("sp");
+    await waitFor(() => expect(answers.sp).toBeDefined());
+    type("spa");
+    await waitFor(() => expect(answers.spa).toBeDefined());
+    await act(async () => answers.spa({ state: "ready", pages: [textMatch("New.md", 1)] }));
+    await screen.findByRole("group", { name: "New" });
+    await act(async () => {
+      answers.sp({ state: "ready", pages: [textMatch("Old.md", 2)] });
+      // Long enough for an answer that could show to show.
+      await new Promise((settled) => setTimeout(settled, 50));
+    });
+
+    expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual([
+      "New",
+    ]);
+  });
+
+  it("says that nothing matches only once both answers for the query are empty", async () => {
+    let answerText: (matches: TextMatches) => void = () => {};
+    mockCore({
+      search_pages: () => ({ state: "ready", pages: [] }),
+      search_text: () =>
+        new Promise((resolve) => {
+          answerText = resolve;
+        }),
+    });
+    renderQuickOpen(ports().props);
+
+    type("zzzz");
+    expect(await screen.findByRole("option", { name: 'Create page "zzzz"' })).toBeVisible();
+    expect(screen.queryByText('Nothing matches "zzzz".')).not.toBeInTheDocument();
+
+    await act(async () => answerText({ state: "ready", pages: [] }));
+    expect(await screen.findByText('Nothing matches "zzzz".')).toBeVisible();
+  });
+
+  it("keeps the page matches when the text request fails", async () => {
+    mockCore({
+      search_pages: () => ({ state: "ready", pages: [page("Mirela.md")] }),
+      search_text: () => {
+        throw { kind: "io", message: "The page index reported an error." };
+      },
+    });
+    renderQuickOpen(ports().props);
+
+    type("mir");
+
+    expect(await screen.findByRole("option", { name: "Mirela" })).toBeVisible();
+    await act(async () => {});
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.queryByText(/cannot be searched/)).not.toBeInTheDocument();
+  });
+
+  it("closes, then opens a picked line's page at its match, in the current or a new tab", async () => {
+    mockCore({
+      search_pages: () => ({ state: "ready", pages: [] }),
+      search_text: () => ({ state: "ready", pages: [textMatch("Log/Arrival.md", 42)] }),
+    });
+    const { props, asked } = ports();
+    renderQuickOpen(props);
+
+    type("spared");
+    const line = await screen.findByRole("option", { name: "line at 42" });
+    fireEvent.click(line);
+    fireEvent.click(line, { metaKey: true });
+
+    expect(asked).toEqual([
+      ["close"],
+      ["openPage", "Log/Arrival.md", { newTab: false, at: 42 }],
+      ["close"],
+      ["openPage", "Log/Arrival.md", { newTab: true, at: 42 }],
     ]);
   });
 

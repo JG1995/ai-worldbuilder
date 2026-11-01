@@ -1,5 +1,5 @@
 import { invokeCommand } from "@/lib/ipc";
-import type { LinkedPage, PageMatches } from "@/types/api";
+import type { LinkedPage, PageMatches, TextMatches } from "@/types/api";
 
 /**
  * Up to 10 pages whose name, alias or, for a query with a `/`, path from the world's root holds
@@ -14,6 +14,21 @@ export const searchPages = (query: string) => invokeCommand<PageMatches>("search
  * and the index revision it was asked at.
  */
 export const searchPagesKey = ["search_pages"] as const;
+
+/**
+ * Up to 10 pages whose saved text holds every word of `query`, each as the start of one of its
+ * words, ignoring letter case and accents, most relevant first, leaving out the pages
+ * `searchPages` lists for it. Each comes with its first 3 lines that hold a match, the matched
+ * words marked, and where each line's first match starts in the page's text. While the index is
+ * built, the matches among the pages it has read so far. Rejects as `searchPages` does.
+ */
+export const searchText = (query: string) => invokeCommand<TextMatches>("search_text", { query });
+
+/**
+ * The TanStack Query key prefix of `search_text` results; each adds the session, the trimmed query
+ * and the index revision it was asked at.
+ */
+export const searchTextKey = ["search_text"] as const;
 
 /**
  * Creates an empty page for `query`: `{query}.md` in the folder of the page at `from`, or at the

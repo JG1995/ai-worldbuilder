@@ -1,5 +1,6 @@
-//! The `index` area: each world's pages, their aliases and their wiki links, with the page each
-//! link resolves to, kept in a cache database in the app data folder. It knows nothing about Tauri
+//! The `index` area: each world's pages, their aliases, their wiki links, with the page each link
+//! resolves to, and their text for search, kept in a cache database in the app data folder. It
+//! knows nothing about Tauri
 //! or confinement, and it never reads or writes a world folder: the world area gives it paths,
 //! parsed text and file stamps, and a closure for a page's stamp on disk now.
 //!
@@ -14,7 +15,7 @@ mod resolve;
 mod search;
 mod suggest;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::Value};
@@ -25,7 +26,8 @@ pub use database::file;
 pub use parse::{Parsed, parse};
 use resolve::Table;
 pub use resolve::creation_path;
-pub use search::PageMatches;
+pub use search::{PageMatches, TextMatches};
+use search::{TextMatch, TextQuery};
 pub use suggest::LinkSuggestions;
 
 /// How many pages one `apply` should take, and how many links one step of a full pass resolves,
@@ -41,10 +43,11 @@ pub struct Stamp {
     pub modified: i64,
 }
 
-/// What a page holds for the index: its parse, or nothing when it is not UTF-8 text.
+/// What a page holds for the index: its text, as the editor shows it, with its parse, or nothing
+/// when it is not UTF-8 text.
 #[derive(Debug)]
 pub enum Content {
-    Parsed(Parsed),
+    Text { text: String, parsed: Parsed },
     Unreadable,
 }
 
@@ -60,7 +63,7 @@ pub struct Page {
 /// What `apply` did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Applied {
-    /// A stored page, alias or link changed.
+    /// A stored page, alias, link or text changed.
     pub changed: bool,
     /// Pages whose stamp changed since they were read, which were not stored and need reading again.
     pub stale: Vec<String>,
@@ -239,7 +242,7 @@ impl Index {
     /// Stores `pages`, each unless `stamp_now` says its stamp on disk is no longer the one it was
     /// read at. A stored page's own links are resolved at once unless the index is being built. A
     /// new page, a change to a page's aliases, or links stored while it is being built ask for a
-    /// full pass.
+    /// full pass; a change to its text alone does not.
     pub fn apply(
         &mut self,
         pages: &[Page],
@@ -248,13 +251,17 @@ impl Index {
         self.stored(|index| index.apply_now(pages, &mut stamp_now))
     }
 
-    /// Removes the pages at `paths`, with their aliases and links. Removing a stored page asks for
-    /// a full pass. Returns whether any was stored.
+    /// Removes the pages at `paths`, with their aliases, links and text. Removing a stored page asks
+    /// for a full pass. Returns whether any was stored.
     pub fn remove(&mut self, paths: &[String]) -> rusqlite::Result<bool> {
         self.stored(|index| {
             let transaction = index.connection.transaction()?;
             let mut removed = false;
             for path in paths {
+                transaction.execute(
+                    "DELETE FROM texts WHERE rowid = (SELECT id FROM pages WHERE path = ?1)",
+                    [path],
+                )?;
                 removed |= transaction.execute("DELETE FROM pages WHERE path = ?1", [path])? > 0;
                 transaction.execute("DELETE FROM aliases WHERE path = ?1", [path])?;
                 transaction.execute("DELETE FROM links WHERE source = ?1", [path])?;
@@ -343,6 +350,31 @@ impl Index {
         })
     }
 
+    /// The pages whose text holds every word of `query`, each as the start of one of its words,
+    /// other than the pages `search_pages` lists for it, from the pages stored now: while the index
+    /// is being built, those it has read so far.
+    pub fn search_text(&mut self, query: &str) -> rusqlite::Result<TextMatches> {
+        let pages = match TextQuery::new(query) {
+            Some(text_query) => self.stored(|index| {
+                let (pages, aliases) = stored_pages(&index.connection)?;
+                let listed: HashSet<String> = search::page_matches(&pages, &aliases, query)
+                    .into_iter()
+                    .map(|page| page.path)
+                    .collect();
+                text_matches(&index.connection, &text_query, &listed)
+            })?,
+            None => Vec::new(),
+        };
+        // Checked after reading, because a storage failure can have emptied the index.
+        Ok(match &self.state {
+            BuildState::Building => TextMatches::Building { pages },
+            BuildState::Ready => TextMatches::Ready { pages },
+            BuildState::Failed(message) => TextMatches::Failed {
+                message: message.clone(),
+            },
+        })
+    }
+
     /// The pages and aliases for resolving, loaded when they changed since they were last used.
     fn table(&mut self) -> rusqlite::Result<&Table> {
         if self.table.is_none() {
@@ -408,16 +440,21 @@ impl Index {
                 applied.stale.push(page.path.clone());
                 continue;
             }
-            let (aliases, links) = match &page.content {
-                Content::Parsed(parsed) => (parsed.aliases.as_slice(), parsed.links.as_slice()),
-                Content::Unreadable => (&[][..], &[][..]),
+            let (text, aliases, links) = match &page.content {
+                Content::Text { text, parsed } => (
+                    Some(text.as_str()),
+                    parsed.aliases.as_slice(),
+                    parsed.links.as_slice(),
+                ),
+                Content::Unreadable => (None, &[][..], &[][..]),
             };
             let links: Vec<&parse::Link> = links.iter().filter(|link| !link.attachment).collect();
-            let existed = store_page(&transaction, page)?;
+            let (id, existed) = store_page(&transaction, page)?;
+            let text_changed = store_text(&transaction, id, text)?;
             let aliases_changed = store_aliases(&transaction, &page.path, aliases)?;
             let links_changed = stored_links(&transaction, &page.path)? != links_as_stored(&links);
             structural |= !existed || aliases_changed;
-            applied.changed |= !existed || aliases_changed || links_changed;
+            applied.changed |= !existed || aliases_changed || links_changed || text_changed;
             if links_changed {
                 relinked.push((page.path.as_str(), links));
             }
@@ -535,24 +572,50 @@ pub fn page_name(path: &str) -> &str {
     }
 }
 
-/// Stores a page's stamp, and returns whether it was stored before.
-fn store_page(transaction: &Transaction, page: &Page) -> rusqlite::Result<bool> {
+/// Stores a page's stamp, and returns its id, which a page keeps while it is stored, and whether it
+/// was stored before.
+fn store_page(transaction: &Transaction, page: &Page) -> rusqlite::Result<(i64, bool)> {
     let existed = transaction
         .query_row("SELECT 1 FROM pages WHERE path = ?1", [&page.path], |_| {
             Ok(())
         })
         .optional()?
         .is_some();
-    transaction.execute(
-        "INSERT OR REPLACE INTO pages (path, size, modified, readable) VALUES (?1, ?2, ?3, ?4)",
+    let id = transaction.query_row(
+        "INSERT INTO pages (path, size, modified, readable) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (path) DO UPDATE
+         SET size = excluded.size, modified = excluded.modified, readable = excluded.readable
+         RETURNING id",
         params![
             page.path,
             page.stamp.size as i64,
             page.stamp.modified,
-            matches!(page.content, Content::Parsed(_)),
+            matches!(page.content, Content::Text { .. }),
         ],
+        |row| row.get(0),
     )?;
-    Ok(existed)
+    Ok((id, existed))
+}
+
+/// Replaces the text stored for the page `id` when it differs from `text`, which is `None` for a
+/// page that has none, and returns whether it did.
+fn store_text(transaction: &Transaction, id: i64, text: Option<&str>) -> rusqlite::Result<bool> {
+    let stored: Option<String> = transaction
+        .query_row("SELECT text FROM texts WHERE rowid = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if stored.as_deref() == text {
+        return Ok(false);
+    }
+    transaction.execute("DELETE FROM texts WHERE rowid = ?1", [id])?;
+    if let Some(text) = text {
+        transaction.execute(
+            "INSERT INTO texts (rowid, text) VALUES (?1, ?2)",
+            params![id, text],
+        )?;
+    }
+    Ok(true)
 }
 
 /// Replaces a page's aliases when they differ from the stored ones, and returns whether they did.
@@ -676,6 +739,48 @@ fn stored_pages(connection: &Connection) -> rusqlite::Result<Pages> {
     Ok((pages, aliases))
 }
 
+/// The pages, other than those in `listed`, whose stored text `query` selects, most relevant first
+/// by bm25 and ties in the tree's order, with their first matching lines; at most `search::LIMIT`.
+/// A selected page in which `query` finds no line is left out, so each one listed has a line.
+fn text_matches(
+    connection: &Connection,
+    query: &TextQuery,
+    listed: &HashSet<String>,
+) -> rusqlite::Result<Vec<TextMatch>> {
+    let mut statement = connection.prepare(
+        "SELECT pages.path, texts.text, texts.rank FROM texts JOIN pages ON pages.id = texts.rowid
+         WHERE texts MATCH ?1 ORDER BY texts.rank",
+    )?;
+    let mut rows = statement.query([query.expression()])?;
+    let mut kept: Vec<(f64, TextMatch)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let rank: f64 = row.get(2)?;
+        // Past the limit, only pages that tie with the last one kept can still be listed.
+        if kept.len() >= search::LIMIT && kept.last().is_some_and(|(last, _)| rank != *last) {
+            break;
+        }
+        let path: String = row.get(0)?;
+        if listed.contains(&path) {
+            continue;
+        }
+        let lines = query.lines(row.get_ref(1)?.as_str()?);
+        if lines.is_empty() {
+            continue;
+        }
+        let name = page_name(&path).to_owned();
+        kept.push((rank, TextMatch { path, name, lines }));
+    }
+    kept.sort_by(|(a, first), (b, second)| {
+        a.total_cmp(b)
+            .then_with(|| path_order(&first.path, &second.path))
+    });
+    Ok(kept
+        .into_iter()
+        .take(search::LIMIT)
+        .map(|(_, page)| page)
+        .collect())
+}
+
 fn load_table(connection: &Connection) -> rusqlite::Result<Table> {
     let (pages, aliases) = stored_pages(connection)?;
     Ok(Table::new(
@@ -686,8 +791,8 @@ fn load_table(connection: &Connection) -> rusqlite::Result<Table> {
     ))
 }
 
-/// Copies the rows of the cache `file` of the world at `world` into `memory`, when the file can
-/// still be read and holds format 1 for that world.
+/// Copies the rows of the cache `file` of the world at `world` into `memory`, with the pages' ids
+/// and texts, when the file can still be read and holds this format for that world.
 fn copy_stored(file: &Path, world: &str, memory: &mut Connection) -> rusqlite::Result<()> {
     let stored = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let format: i64 = stored.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -696,14 +801,25 @@ fn copy_stored(file: &Path, world: &str, memory: &mut Connection) -> rusqlite::R
         return Err(rusqlite::Error::InvalidQuery);
     }
     let transaction = memory.transaction()?;
-    for (table, columns) in [("pages", 4), ("aliases", 3), ("links", 11)] {
-        let placeholders = vec!["?"; columns].join(", ");
-        let mut insert =
-            transaction.prepare(&format!("INSERT INTO {table} VALUES ({placeholders})"))?;
-        let mut select = stored.prepare(&format!("SELECT * FROM {table}"))?;
+    // A full-text table's `SELECT *` leaves out its rowid, so every table names its columns.
+    for (table, columns) in [
+        ("pages", "id, path, size, modified, readable"),
+        ("aliases", "path, alias, key"),
+        (
+            "links",
+            "source, ordinal, start, finish, target, key, heading, block, embed, line, resolved",
+        ),
+        ("texts", "rowid, text"),
+    ] {
+        let count = columns.split(',').count();
+        let placeholders = vec!["?"; count].join(", ");
+        let mut insert = transaction.prepare(&format!(
+            "INSERT INTO {table} ({columns}) VALUES ({placeholders})"
+        ))?;
+        let mut select = stored.prepare(&format!("SELECT {columns} FROM {table}"))?;
         let mut rows = select.query([])?;
         while let Some(row) = rows.next()? {
-            let values = (0..columns)
+            let values = (0..count)
                 .map(|column| row.get::<_, Value>(column))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             insert.execute(rusqlite::params_from_iter(values))?;
@@ -727,7 +843,10 @@ mod tests {
         Page {
             path: path.to_owned(),
             stamp: stamp(text.len() as u64),
-            content: Content::Parsed(parse(text, page_name(path))),
+            content: Content::Text {
+                text: text.to_owned(),
+                parsed: parse(text, page_name(path)),
+            },
         }
     }
 
@@ -955,6 +1074,302 @@ mod tests {
         assert_eq!(linking(&mut index, "Mirela.md"), ["Kesh Tor.md"]);
     }
 
+    /// The id the page at `path` is stored under.
+    fn id_of(index: &Index, path: &str) -> i64 {
+        index
+            .connection
+            .query_row("SELECT id FROM pages WHERE path = ?1", [path], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// The ids of the stored text rows, in order.
+    fn text_rows(index: &Index) -> Vec<i64> {
+        index
+            .connection
+            .prepare("SELECT rowid FROM texts ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn text_matched(index: &mut Index, query: &str) -> Vec<search::TextMatch> {
+        match index.search_text(query).unwrap() {
+            TextMatches::Ready { pages } => pages,
+            other => panic!("not ready: {other:?}"),
+        }
+    }
+
+    fn text_paths(index: &mut Index, query: &str) -> Vec<String> {
+        text_matched(index, query)
+            .into_iter()
+            .map(|page| page.path)
+            .collect()
+    }
+
+    fn unreadable(path: &str) -> Page {
+        Page {
+            path: path.to_owned(),
+            stamp: stamp(3),
+            content: Content::Unreadable,
+        }
+    }
+
+    #[test]
+    fn a_re_stored_page_keeps_its_id_and_one_text_row_and_a_text_change_needs_no_pass() {
+        let mut index = ready(&[page("Kesh Tor.md", "spared"), page("Mirela.md", "")]);
+        let id = id_of(&index, "Kesh Tor.md");
+
+        let unchanged = apply(&mut index, &[page("Kesh Tor.md", "spared")]);
+        let changed = apply(&mut index, &[page("Kesh Tor.md", "the captain")]);
+
+        assert!(!unchanged.changed);
+        assert!(changed.changed);
+        assert!(!index.needs_worker());
+        assert_eq!(id_of(&index, "Kesh Tor.md"), id);
+        assert_eq!(text_rows(&index), [id, id_of(&index, "Mirela.md")]);
+        assert!(text_paths(&mut index, "spared").is_empty());
+        assert_eq!(text_paths(&mut index, "captain"), ["Kesh Tor.md"]);
+    }
+
+    #[test]
+    fn a_removed_page_and_a_page_that_is_no_longer_utf8_leave_no_text_row() {
+        let mut index = ready(&[
+            page("Kesh Tor.md", "spared"),
+            page("Mirela.md", "spared"),
+            page("Zeta.md", ""),
+        ]);
+        let zeta = id_of(&index, "Zeta.md");
+
+        index.remove(&["Kesh Tor.md".to_owned()]).unwrap();
+        let applied = apply(&mut index, &[unreadable("Mirela.md")]);
+
+        assert!(applied.changed);
+        assert_eq!(text_rows(&index), [zeta]);
+        assert!(text_paths(&mut index, "spared").is_empty());
+    }
+
+    /// The pages of the text-matching table, in a world where a match on a name, alias or path
+    /// leaves a page out of the text matches.
+    fn text_world() -> Vec<Page> {
+        vec![
+            page(
+                "Log/Arrival.md",
+                "---\nfaction: Tidewardens\n---\nThe harbourmaster's ledger was wet.\n\
+                 Mirëla spared the captain.\n",
+            ),
+            page(
+                "Log/Departure.md",
+                "The captain left at dawn.\nNobody spared a thought.\n",
+            ),
+            page("Log/Decomposed.md", "Mire\u{308}la wrote this.\n"),
+            page("Log/Devanagari.md", "पुरानी किताब यहाँ है\n"),
+            page("Log/Syntax.md", "AND OR NOT NEAR are plain words here.\n"),
+            page("Captain.md", "The captain's own page.\n"),
+            unreadable("Log/Binary.md"),
+        ]
+    }
+
+    /// Each row: what it shows, the query, and the pages it lists, in path order.
+    #[test]
+    fn text_matches_need_every_word_as_a_word_start_ignore_case_and_accents_and_take_no_syntax() {
+        let app_data = tempfile::tempdir().unwrap();
+        let file = file(app_data.path(), WORLD);
+        let mut index = Index::open(Some(&file), WORLD);
+        apply(&mut index, &text_world());
+        full_passes(&mut index);
+        index.set_state(BuildState::Ready);
+        let both = ["Log/Arrival.md", "Log/Departure.md"];
+        let captains = ["Log/Arrival.md", "Log/Departure.md", "Captain.md"];
+        let mirelas = ["Log/Arrival.md", "Log/Decomposed.md"];
+        let cases: [(&str, &str, &[&str]); 34] = [
+            ("every word, on any line", "spared captain", &both),
+            (
+                "every word is required",
+                "spared dawn",
+                &["Log/Departure.md"],
+            ),
+            ("the start of a word", "harbour", &["Log/Arrival.md"]),
+            ("not the middle of a word", "master", &[]),
+            ("letter case ignored", "HARBOURMASTER", &["Log/Arrival.md"]),
+            ("accents ignored", "mirela", &mirelas),
+            ("a precomposed query", "Mirëla", &mirelas),
+            ("a decomposed query", "Mire\u{308}la", &mirelas),
+            (
+                "words in the frontmatter",
+                "tidewardens",
+                &["Log/Arrival.md"],
+            ),
+            ("a word with vowel signs", "किताब", &["Log/Devanagari.md"]),
+            ("the start of such a word", "कि", &["Log/Devanagari.md"]),
+            ("a page match is left out", "captain", &both),
+            ("a quote", "\"captain", &captains),
+            ("a quoted word", "\"captain\"", &captains),
+            ("a star", "captain*", &captains),
+            ("parentheses", "(captain)", &captains),
+            ("a colon", "text:captain", &[]),
+            ("a column filter", "captain:", &captains),
+            ("a minus", "-captain", &captains),
+            ("a caret", "^captain", &captains),
+            ("a plus", "spared+captain", &both),
+            ("AND", "AND", &["Log/Syntax.md"]),
+            ("OR", "OR", &["Log/Syntax.md"]),
+            ("NOT", "NOT", &["Log/Syntax.md"]),
+            ("NEAR", "NEAR", &["Log/Syntax.md"]),
+            ("NEAR as a call", "NEAR(captain spared)", &[]),
+            ("keywords between words", "spared OR captain", &[]),
+            (
+                "keywords in lowercase",
+                "and or not near",
+                &["Log/Syntax.md"],
+            ),
+            ("no words", "???", &[]),
+            ("only syntax", "\" * ( ) : - ^ \"\"", &[]),
+            ("a lone combining mark", "\u{308}", &[]),
+            ("a lone vowel sign", "\u{93f}", &[]),
+            ("a letter SQLite takes for a symbol", "Ⓐ", &[]),
+            ("a page that is not UTF-8 has no text", "binary", &[]),
+        ];
+
+        for (case, query, expected) in cases {
+            let mut found = text_paths(&mut index, query);
+            found.sort_by(|a, b| path_order(a, b));
+            assert_eq!(found, expected, "{case}: {query:?}");
+            assert!(
+                index.is_stored(),
+                "{case}: {query:?} moved the index to memory"
+            );
+        }
+        let PageMatches::Ready { pages } = index.search_pages("binary").unwrap() else {
+            panic!("not ready");
+        };
+        assert_eq!(pages[0].path, "Log/Binary.md");
+    }
+
+    /// The text that `marks` cover in `line`.
+    fn marked(line: &search::TextLine) -> Vec<String> {
+        let units: Vec<u16> = line.text.encode_utf16().collect();
+        line.marks
+            .iter()
+            .map(|mark| String::from_utf16(&units[mark.from as usize..mark.to as usize]).unwrap())
+            .collect()
+    }
+
+    /// The text of `text` from the UTF-16 position `at`, as the editor counts.
+    fn from_at(text: &str, at: u64) -> String {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        String::from_utf16(&units[at as usize..]).unwrap()
+    }
+
+    #[test]
+    fn a_text_match_lists_its_first_three_matching_lines_with_every_matched_word_marked() {
+        let text = "spared one\nnothing here\nspared two, Spared-again\nthree sparedness\nfour \
+                    spared\n";
+        let mut index = ready(&[page("Log/Many.md", text)]);
+
+        let pages = text_matched(&mut index, "spared");
+
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].name, "Many");
+        let lines = &pages[0].lines;
+        let shown: Vec<(&str, Vec<String>)> = lines
+            .iter()
+            .map(|line| (line.text.as_str(), marked(line)))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("spared one", vec!["spared".to_owned()]),
+                (
+                    "spared two, Spared-again",
+                    vec!["spared".to_owned(), "Spared".to_owned()]
+                ),
+                ("three sparedness", vec!["sparedness".to_owned()]),
+            ]
+        );
+        let ats: Vec<u64> = lines.iter().map(|line| line.at).collect();
+        assert_eq!(ats, [0, 24, 55]);
+        assert!(from_at(text, lines[2].at).starts_with("sparedness"));
+    }
+
+    #[test]
+    fn a_long_line_is_cut_around_its_first_match_and_positions_count_utf16_code_units() {
+        let long = format!("{}spared {}", "a ".repeat(50), "b ".repeat(150));
+        let text = format!("🐉 first\n{long}\n🐉 Mire\u{308}la 🐉 spared\n");
+        let mut index = ready(&[page("Log/Long.md", &text)]);
+
+        let lines = &text_matched(&mut index, "spared mirela")[0].lines;
+
+        // 100 characters come before the match on the long line: the cut keeps 60 of them.
+        let cut = &lines[0];
+        assert_eq!(cut.text.chars().count(), 1 + 160 + 1);
+        assert!(cut.text.starts_with(&format!("…{}spared", "a ".repeat(30))));
+        assert!(cut.text.ends_with('…'));
+        assert_eq!(marked(cut), ["spared"]);
+        assert_eq!(cut.marks[0].from, 61);
+        assert_eq!(cut.at, 9 + 100);
+        // A decomposed accent stays in its word's mark, and 🐉 counts two units.
+        let short = &lines[1];
+        assert_eq!(short.text, "🐉 Mire\u{308}la 🐉 spared");
+        assert_eq!(marked(short), ["Mire\u{308}la", "spared"]);
+        assert_eq!(
+            short.marks,
+            [
+                search::Mark { from: 3, to: 10 },
+                search::Mark { from: 14, to: 20 }
+            ]
+        );
+        for line in lines {
+            let first = &marked(line)[0];
+            assert!(from_at(&text, line.at).starts_with(first.as_str()));
+        }
+    }
+
+    #[test]
+    fn text_matches_rank_by_relevance_with_ties_in_tree_order_and_list_at_most_ten() {
+        let mut pages = vec![
+            page("Short.md", "spared spared spared"),
+            page(
+                "Long.md",
+                "spared once among many other words of a long and winding page",
+            ),
+        ];
+        pages.extend((1..=12).map(|number| page(&format!("Same/{number}.md"), "spared it")));
+        let mut index = ready(&pages);
+
+        let found = text_paths(&mut index, "spared");
+
+        assert_eq!(found.len(), 10);
+        assert_eq!(found[0], "Short.md");
+        let same: Vec<String> = (1..=9).map(|number| format!("Same/{number}.md")).collect();
+        assert_eq!(found[1..], same);
+    }
+
+    #[test]
+    fn text_matches_say_while_the_index_is_built_and_when_it_failed() {
+        let mut index = Index::open(None, WORLD);
+        apply(&mut index, &[page("Kesh Tor.md", "spared")]);
+
+        assert_eq!(
+            serde_json::to_value(index.search_text("spared").unwrap()).unwrap(),
+            serde_json::json!({ "state": "building", "pages": [{
+                "path": "Kesh Tor.md",
+                "name": "Kesh Tor",
+                "lines": [{ "text": "spared", "at": 0, "marks": [{ "from": 0, "to": 6 }] }],
+            }]})
+        );
+        index.set_state(BuildState::Failed("Permission denied.".to_owned()));
+        assert_eq!(
+            index.search_text("spared").unwrap(),
+            TextMatches::Failed {
+                message: "Permission denied.".to_owned()
+            }
+        );
+    }
+
     fn stored_index(app_data: &Path) -> (Index, PathBuf) {
         let file = file(app_data, WORLD);
         let mut index = Index::open(Some(&file), WORLD);
@@ -985,6 +1400,7 @@ mod tests {
         assert!(applied.changed);
         assert!(!index.is_stored());
         assert_eq!(linking(&mut index, "Mirela.md"), ["Kesh Tor.md", "Zeta.md"]);
+        assert_eq!(text_paths(&mut index, "mirela"), ["Kesh Tor.md", "Zeta.md"]);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useState } from "react";
-import type { Backlinks as BacklinksState, PageMatch, TreeEntry } from "@/types/api";
+import type { Backlinks as BacklinksState, PageMatch, TextMatch, TreeEntry } from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
@@ -386,12 +386,80 @@ const sampleMatches: PageMatch[] = [
   },
 ];
 
+const sampleTexts: TextMatch[] = [
+  {
+    path: "Session notes/Session 4.md",
+    name: "Session 4",
+    lines: [
+      {
+        text: "Mirela's ship reaches the mirror lake at dusk.",
+        at: 14,
+        marks: [
+          { from: 0, to: 6 },
+          { from: 26, to: 32 },
+        ],
+      },
+      {
+        text: "…the crew swears Mirëla never sleeps.",
+        at: 412,
+        marks: [{ from: 17, to: 23 }],
+      },
+    ],
+  },
+  {
+    path: "Lore/Tides.md",
+    name: "Tides",
+    lines: [
+      {
+        text: "The tide pulls the boats past Mirkwater.",
+        at: 39,
+        marks: [{ from: 30, to: 39 }],
+      },
+    ],
+  },
+];
+
 /** Each state of the search dialog: its button's label, the query, the results, a create error. */
 const searchStates: [string, string, SearchResults, string?][] = [
   [
-    "Page matches, one by an alias",
+    "Page matches, then text matches",
     "mir",
-    { state: "ready", query: "mir", pages: sampleMatches, create: false },
+    {
+      state: "ready",
+      query: "mir",
+      pages: sampleMatches,
+      create: false,
+      texts: sampleTexts,
+      pending: false,
+    },
+  ],
+  [
+    "The Create row above text matches",
+    "Saltmere harbour office",
+    {
+      state: "ready",
+      query: "Saltmere harbour office",
+      pages: [],
+      create: true,
+      texts: [
+        {
+          path: "Session notes/Session 3.md",
+          name: "Session 3",
+          lines: [
+            {
+              text: "The party asks at the Saltmere harbour office for passage.",
+              at: 25,
+              marks: [
+                { from: 22, to: 30 },
+                { from: 31, to: 38 },
+                { from: 39, to: 45 },
+              ],
+            },
+          ],
+        },
+      ],
+      pending: false,
+    },
   ],
   [
     "A path match",
@@ -409,17 +477,33 @@ const searchStates: [string, string, SearchResults, string?][] = [
         },
       ],
       create: false,
+      texts: [],
+      pending: false,
     },
   ],
   [
-    "No page matches: the Create row",
+    "Nothing matches, with the Create row",
     "Saltmere harbour office",
-    { state: "ready", query: "Saltmere harbour office", pages: [], create: true },
+    {
+      state: "ready",
+      query: "Saltmere harbour office",
+      pages: [],
+      create: true,
+      texts: [],
+      pending: false,
+    },
   ],
   [
     "Indexing, with the pages read so far",
     "mir",
-    { state: "building", query: "mir", pages: sampleMatches.slice(0, 1), create: false },
+    {
+      state: "building",
+      query: "mir",
+      pages: sampleMatches.slice(0, 1),
+      create: false,
+      texts: sampleTexts.slice(1),
+      pending: false,
+    },
   ],
   [
     "Pages cannot be searched",
@@ -429,7 +513,14 @@ const searchStates: [string, string, SearchResults, string?][] = [
   [
     "A refused creation",
     "Session 3: Harbour",
-    { state: "ready", query: "Session 3: Harbour", pages: [], create: true },
+    {
+      state: "ready",
+      query: "Session 3: Harbour",
+      pages: [],
+      create: true,
+      texts: [],
+      pending: false,
+    },
     'Names cannot contain / \\ : * ? " < > | or control characters, which some systems forbid.',
   ],
 ];
@@ -446,7 +537,12 @@ function SampleSearch({ state, onEvent }: { state: number; onEvent: (event: stri
       results={results}
       createError={createError}
       onPick={(pick, { newTab }) => {
-        const what = pick.kind === "page" ? `Open ${pick.path}` : `Create "${results.query}"`;
+        const what =
+          pick.kind === "page"
+            ? `Open ${pick.path}`
+            : pick.kind === "line"
+              ? `Open ${pick.path} at ${pick.at}`
+              : `Create "${results.query}"`;
         onEvent(`${what}${newTab ? " in a new tab" : ""} (${label})`);
       }}
       onClose={() => onEvent("Close")}

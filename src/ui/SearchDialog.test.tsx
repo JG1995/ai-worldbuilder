@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
-import type { PageMatch } from "@/types/api";
+import type { PageMatch, TextMatch } from "@/types/api";
 import { SearchDialog, type SearchResults } from "./SearchDialog";
 
 const mirela: PageMatch = {
@@ -26,12 +26,34 @@ const saltmere: PageMatch = {
   mark: { from: 3, to: 8 },
 };
 
-const ready = (query: string, pages: PageMatch[], create = false): SearchResults => ({
-  state: "ready",
-  query,
-  pages,
-  create,
-});
+const arrival: TextMatch = {
+  path: "Log/Arrival.md",
+  name: "Arrival",
+  lines: [
+    {
+      text: "Mirëla spared the captain, then spared him again.",
+      at: 40,
+      marks: [
+        { from: 7, to: 13 },
+        { from: 32, to: 38 },
+      ],
+    },
+    { text: "…the spared crew", at: 120, marks: [{ from: 5, to: 11 }] },
+  ],
+};
+const departure: TextMatch = {
+  path: "Departure.md",
+  name: "Departure",
+  lines: [{ text: "Nobody spared a thought.", at: 7, marks: [{ from: 7, to: 13 }] }],
+};
+
+const ready = (
+  query: string,
+  pages: PageMatch[],
+  create = false,
+  texts: TextMatch[] = [],
+  pending = false,
+): SearchResults => ({ state: "ready", query, pages, create, texts, pending });
 
 type Props = ComponentProps<typeof SearchDialog>;
 
@@ -70,7 +92,7 @@ describe("SearchDialog", () => {
       "true",
     );
     expect(box).toHaveAttribute("aria-expanded", "true");
-    expect(box).toHaveAttribute("placeholder", "Search pages by name or alias");
+    expect(box).toHaveAttribute("placeholder", "Search pages by name, alias or text");
     const listbox = screen.getByRole("listbox");
     expect(box).toHaveAttribute("aria-controls", listbox.id);
     expect(box).toHaveAttribute("aria-activedescendant", options()[0].id);
@@ -108,7 +130,14 @@ describe("SearchDialog", () => {
 
   it("says while the world is indexed, when pages cannot be searched, and why a page was not created", () => {
     const { rerender } = renderDialog({
-      results: { state: "building", query: "mir", pages: [mirela], create: false },
+      results: {
+        state: "building",
+        query: "mir",
+        pages: [mirela],
+        create: false,
+        texts: [],
+        pending: false,
+      },
     });
     expect(screen.getByText("Indexing world…")).toBeInTheDocument();
     expect(options()).toHaveLength(1);
@@ -129,6 +158,76 @@ describe("SearchDialog", () => {
     rerender({ results: ready("CON", [], true), createError: "Windows reserves CON." });
     expect(input()).toHaveAccessibleDescription("Windows reserves CON.");
     expect(input()).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("lists each text match after the page matches as a group named by its page, with every matched word underlined", () => {
+    renderDialog({ results: ready("spared", [mirela], false, [arrival, departure]) });
+
+    const [first, second] = screen.getAllByRole("group");
+    expect(first).toHaveAccessibleName("Arrival, Log");
+    expect(second).toHaveAccessibleName("Departure");
+    // The labels are not rows: the page match, then the three lines.
+    expect(options().map((option) => option.textContent)).toEqual([
+      "MirëlaPeople",
+      "Mirëla spared the captain, then spared him again.",
+      "…the spared crew",
+      "Nobody spared a thought.",
+    ]);
+    expect(within(first).getAllByRole("option")).toHaveLength(2);
+    expect(first).toHaveTextContent(/^ArrivalLog/);
+    const marks = within(options()[1]).getAllByText("spared");
+    expect(marks).toHaveLength(2);
+    for (const mark of marks) expect(mark).toHaveClass("underline");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "1 page matches. 2 pages match by their text.",
+    );
+  });
+
+  it("moves through page rows and lines alike, and picks a line with where its match is", () => {
+    const { props } = renderDialog({
+      results: ready("spared", [mirela], false, [arrival, departure]),
+    });
+
+    press("ArrowDown");
+    press("ArrowDown");
+    expect(selected()).toHaveTextContent("…the spared crew");
+    press("Enter");
+    press("ArrowDown");
+    press("ArrowDown");
+    expect(selected()).toHaveTextContent("Nobody spared a thought.");
+    press("Enter", { ctrlKey: true });
+    fireEvent.click(options()[1]);
+
+    expect(vi.mocked(props.onPick).mock.calls).toEqual([
+      [{ kind: "line", path: arrival.path, at: 120 }, { newTab: false }],
+      [{ kind: "line", path: departure.path, at: 7 }, { newTab: true }],
+      [{ kind: "line", path: arrival.path, at: 40 }, { newTab: false }],
+    ]);
+  });
+
+  it("keeps the selected line for a new answer to the same query while it is still listed", () => {
+    const { rerender } = renderDialog({ results: ready("spared", [], true, [arrival]) });
+    press("ArrowDown");
+    press("ArrowDown");
+    expect(selected()).toHaveTextContent("…the spared crew");
+
+    rerender({ results: ready("spared", [], true, [departure, arrival]) });
+    expect(selected()).toHaveTextContent("…the spared crew");
+
+    rerender({ results: ready("spared", [], true, [departure]) });
+    expect(selected()).toHaveTextContent('Create page "spared"');
+  });
+
+  it("says that nothing matches only once no text answer is on its way", () => {
+    const { rerender } = renderDialog({
+      query: "Harbor",
+      results: ready("Harbor", [], true, [], true),
+    });
+    expect(screen.queryByText('Nothing matches "Harbor".')).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/^Create page "Harbor".$/);
+
+    rerender({ results: ready("Harbor", [], true, [], false) });
+    expect(screen.getByText('Nothing matches "Harbor".')).toBeInTheDocument();
   });
 
   it("lists nothing and says nothing for an empty query", () => {

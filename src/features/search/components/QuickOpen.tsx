@@ -2,7 +2,13 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import type { IpcError } from "@/lib/ipc";
 import { SearchDialog, type SearchPick, type SearchResults } from "@/ui/SearchDialog";
-import { searchCreate, searchPages, searchPagesKey } from "../api/commands";
+import {
+  searchCreate,
+  searchPages,
+  searchPagesKey,
+  searchText,
+  searchTextKey,
+} from "../api/commands";
 
 export type QuickOpenProps = {
   /** The open world's session, which keys its results. */
@@ -32,8 +38,9 @@ function createErrorOf({ kind, message }: IpcError) {
 
 /**
  * Quick open: the search dialog for the open world's pages. It asks the core for the pages that
- * match the query, offers to create the page when none matches by name, alias or path once the
- * index is built, and opens what the user picks through its props.
+ * match the query by name, alias or path, and apart from them for the pages whose text matches it,
+ * offers to create the page when none matches by name, alias or path once the index is built, and
+ * opens what the user picks through its props.
  */
 export function QuickOpen({
   session,
@@ -50,27 +57,50 @@ export function QuickOpen({
   const creating = useRef(false);
   const trimmed = query.trim();
   // Each answer carries the query it is for, so an answer kept while the next one loads is shown
-  // for its own query; an answer to an older query never replaces the current one's.
+  // for its own query; an answer to an older query never replaces the current one's. The two
+  // queries run apart, so page matches never wait for text matches.
   const answer = useQuery({
     queryKey: [...searchPagesKey, session, trimmed, indexRevision],
     queryFn: async () => ({ query: trimmed, matches: await searchPages(trimmed) }),
     enabled: trimmed !== "",
     placeholderData: keepPreviousData,
   });
+  const textAnswer = useQuery({
+    queryKey: [...searchTextKey, session, trimmed, indexRevision],
+    queryFn: async () => ({ query: trimmed, matches: await searchText(trimmed) }),
+    enabled: trimmed !== "",
+    placeholderData: keepPreviousData,
+  });
   const shown = trimmed === "" ? undefined : answer.data;
+  // A failed text request adds no text matches and takes away no page match, which can still open.
+  const textFailed = textAnswer.isError;
+  const shownText = trimmed === "" || textFailed ? undefined : textAnswer.data;
   const failure = trimmed !== "" && answer.isError ? (answer.error as IpcError) : null;
 
   const results = useMemo((): SearchResults | null => {
     if (failure) return { state: "failed", query: trimmed, message: failure.message };
-    if (!shown) return null;
-    const { query: answered, matches } = shown;
-    if (matches.state === "failed") {
-      return { state: "failed", query: answered, message: matches.message };
+    if (!shown && !shownText) return null;
+    for (const given of [shown, shownText]) {
+      if (given?.matches.state === "failed") {
+        return { state: "failed", query: given.query, message: given.matches.message };
+      }
     }
+    const pages = shown && "pages" in shown.matches ? shown.matches.pages : [];
+    const texts = shownText && "pages" in shownText.matches ? shownText.matches.pages : [];
+    const building = [shown, shownText].some((given) => given?.matches.state === "building");
     // Only an answer for the query as typed now, from a built index, offers to create the page.
-    const create = matches.state === "ready" && matches.pages.length === 0 && answered === trimmed;
-    return { state: matches.state, query: answered, pages: matches.pages, create };
-  }, [failure, shown, trimmed]);
+    const create =
+      shown?.matches.state === "ready" && pages.length === 0 && shown.query === trimmed;
+    return {
+      state: building ? "building" : "ready",
+      query: shown?.query ?? shownText?.query ?? trimmed,
+      pages,
+      create,
+      texts,
+      // Nothing matches only once both answers for the query as typed now are in.
+      pending: shown?.query !== trimmed || (!textFailed && shownText?.query !== trimmed),
+    };
+  }, [failure, shown, shownText, textFailed, trimmed]);
 
   async function create() {
     if (creating.current) return;
@@ -104,7 +134,8 @@ export function QuickOpen({
       return;
     }
     close();
-    openPage(picked.path, { newTab });
+    if (picked.kind === "line") openPage(picked.path, { newTab, at: picked.at });
+    else openPage(picked.path, { newTab });
   }
 
   return (

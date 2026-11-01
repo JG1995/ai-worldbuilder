@@ -18,6 +18,9 @@ import type {
   PageVersion,
   RecentWorld,
   RestoredPage,
+  TextLine,
+  TextMatch,
+  TextMatches,
   TreeEntry,
   VersionKind,
   WorldOpened,
@@ -503,6 +506,45 @@ function pageMatchesOf(open: PreviewWorld, query: string): PageMatches {
   return { state: "ready", pages };
 }
 
+/** A text's words, as the core splits them: a letter or digit, then letters, digits and marks. */
+const wordPattern = /[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu;
+
+/**
+ * Up to 10 pages, other than the query's page matches, whose text holds every word of the query as
+ * the start of a word, with letter case and accents ignored, each with its first 3 lines that hold
+ * a match. An approximation for the preview: the core ranks the pages by relevance and cuts long
+ * lines around their first match; here they come in path order, and lines are whole.
+ */
+function textMatchesOf(open: PreviewWorld, query: string): TextMatches {
+  const wanted = [...query.matchAll(wordPattern)]
+    .map(([word]) => fold(word).folded)
+    .filter(Boolean);
+  if (wanted.length === 0) return { state: "ready", pages: [] };
+  const matched = pageMatchesOf(open, query);
+  const listed = new Set(matched.state === "failed" ? [] : matched.pages.map((page) => page.path));
+  const starts = (word: string) => wanted.some((start) => fold(word).folded.startsWith(start));
+  const pages: TextMatch[] = [];
+  for (const path of Object.keys(open.pages).sort(byName.compare)) {
+    const text = open.pages[path];
+    if (typeof text !== "string" || listed.has(path)) continue;
+    const words = [...text.matchAll(wordPattern)].map(([word]) => fold(word).folded);
+    if (!wanted.every((start) => words.some((word) => word.startsWith(start)))) continue;
+    const lines: TextLine[] = [];
+    let lineAt = 0;
+    for (const line of text.split("\n")) {
+      const marks = [...line.matchAll(wordPattern)]
+        .filter(([word]) => starts(word))
+        .map((found) => ({ from: found.index, to: found.index + found[0].length }));
+      if (marks.length > 0 && lines.length < 3) {
+        lines.push({ text: line, at: lineAt + marks[0].from, marks });
+      }
+      lineAt += line.length + 1;
+    }
+    pages.push({ path, name: nameOf(path), lines });
+  }
+  return { state: "ready", pages: pages.slice(0, 10) };
+}
+
 /**
  * Creates an empty page for a query typed in search like the core: `{query}.md` in the folder of
  * `from`, or at the query's path from the top level. An approximation for the preview: it joins no
@@ -733,6 +775,10 @@ export const previewFixtures: Record<string, unknown> = {
   search_pages: (args?: InvokeArgs) => {
     const { query } = args as { query: string };
     return pageMatchesOf(requireWorld(), query);
+  },
+  search_text: (args?: InvokeArgs) => {
+    const { query } = args as { query: string };
+    return textMatchesOf(requireWorld(), query);
   },
   search_create: (args?: InvokeArgs) => createSearched(args),
 };

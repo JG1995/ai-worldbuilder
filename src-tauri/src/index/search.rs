@@ -1,16 +1,22 @@
 //! Search over the stored pages: their names, aliases and paths matched with letter case and
-//! accents ignored, ranked as link suggestions are, with each match's range in the original text.
+//! accents ignored, ranked as link suggestions are, with each match's range in the original text;
+//! and the words of a text query, the full-text expression that selects the pages holding them,
+//! and the lines of a page that show where they are.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use serde::Serialize;
 use unicode_normalization::char::{decompose_canonical, is_combining_mark};
 
 use super::page_name;
+use super::parse::cut_line;
 use crate::order::{natural_order, path_order};
 
 /// How many pages one answer lists at most.
-const LIMIT: usize = 10;
+pub const LIMIT: usize = 10;
+/// How many lines a text match shows at most.
+const LINES: usize = 3;
 
 /// A range of a text, in UTF-16 code units of that text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,6 +61,44 @@ pub enum PageMatches {
     Building { pages: Vec<PageMatch> },
     /// The best matches, best first.
     Ready { pages: Vec<PageMatch> },
+    /// The world could not be listed, for the reason given.
+    Failed { message: String },
+}
+
+/// A line of a page that holds a match of a text query's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct TextLine {
+    /// The line as written, cut around its first match with `…` where cut.
+    pub text: String,
+    /// Where the line's first match starts in the page's text, in UTF-16 code units.
+    pub at: u64,
+    /// The matched words, in `text`.
+    pub marks: Vec<Mark>,
+}
+
+/// A page whose text holds every word of the query, each as the start of one of its words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct TextMatch {
+    /// The page's path, relative to the world.
+    pub path: String,
+    /// Its name, without `.md`.
+    pub name: String,
+    /// Its first lines that hold a match, in page order.
+    pub lines: Vec<TextLine>,
+}
+
+/// The pages whose text matches a query, other than its page matches, from the pages the index
+/// holds now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TextMatches {
+    /// The index is still being built: the matches among the pages it has read so far.
+    Building { pages: Vec<TextMatch> },
+    /// The most relevant matches, best first.
+    Ready { pages: Vec<TextMatch> },
     /// The world could not be listed, for the reason given.
     Failed { message: String },
 }
@@ -195,6 +239,117 @@ fn without_extension(path: &str) -> &str {
         Some(extension) if extension.eq_ignore_ascii_case(".md") => &path[..cut],
         _ => path,
     }
+}
+
+/// The words of `text`: runs that start with a letter or digit and go on through letters, digits
+/// and combining marks, as SQLite's `unicode61` tokenizer keeps the marks it folds inside a token.
+/// Every other character separates words. Byte ranges of `text`.
+fn words(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut chars = text.char_indices().peekable();
+    std::iter::from_fn(move || {
+        let (start, _) = chars.find(|(_, c)| c.is_alphanumeric())?;
+        let mut end = text.len();
+        while let Some(&(at, c)) = chars.peek() {
+            if !(c.is_alphanumeric() || is_combining_mark(c)) {
+                end = at;
+                break;
+            }
+            chars.next();
+        }
+        Some(start..end)
+    })
+}
+
+/// A text query: its words, which a page's text must each hold as the start of a word, with
+/// letter case and accents ignored.
+pub struct TextQuery {
+    expression: String,
+    /// Each word's search form.
+    folded: Vec<String>,
+}
+
+impl TextQuery {
+    /// The text query in `query`, or `None` when it has no words, which matches no page.
+    pub fn new(query: &str) -> Option<Self> {
+        let mut expression = Vec::new();
+        let mut folded = Vec::new();
+        for range in words(query) {
+            let word = &query[range];
+            let form = fold(word).text;
+            // A word of marks alone, such as a lone vowel sign, would be the start of every word.
+            if !form.is_empty() {
+                // Letters, digits and marks only, so the quotes hold no syntax and no quote.
+                expression.push(format!("\"{word}\"*"));
+                folded.push(form);
+            }
+        }
+        (!folded.is_empty()).then(|| Self {
+            expression: expression.join(" "),
+            folded,
+        })
+    }
+
+    /// The full-text expression that selects the pages holding every word as the start of a
+    /// token: each word quoted, as a prefix. SQLite's tokenizer splits and folds the words as it
+    /// split and folded the pages' text.
+    pub fn expression(&self) -> &str {
+        &self.expression
+    }
+
+    /// The first lines of `text`, a page's text, that hold a word starting with one of the query's
+    /// words, with every such word marked. A page whose words SQLite split differently can have
+    /// none.
+    pub fn lines(&self, text: &str) -> Vec<TextLine> {
+        let mut found = Vec::new();
+        let mut line_at = 0;
+        for line in text.split('\n') {
+            let marks: Vec<Range<usize>> = words(line)
+                .filter(|word| {
+                    let form = fold(&line[word.clone()]).text;
+                    self.folded
+                        .iter()
+                        .any(|query| form.starts_with(query.as_str()))
+                })
+                .collect();
+            if let Some(first) = marks.first() {
+                found.push(text_line(line, line_at, first.start, &marks));
+                if found.len() == LINES {
+                    break;
+                }
+            }
+            line_at += utf16_len(line) + 1;
+        }
+        found
+    }
+}
+
+/// The line `line`, which starts at `line_at` in its page's text, cut around its first mark at the
+/// byte `first`, with `marks` (byte ranges of `line`) shifted into the cut line and clipped to it.
+fn text_line(line: &str, line_at: u64, first: usize, marks: &[Range<usize>]) -> TextLine {
+    let cut = cut_line(line, first);
+    let kept = &cut.kept;
+    // The `…` in front of a line cut before its start is one code unit.
+    let shift = u64::from(kept.start > 0);
+    let at = |byte: usize| shift + utf16_len(&line[kept.start..byte]);
+    let marks = marks
+        .iter()
+        .filter_map(|mark| {
+            let (from, to) = (mark.start.max(kept.start), mark.end.min(kept.end));
+            (from < to).then(|| Mark {
+                from: at(from),
+                to: at(to),
+            })
+        })
+        .collect();
+    TextLine {
+        text: cut.text,
+        at: line_at + utf16_len(&line[..first]),
+        marks,
+    }
+}
+
+fn utf16_len(text: &str) -> u64 {
+    text.encode_utf16().count() as u64
 }
 
 #[cfg(test)]
