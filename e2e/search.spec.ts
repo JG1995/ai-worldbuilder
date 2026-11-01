@@ -174,3 +174,27 @@ test("below 960px, a pick from the dialog opened in the tree overlay closes the 
   await expect(overlay).toBeHidden();
   await expect(page.getByRole("textbox", { name: "Saltmere harbour office" })).toBeFocused();
 });
+
+test("Up and Down keep the selected row in view in a list that scrolls", async ({ page }) => {
+  await openOverview(page);
+  await page.setViewportSize({ width: 720, height: 480 });
+
+  await page.keyboard.press("Control+o");
+  await page.keyboard.type("the");
+  const options = page.getByRole("option");
+  await expect(options).toHaveCount(14);
+  for (let pressed = 0; pressed < 13; pressed++) await page.keyboard.press("ArrowDown");
+
+  // Not quite 1, since rows can end at a fraction of a pixel; a row half out of view fails.
+  const shown = { ratio: 0.95 };
+  const selected = page.getByRole("option", { selected: true });
+  await expect(selected).toHaveText("The Guild's lens finally works.");
+  await expect(selected).toBeInViewport(shown);
+  // Back up to the first line of a group above the list's top: its label comes into view with it.
+  for (let pressed = 0; pressed < 8; pressed++) await page.keyboard.press("ArrowUp");
+  await expect(selected).toHaveText("title: The Glass Steppe");
+  await expect(selected.locator("xpath=preceding-sibling::*[1]")).toBeInViewport(shown);
+  for (let pressed = 0; pressed < 5; pressed++) await page.keyboard.press("ArrowUp");
+  await expect(options.first()).toHaveAttribute("aria-selected", "true");
+  await expect(options.first()).toBeInViewport(shown);
+});
