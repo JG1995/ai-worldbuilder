@@ -8,7 +8,7 @@
 //! metadata and would lose the links between two thematic breaks.
 
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
-use yaml_rust2::parser::{Event as YamlEvent, EventReceiver, Parser as YamlParser};
+use yaml_rust2::parser::{Event as YamlEvent, Parser as YamlParser};
 use yaml_rust2::{Yaml, YamlLoader};
 
 /// The extensions of the image, audio, video and PDF files a link can name.
@@ -82,25 +82,37 @@ fn frontmatter(text: &str) -> Option<(&str, usize)> {
     None
 }
 
-/// Notices YAML aliases (`*name`), which the YAML loader expands by copying, so that a few lines of
-/// nested aliases could build a document too large for memory.
-struct AliasFinder(bool);
+/// The deepest nesting of lists and maps that frontmatter may have. The YAML loader builds and drops
+/// its tree recursively, so deeper nesting could overflow the thread's stack and abort the app.
+const MAX_YAML_DEPTH: usize = 64;
 
-impl EventReceiver for AliasFinder {
-    fn on_event(&mut self, event: YamlEvent) {
-        self.0 |= matches!(event, YamlEvent::Alias(_));
+/// Whether the YAML loader can safely load `frontmatter`: it is valid YAML, nests at most
+/// `MAX_YAML_DEPTH` deep, and has no YAML aliases (`*name`), which the loader expands by copying,
+/// so that a few lines of nested aliases could build a document too large for memory. Reads the
+/// parser's events one by one, because its own `load` recurses for each level of nesting.
+fn loadable(frontmatter: &str) -> bool {
+    let mut parser = YamlParser::new_from_str(frontmatter);
+    let mut depth = 0;
+    loop {
+        match parser.next_token() {
+            Ok((YamlEvent::StreamEnd, _)) => return true,
+            Ok((YamlEvent::SequenceStart(..) | YamlEvent::MappingStart(..), _)) => {
+                depth += 1;
+                if depth > MAX_YAML_DEPTH {
+                    return false;
+                }
+            }
+            Ok((YamlEvent::SequenceEnd | YamlEvent::MappingEnd, _)) => depth -= 1,
+            Ok((YamlEvent::Alias(_), _)) | Err(_) => return false,
+            Ok(_) => {}
+        }
     }
 }
 
 /// The page's aliases from the frontmatter's `aliases` property, a list of strings or one string.
-/// Frontmatter that uses YAML aliases gives none, because page text is untrusted.
+/// Frontmatter that `loadable` refuses gives none, because page text is untrusted.
 fn aliases(frontmatter: &str, name: &str) -> Vec<String> {
-    let mut finder = AliasFinder(false);
-    if YamlParser::new_from_str(frontmatter)
-        .load(&mut finder, true)
-        .is_err()
-        || finder.0
-    {
+    if !loadable(frontmatter) {
         return Vec::new();
     }
     let Ok(documents) = YamlLoader::load_from_str(frontmatter) else {
@@ -474,5 +486,16 @@ mod tests {
 
         assert!(aliases_of(&format!("aliases: [Mira]\n{nested}")).is_empty());
         assert!(aliases_of("name: &n Mira\naliases: [*n]").is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_yaml_gives_no_aliases_and_still_leaves_the_links() {
+        let nested = "- ".repeat(100_000);
+        let text = format!("---\naliases: [Mira]\nx:\n  {nested}y\n---\nSee [[Mirela]].\n");
+
+        let parsed = parse(&text, "Kesh Tor");
+
+        assert!(parsed.aliases.is_empty());
+        assert_eq!(covered(&text), ["[[Mirela]]"]);
     }
 }
