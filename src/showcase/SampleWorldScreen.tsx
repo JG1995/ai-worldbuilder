@@ -238,6 +238,8 @@ export function SampleWorldScreen() {
                 nameInput={nameInput}
                 onOpen={(path, { newTab }) => openPage(path, newTab)}
                 onToggle={toggleFolder}
+                onSearch={() => pushToast("Sample only: search opens in a world")}
+                searchShortcut="Ctrl+O"
                 onNewPage={() => setNameInput({ kind: "page", folder: null })}
                 onNewFolder={() => pushToast("Sample only: folders are not created here")}
                 onNameSubmit={submitName}

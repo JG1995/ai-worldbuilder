@@ -1,11 +1,12 @@
 import { type ReactNode, useEffect, useState } from "react";
-import type { Backlinks as BacklinksState, TreeEntry } from "@/types/api";
+import type { Backlinks as BacklinksState, PageMatch, TreeEntry } from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
 import { Notice } from "@/ui/Notice";
 import { NoPageOpen, PageView } from "@/ui/PageView";
+import { SearchDialog, type SearchResults } from "@/ui/SearchDialog";
 import { WelcomeScreen } from "@/ui/WelcomeScreen";
 import {
   largeSampleWorld,
@@ -361,9 +362,131 @@ function BacklinksSection() {
   );
 }
 
+const sampleMatches: PageMatch[] = [
+  {
+    path: "Places/Mirror lake.md",
+    name: "Mirror lake",
+    field: "name",
+    alias: null,
+    mark: { from: 0, to: 3 },
+  },
+  {
+    path: "People/Captain Mirela.md",
+    name: "Captain Mirela",
+    field: "name",
+    alias: null,
+    mark: { from: 8, to: 11 },
+  },
+  {
+    path: "Kesh Tor.md",
+    name: "Kesh Tor",
+    field: "alias",
+    alias: "Old Mire",
+    mark: { from: 4, to: 7 },
+  },
+];
+
+/** Each state of the search dialog: its button's label, the query, the results, a create error. */
+const searchStates: [string, string, SearchResults, string?][] = [
+  [
+    "Page matches, one by an alias",
+    "mir",
+    { state: "ready", query: "mir", pages: sampleMatches, create: false },
+  ],
+  [
+    "A path match",
+    "places/sal",
+    {
+      state: "ready",
+      query: "places/sal",
+      pages: [
+        {
+          path: "Places/Saltmere.md",
+          name: "Saltmere",
+          field: "path",
+          alias: null,
+          mark: { from: 0, to: 10 },
+        },
+      ],
+      create: false,
+    },
+  ],
+  [
+    "No page matches: the Create row",
+    "Saltmere harbour office",
+    { state: "ready", query: "Saltmere harbour office", pages: [], create: true },
+  ],
+  [
+    "Indexing, with the pages read so far",
+    "mir",
+    { state: "building", query: "mir", pages: sampleMatches.slice(0, 1), create: false },
+  ],
+  [
+    "Pages cannot be searched",
+    "mir",
+    { state: "failed", query: "mir", message: "The world's folder cannot be read." },
+  ],
+  [
+    "A refused creation",
+    "Session 3: Harbour",
+    { state: "ready", query: "Session 3: Harbour", pages: [], create: true },
+    'Names cannot contain / \\ : * ? " < > | or control characters, which some systems forbid.',
+  ],
+];
+
+/** The dialog in one sample state; typing changes the query but not the sample results. */
+function SampleSearch({ state, onEvent }: { state: number; onEvent: (event: string) => void }) {
+  const [label, initialQuery, results, createError] = searchStates[state];
+  const [query, setQuery] = useState(initialQuery);
+
+  return (
+    <SearchDialog
+      query={query}
+      onQueryChange={setQuery}
+      results={results}
+      createError={createError}
+      onPick={(pick, { newTab }) => {
+        const what = pick.kind === "page" ? `Open ${pick.path}` : `Create "${results.query}"`;
+        onEvent(`${what}${newTab ? " in a new tab" : ""} (${label})`);
+      }}
+      onClose={() => onEvent("Close")}
+    />
+  );
+}
+
+function SearchSection() {
+  const [event, setEvent] = useState("none yet");
+  const [shown, setShown] = useState<number | null>(null);
+
+  return (
+    <Section
+      title="Search (quick open)"
+      use="Ctrl+O or Ctrl+K in a world. Each button opens the dialog in one state; picking a row, Escape or a click outside closes it."
+    >
+      <div className="flex flex-wrap gap-2">
+        {searchStates.map(([label], index) => (
+          <Button key={label} variant="secondary" onClick={() => setShown(index)}>
+            {label}
+          </Button>
+        ))}
+      </div>
+      <EventLine event={event} />
+      {shown !== null && (
+        <SampleSearch
+          state={shown}
+          onEvent={(next) => {
+            setEvent(next);
+            setShown(null);
+          }}
+        />
+      )}
+    </Section>
+  );
+}
+
 /**
- * The content surfaces: welcome screen, file tree, page view and backlinks. Their demos keep local
- * state.
+ * The content surfaces: welcome screen, file tree, page view, backlinks and search. Their demos
+ * keep local state.
  */
 export function SurfaceSections() {
   return (
@@ -372,6 +495,7 @@ export function SurfaceSections() {
       <FileTreeSection />
       <PageViewSection />
       <BacklinksSection />
+      <SearchSection />
     </>
   );
 }

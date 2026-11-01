@@ -104,13 +104,14 @@ test("crossing 960px turns the open overlay into the side pane, and narrowing cl
   await openSampleWorld(page, 720);
   await toggle(page).click();
   await page.keyboard.press("F6");
-  const newPage = treePane(page).getByRole("button", { name: "New page" });
-  await expect(newPage).toBeFocused();
+  // The first control in the tree's header.
+  const search = treePane(page).getByRole("button", { name: "Search pages" });
+  await expect(search).toBeFocused();
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(toggle(page)).toHaveCount(0);
   await expect(treePane(page)).toBeVisible();
-  await expect(newPage).toBeFocused();
+  await expect(search).toBeFocused();
 
   await page.setViewportSize({ width: 720, height: 800 });
   await expect(treePane(page)).toBeHidden();

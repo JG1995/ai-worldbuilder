@@ -40,6 +40,9 @@ type FileTreeProps = {
   nameInput?: TreeNameInput;
   onOpen: (path: string, options: { newTab: boolean }) => void;
   onToggle: (path: string, expanded: boolean) => void;
+  /** Shows a Search button first in the header, with `searchShortcut` in its tooltip. */
+  onSearch?: () => void;
+  searchShortcut?: string;
   onNewPage: () => void;
   onNewFolder: () => void;
   /** Shown in the New page and New folder buttons' tooltips. */
@@ -241,6 +244,8 @@ export function FileTree({
   nameInput,
   onOpen,
   onToggle,
+  onSearch,
+  searchShortcut,
   onNewPage,
   onNewFolder,
   newPageShortcut,
@@ -403,6 +408,14 @@ export function FileTree({
     <div className="flex h-full min-h-0 flex-col bg-window">
       <div className="flex h-tab-strip shrink-0 items-center gap-1 pr-1 pl-3">
         <h2 className="world-name min-w-0 flex-1 truncate text-text">{worldName}</h2>
+        {onSearch && (
+          <IconButton
+            icon="search"
+            label="Search pages"
+            shortcut={searchShortcut}
+            onClick={onSearch}
+          />
+        )}
         <IconButton
           icon="note_add"
           label="New page"

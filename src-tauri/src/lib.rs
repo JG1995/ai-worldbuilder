@@ -79,6 +79,8 @@ pub fn run() {
             world::links_in,
             world::link_create,
             world::link_suggest,
+            world::search_pages,
+            world::search_create,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

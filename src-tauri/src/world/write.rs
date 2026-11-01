@@ -588,14 +588,16 @@ fn create_restored(
     Ok(())
 }
 
-/// What following an unresolved link created, or the page it found instead.
+/// What following an unresolved link, or picking Create in search, created, or the page it found
+/// instead.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum LinkedPage {
     /// An empty page was created at `path`.
     Created { path: String },
-    /// A page that the link names is at `path` already.
+    /// A page that the link names, or a page at the searched path in some letter case, is at `path`
+    /// already.
     Existing { path: String },
     /// The page index is still being built, so nothing was created.
     NotReady,
@@ -614,19 +616,55 @@ pub fn create_linked_page(
     recorder: &mut Recorder,
     relative: &str,
 ) -> Result<LinkedPage, AppError> {
-    create_linked_page_with(root, own, recorder, relative, create_restored_folder)
+    create_linked_page_with(
+        root,
+        own,
+        recorder,
+        relative,
+        create_restored_folder,
+        exists,
+    )
+}
+
+/// Creates an empty page for the query typed in search at `relative` inside `root`, the path
+/// `index::creation_path` gives for the query's untrusted text, as `create_linked_page` creates a
+/// page for a link, with two differences: a name that confinement's check refuses for a reason
+/// other than a leading dot is refused with the naming rule it breaks, so it gets that rule's
+/// message on every platform, and a folder on the path that is a file is a path the page cannot be
+/// created at, not a clash.
+pub fn create_searched_page(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    relative: &str,
+) -> Result<LinkedPage, AppError> {
+    for segment in relative.split('/') {
+        if !paths::is_allowed_name(segment) && !segment.starts_with('.') {
+            names::check_name(segment)?;
+        }
+    }
+    create_linked_page_with(
+        root,
+        own,
+        recorder,
+        relative,
+        create_restored_folder,
+        outside_world,
+    )
 }
 
 /// `create_linked_page`, with the step that creates one missing folder given by the caller, so
-/// tests can make it fail after an earlier folder was created.
+/// tests can make it fail after an earlier folder was created, and the error for a folder on the
+/// path that is something other than a folder.
 fn create_linked_page_with(
     root: &Path,
     own: &mut OwnWrites,
     recorder: &mut Recorder,
     relative: &str,
     mut create_folder: impl FnMut(&Path) -> Result<(), AppError>,
+    not_a_folder: fn() -> AppError,
 ) -> Result<LinkedPage, AppError> {
-    let relative = match on_disk(root, relative)? {
+    let relative = match on_disk(root, relative, not_a_folder)? {
         OnDisk::Page(path) => return Ok(LinkedPage::Existing { path }),
         OnDisk::Missing(path) => path,
     };
@@ -678,7 +716,7 @@ fn create_linked_page_with(
             );
         }
         // A page that appeared at the path since it was looked for, in any letter case, opens.
-        return match on_disk(root, &relative) {
+        return match on_disk(root, &relative, not_a_folder) {
             Ok(OnDisk::Page(path)) if error.kind == ErrorKind::Exists => {
                 Ok(LinkedPage::Existing { path })
             }
@@ -701,9 +739,14 @@ enum OnDisk {
 /// from `root`. Every segment must pass confinement's check. An existing folder gives its name on
 /// disk, ignoring letter case and preferring an exact match; one that is a link or junction, or a
 /// name the file system finds but its listing does not show (a Windows short name such as
-/// `OBSIDI~1`), is refused as an invalid path. A missing folder or page must pass the naming rules,
-/// and another entry where a folder or the page would go is the clash New folder and New page give.
-fn on_disk(root: &Path, relative: &str) -> Result<OnDisk, AppError> {
+/// `OBSIDI~1`), is refused as an invalid path, and any other entry where a folder would go with
+/// `not_a_folder`. A missing folder or page must pass the naming rules, and another entry where the
+/// page would go is the clash New page gives.
+fn on_disk(
+    root: &Path,
+    relative: &str,
+    not_a_folder: fn() -> AppError,
+) -> Result<OnDisk, AppError> {
     let segments: Vec<&str> = relative.split('/').collect();
     let Some((page_name, folders)) = segments.split_last() else {
         return Err(outside_world());
@@ -731,7 +774,7 @@ fn on_disk(root: &Path, relative: &str) -> Result<OnDisk, AppError> {
                 mapped.push(name);
             }
             Some((_, kind)) if kind.is_symlink() => return Err(outside_world()),
-            Some(_) => return Err(exists()),
+            Some(_) => return Err(not_a_folder()),
             None => {
                 names::check_name(folder)?;
                 if let Some(parent) = &parent {
@@ -2186,6 +2229,7 @@ mod tests {
                         Err(AppError::new(ErrorKind::Io, "The disk is full."))
                     }
                 },
+                exists,
             )
             .unwrap_err();
 

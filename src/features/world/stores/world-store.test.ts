@@ -310,6 +310,40 @@ describe("opening a page at a place", () => {
   });
 });
 
+describe("opening a page with its editor focused", () => {
+  it("focuses a page being read, or in another tab, as it shows, keeping an open page's cursor", () => {
+    openWorld(["A.md", "B.md"], "A.md");
+    const { page } = readyPage("# B\n\nText.\n");
+    const cursor = page.status === "ready" ? page.editor.selection.main.head : null;
+    store().setPage(1, "B.md", page);
+
+    store().openPage("C.md", { newTab: true, focusEditor: true });
+    expect(store().createdPage).toBe("C.md");
+
+    store().openPage("B.md", { newTab: false, focusEditor: true });
+    expect(store().active).toBe("B.md");
+    expect(store().createdPage).toBe("B.md");
+    const opened = store().pages["B.md"];
+    expect(opened?.status === "ready" && opened.editor.selection.main.head).toBe(cursor);
+    expect(store().takeCursorTarget("B.md")).toBeNull();
+  });
+
+  it("focuses the running editor of the page its tab already shows", () => {
+    openWorld(["A.md"], "A.md");
+    const { page } = readyPage("# A\n");
+    const focus = vi.fn();
+    const view = { current: { focus } } as unknown as NonNullable<
+      Extract<PageStatus, { status: "ready" }>["view"]
+    >;
+    store().setPage(1, "A.md", { ...page, view } as PageStatus);
+
+    store().openPage("A.md", { newTab: false, focusEditor: true });
+
+    expect(focus).toHaveBeenCalledOnce();
+    expect(store().active).toBe("A.md");
+  });
+});
+
 describe("the History view", () => {
   it("shows only for the active page, and closes when another page becomes active or the world changes", () => {
     openWorld(["A.md", "B.md"], "A.md");

@@ -232,15 +232,28 @@ describe("FileTree", () => {
     expect(input).toHaveFocus();
   });
 
-  it("shows the caller's shortcuts in the New page and New folder tooltips", () => {
-    renderTree({ newPageShortcut: "Ctrl+N", newFolderShortcut: "Ctrl+Shift+N" });
+  it("shows the caller's shortcuts in the Search, New page and New folder tooltips", () => {
+    const { onSearch } = renderTree({
+      onSearch: vi.fn(),
+      searchShortcut: "Ctrl+O",
+      newPageShortcut: "Ctrl+N",
+      newFolderShortcut: "Ctrl+Shift+N",
+    });
 
+    const search = screen.getByRole("button", { name: "Search pages" });
+    expect(search).toHaveAccessibleDescription("Search pages Ctrl+O");
     expect(screen.getByRole("button", { name: "New page" })).toHaveAccessibleDescription(
       "New page Ctrl+N",
     );
     expect(screen.getByRole("button", { name: "New folder" })).toHaveAccessibleDescription(
       "New folder Ctrl+Shift+N",
     );
+    // Search comes first in the header, before New page.
+    expect(search.compareDocumentPosition(screen.getByRole("button", { name: "New page" }))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    fireEvent.click(search);
+    expect(onSearch).toHaveBeenCalledOnce();
   });
 
   it("shows the empty state with a New page button when the world has no entries", () => {

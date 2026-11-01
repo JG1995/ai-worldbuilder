@@ -11,6 +11,7 @@
 mod database;
 mod parse;
 mod resolve;
+mod search;
 mod suggest;
 
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ pub use database::file;
 pub use parse::{Parsed, parse};
 use resolve::Table;
 pub use resolve::creation_path;
+pub use search::PageMatches;
 pub use suggest::LinkSuggestions;
 
 /// How many pages one `apply` should take, and how many links one step of a full pass resolves,
@@ -323,6 +325,21 @@ impl Index {
             // Checked after reading, because a storage failure can have emptied the index.
             indexing: self.state == BuildState::Building,
             items: suggest::suggest(&pages, &aliases, from, query),
+        })
+    }
+
+    /// The pages whose name, alias or path matches `query`, from the pages stored now: while the
+    /// index is being built, those it has read so far.
+    pub fn search_pages(&mut self, query: &str) -> rusqlite::Result<PageMatches> {
+        let (pages, aliases) = self.stored(|index| stored_pages(&index.connection))?;
+        let pages = search::page_matches(&pages, &aliases, query);
+        // Checked after reading, because a storage failure can have emptied the index.
+        Ok(match &self.state {
+            BuildState::Building => PageMatches::Building { pages },
+            BuildState::Ready => PageMatches::Ready { pages },
+            BuildState::Failed(message) => PageMatches::Failed {
+                message: message.clone(),
+            },
         })
     }
 

@@ -12,6 +12,8 @@ import type {
   HistoryVersion,
   LinkedPage,
   LinkSuggestions,
+  PageMatch,
+  PageMatches,
   PageText,
   PageVersion,
   RecentWorld,
@@ -51,7 +53,7 @@ Use \`inline code\` for dice notation such as \`3d6\`.
 `,
   "Characters/Brother Ketil.md": "# Brother Ketil\n\nKeeper of the shrine at [[Kesh Tor]].\n",
   "Characters/Captain Orlaith Venn.md":
-    "# Captain Orlaith Venn\n\nLeads the last caravan that still crosses in summer, guided by [[Brother Ketil|the old monk]].\n",
+    "---\naliases: [Venn, The caravan master]\n---\n# Captain Orlaith Venn\n\nLeads the last caravan that still crosses in summer, guided by [[Brother Ketil|the old monk]].\n",
   "Characters/The salt merchant.md":
     "# The salt merchant\n\nNobody knows her name. She buys salt in [[Saltmere]].\n",
   "Factions/Glasswrights' Guild.md": "# Glasswrights' Guild\n\nThey mine the steppe for lenses.\n",
@@ -418,6 +420,118 @@ function suggestionsOf(open: PreviewWorld, from: string, query: string): LinkSug
   return { indexing: false, items };
 }
 
+/**
+ * A page's aliases from an `aliases:` line in its frontmatter, as a list in brackets or one name:
+ * enough for the preview's pages. The core reads the frontmatter as YAML.
+ */
+function aliasesOf(page: SamplePage) {
+  if (typeof page !== "string" || !page.startsWith("---\n")) return [];
+  const frontmatter = page.slice(4, page.indexOf("\n---", 3));
+  const found = /^aliases:[ \t]*(.*)$/m.exec(frontmatter);
+  if (!found) return [];
+  const list = found[1].trim().replace(/^\[(.*)\]$/, "$1");
+  return list
+    .split(",")
+    .map((alias) => alias.trim())
+    .filter(Boolean);
+}
+
+/**
+ * A text in lowercase without accents, with the range in the original text, in UTF-16 code units,
+ * of the character each of its code units came from, as the core folds names.
+ */
+function fold(text: string) {
+  let folded = "";
+  const from: number[] = [];
+  const to: number[] = [];
+  let at = 0;
+  for (const character of text) {
+    const end = at + character.length;
+    const parts = character.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+    if (parts === "" && to.length > 0) to[to.length - 1] = end;
+    for (const unit of parts.split("")) {
+      folded += unit;
+      from.push(at);
+      to.push(end);
+    }
+    at = end;
+  }
+  return { folded, from, to };
+}
+
+/** Where the folded `query` first appears in `text`: whether at its start, and the mark. */
+function matchIn(text: string, query: string) {
+  const { folded, from, to } = fold(text);
+  const at = folded.indexOf(query);
+  if (at === -1) return null;
+  return { start: at === 0, mark: { from: from[at], to: to[at + query.length - 1] } };
+}
+
+/**
+ * Up to 10 pages whose name or alias, or for a query with a `/` whose path without `.md`, holds
+ * the query, with letter case and accents ignored: a match at the start first, then a name or path
+ * before an alias, then path order. An approximation of the core's ranking for the preview.
+ */
+function pageMatchesOf(open: PreviewWorld, query: string): PageMatches {
+  const trimmed = query.trim();
+  const wanted = fold(trimmed).folded;
+  if (wanted === "") return { state: "ready", pages: [] };
+  type Ranked = PageMatch & { start: boolean };
+  const rank = (match: Ranked) => Number(!match.start) * 2 + Number(match.field === "alias");
+  const matches: Ranked[] = [];
+  for (const [path, text] of Object.entries(open.pages)) {
+    const name = nameOf(path);
+    const candidates: Ranked[] = [];
+    const add = (found: ReturnType<typeof matchIn>, rest: Omit<PageMatch, "mark">) => {
+      if (found) candidates.push({ ...rest, mark: found.mark, start: found.start });
+    };
+    if (trimmed.includes("/")) {
+      add(matchIn(path.replace(/\.md$/i, ""), wanted), { path, name, field: "path", alias: null });
+    } else {
+      add(matchIn(name, wanted), { path, name, field: "name", alias: null });
+      for (const alias of aliasesOf(text)) {
+        add(matchIn(alias, wanted), { path, name, field: "alias", alias });
+      }
+    }
+    const best = candidates.sort((a, b) => rank(a) - rank(b))[0];
+    if (best) matches.push(best);
+  }
+  const pages = matches
+    .sort((a, b) => rank(a) - rank(b) || byName.compare(a.path, b.path))
+    .slice(0, 10)
+    .map(({ start: _start, ...match }) => match);
+  return { state: "ready", pages };
+}
+
+/**
+ * Creates an empty page for a query typed in search like the core: `{query}.md` in the folder of
+ * `from`, or at the query's path from the top level. An approximation for the preview: it joins no
+ * `./` or `../`, refuses every hidden segment, and finds an existing page by its whole path in any
+ * letter case.
+ */
+function createSearched(args: InvokeArgs | undefined): LinkedPage {
+  const open = requireWorld();
+  const { from, query } = args as { from: string | null; query: string };
+  const trimmed = query.trim().replace(/\.md$/i, "");
+  const segments = trimmed.split("/");
+  const name = segments.pop() ?? "";
+  const folders = trimmed.includes("/") ? segments : (from?.split("/").slice(0, -1) ?? []);
+  const folder = folders.join("/");
+  const path = folder ? `${folder}/${name}.md` : `${name}.md`;
+  const existing = Object.keys(open.pages).find(
+    (candidate) => candidate.toLowerCase() === path.toLowerCase(),
+  );
+  if (existing) return { state: "existing", path: existing };
+  if ([...folders, name].some((segment) => segment.startsWith("."))) {
+    throw { kind: "invalid_path", message: "The link does not point to a page in this world." };
+  }
+  for (const segment of [...folders, name]) checkName(segment);
+  checkFree(namesIn(open, folder || null), `${name}.md`);
+  open.pages[path] = "";
+  record(open, path, "new_page", null, "");
+  return { state: "created", path };
+}
+
 /** Creates an empty page for an unresolved link like the core, without `./` and `../` paths. */
 function createLinked(args: InvokeArgs | undefined): LinkedPage {
   const open = requireWorld();
@@ -616,4 +730,9 @@ export const previewFixtures: Record<string, unknown> = {
     const { from, query } = args as { from: string; query: string };
     return suggestionsOf(requireWorld(), from, query);
   },
+  search_pages: (args?: InvokeArgs) => {
+    const { query } = args as { query: string };
+    return pageMatchesOf(requireWorld(), query);
+  },
+  search_create: (args?: InvokeArgs) => createSearched(args),
 };
