@@ -11,13 +11,15 @@ type WorldLayoutProps = WorldScreenParts & {
 
 /**
  * The open world's screen: its parts in the shell, with the assistant once the settings have loaded
- * with AI on; a new world session starts it anew. While AI is on, Ctrl/Cmd+Shift+A opens and
- * closes the pane, as its button does.
+ * with AI on; a new world session starts it anew, with the conversation it showed last. While AI is
+ * on, Ctrl/Cmd+Shift+A opens and closes the pane, as its button does.
  */
 export function WorldLayout({
   onOpenSettings,
   changingWorld,
   assistantPorts,
+  assistantConversation,
+  onAssistantConversationChange,
   ...parts
 }: WorldLayoutProps) {
   const settings = useQuery({ queryKey: settingsGetKey, queryFn: settingsGet });
@@ -50,6 +52,8 @@ export function WorldLayout({
           <Assistant
             key={assistantPorts.session}
             ports={assistantPorts}
+            conversation={assistantConversation}
+            onConversationChange={onAssistantConversationChange}
             model={provider?.model}
             host={provider?.host}
             onOpenSettings={onOpenSettings}

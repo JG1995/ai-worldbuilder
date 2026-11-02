@@ -100,6 +100,9 @@ pub fn run() {
             assistant::assistant_send,
             assistant::assistant_stop,
             assistant::assistant_links,
+            assistant::assistant_conversations,
+            assistant::assistant_conversation,
+            assistant::assistant_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

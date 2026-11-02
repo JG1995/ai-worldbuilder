@@ -28,6 +28,7 @@ function mockDisk(active: string) {
       treeWidth: 264,
       assistantOpen: true,
       assistantWidth: 360,
+      assistantConversation: null,
     },
   };
   return mockWorldIpc({

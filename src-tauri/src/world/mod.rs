@@ -141,6 +141,8 @@ impl OpenWorld {
 pub(crate) struct CurrentWorld {
     pub session: u64,
     pub root: PathBuf,
+    /// The app data folder, which keeps the world's data; `None` keeps nothing, as in most tests.
+    pub app_data: Option<PathBuf>,
 }
 
 impl CurrentWorld {
@@ -412,6 +414,7 @@ impl WorldState {
         Ok(CurrentWorld {
             session: inner.session,
             root: world.root.clone(),
+            app_data: inner.app_data.clone(),
         })
     }
 
@@ -1505,6 +1508,7 @@ fn existing_in(root: &Path, stored: Workspace) -> Workspace {
         assistant_width: stored
             .assistant_width
             .clamp(ASSISTANT_WIDTHS.0, ASSISTANT_WIDTHS.1),
+        assistant_conversation: stored.assistant_conversation,
     }
 }
 
@@ -1643,6 +1647,7 @@ mod tests {
                     "treeWidth": 264,
                     "assistantOpen": true,
                     "assistantWidth": 360,
+                    "assistantConversation": null,
                 },
             })
         );
@@ -1995,6 +2000,7 @@ mod tests {
             tree_width: 300,
             assistant_open: false,
             assistant_width: 420,
+            assistant_conversation: Some(7),
         }
     }
 
@@ -2142,6 +2148,7 @@ mod tests {
             tree_width: 9_000,
             assistant_open: true,
             assistant_width: 9_000,
+            assistant_conversation: None,
         };
 
         let kept = limited(wide).unwrap();

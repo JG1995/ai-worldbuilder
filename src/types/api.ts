@@ -3,10 +3,14 @@
 
 export type { AnswerEnd } from "./generated/AnswerEnd";
 export type { AnswerEvent } from "./generated/AnswerEvent";
+export type { AnswerState } from "./generated/AnswerState";
 export type { Backlink } from "./generated/Backlink";
 export type { Backlinks } from "./generated/Backlinks";
 export type { Comparison } from "./generated/Comparison";
 export type { ContextPage } from "./generated/ContextPage";
+export type { Conversation } from "./generated/Conversation";
+export type { ConversationSummary } from "./generated/ConversationSummary";
+export type { Conversations } from "./generated/Conversations";
 export type { DiffLine } from "./generated/DiffLine";
 export type { EditorLink } from "./generated/EditorLink";
 export type { EditorLinks } from "./generated/EditorLinks";
@@ -32,7 +36,9 @@ export type { ProviderField } from "./generated/ProviderField";
 export type { ProviderSaved } from "./generated/ProviderSaved";
 export type { RecentWorld } from "./generated/RecentWorld";
 export type { RestoredPage } from "./generated/RestoredPage";
+export type { SavedMessage } from "./generated/SavedMessage";
 export type { Settings } from "./generated/Settings";
+export type { StoreNotice } from "./generated/StoreNotice";
 export type { TestOutcome } from "./generated/TestOutcome";
 export type { TextLine } from "./generated/TextLine";
 export type { TextMatch } from "./generated/TextMatch";

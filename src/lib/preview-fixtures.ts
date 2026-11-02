@@ -9,6 +9,8 @@ import type {
   Backlinks,
   Comparison,
   ContextPage,
+  Conversation,
+  Conversations,
   DiffLine,
   EditorLink,
   EditorLinks,
@@ -24,13 +26,16 @@ import type {
   ProviderSaved,
   RecentWorld,
   RestoredPage,
+  SavedMessage,
   Settings,
+  StoreNotice,
   TestOutcome,
   TextLine,
   TextMatch,
   TextMatches,
   TreeEntry,
   VersionKind,
+  Workspace,
   WorldOpened,
 } from "@/types/api";
 
@@ -248,6 +253,12 @@ function requireWorld() {
   return world;
 }
 
+/**
+ * The conversation each preview world's assistant showed last. An approximation for the preview:
+ * of the workspace, only this survives reopening a world.
+ */
+const lastShownConversations = new Map<PreviewWorld, number | null>();
+
 function opened(next: PreviewWorld): WorldOpened {
   world = next;
   session += 1;
@@ -261,6 +272,7 @@ function opened(next: PreviewWorld): WorldOpened {
       treeWidth: 264,
       assistantOpen: true,
       assistantWidth: 360,
+      assistantConversation: lastShownConversations.get(next) ?? null,
     },
   };
 }
@@ -732,9 +744,48 @@ async function testProvider(): Promise<TestOutcome> {
 type Answering = { stopped: boolean; wake: () => void; ended: Promise<void>; end: () => void };
 let answering: Answering | null = null;
 
-/** The preview's conversations hold only their last message, which a retry sends again. */
-const lastMessages = new Map<number, string>();
+type PreviewConversation = Conversation & { updated: number };
+
+/**
+ * Each preview world's conversations, newest last, and its storage notice. An approximation for
+ * the preview: they are kept in memory for as long as the page stays loaded, and a message
+ * `store:set_aside` or `store:not_saved` makes the world report that notice.
+ */
+const conversationsOf = new Map<PreviewWorld, PreviewConversation[]>();
+const storeNotices = new Map<PreviewWorld, StoreNotice>();
 let nextConversation = 1;
+
+function conversationsIn(open: PreviewWorld) {
+  const known = conversationsOf.get(open) ?? [];
+  conversationsOf.set(open, known);
+  return known;
+}
+
+function requireConversation(open: PreviewWorld, id: unknown) {
+  const found = conversationsIn(open).find((conversation) => conversation.id === id);
+  if (!found) throw { kind: "not_found", message: "The conversation does not exist." };
+  return found;
+}
+
+const nowInSeconds = () => Math.floor(Date.now() / 1000);
+
+/** Saves how an answer ended in its conversation, as the core does. */
+function saveAnswer(conversation: PreviewConversation, end: AnswerEnd, pages: ContextPage[]) {
+  const state = end.state === "failed" ? (end.text === "" ? null : "stopped") : end.state;
+  if (state === null) return;
+  const time = nowInSeconds();
+  const answer: SavedMessage = {
+    role: "answer",
+    text: end.text,
+    time,
+    state,
+    pages,
+    leftOut: 0,
+    indexing: false,
+  };
+  conversation.messages.push(answer);
+  conversation.updated = time;
+}
 
 /** Waits `ms` milliseconds, or until a stop. */
 function pause(run: Answering, ms: number) {
@@ -790,8 +841,7 @@ function contextOf(open: PreviewWorld, active: string | null, message: string): 
  * Answers a message without a network. An approximation for the preview: the request carries
  * the pages `contextOf` chooses; the canned answer streams in chunks about 100 ms apart; a message
  * `fail:<reason>`, with a `ProviderFailure` as the reason, fails for that reason with a sample
- * detail and provider message; conversations are kept in memory, and a retry is accepted whatever
- * the last answer was.
+ * detail and provider message; a retry is accepted whatever the last answer was.
  */
 async function sendAnswer(
   args: Record<string, unknown>,
@@ -807,20 +857,44 @@ async function sendAnswer(
     active: string | null;
     retry: boolean;
   };
-  let id: number;
-  let message: string | undefined;
+  let shown: PreviewConversation;
+  let message: string;
   if (retry) {
-    message = conversation === null ? undefined : lastMessages.get(conversation);
-    if (conversation === null || message === undefined) {
+    if (conversation === null) {
       throw { kind: "not_found", message: "There is no message to answer again." };
     }
-    id = conversation;
+    shown = requireConversation(open, conversation);
+    if (shown.messages.at(-1)?.role === "answer") shown.messages.pop();
+    const asked = shown.messages.at(-1);
+    if (asked?.role !== "user") {
+      throw { kind: "not_found", message: "There is no message to answer again." };
+    }
+    message = asked.text;
   } else {
     if (text.trim() === "") throw { kind: "invalid_name", message: "The message is empty." };
-    id = conversation ?? nextConversation++;
+    const time = nowInSeconds();
+    if (conversation === null) {
+      const title = text.trim().split("\n")[0].slice(0, 60);
+      shown = { id: nextConversation++, title, messages: [], updated: time };
+      conversationsIn(open).push(shown);
+    } else {
+      shown = requireConversation(open, conversation);
+    }
+    shown.messages.push({ role: "user", text, time });
+    shown.updated = time;
     message = text;
-    lastMessages.set(id, text);
+    if (message === "store:set_aside") storeNotices.set(open, { kind: "set_aside" });
+    if (message === "store:not_saved") {
+      const reason = "The conversation store cannot be written.";
+      storeNotices.set(open, { kind: "not_saved", reason });
+    }
   }
+  const id = shown.id;
+  const pages = contextOf(open, active, message);
+  const saved = (end: AnswerEnd) => {
+    saveAnswer(shown, end, pages);
+    return end;
+  };
 
   let end = () => {};
   const ended = new Promise<void>((resolve) => {
@@ -829,29 +903,28 @@ async function sendAnswer(
   const run: Answering = { stopped: false, wake: () => {}, ended, end };
   answering = run;
   try {
-    const pages = contextOf(open, active, message);
     onEvent({ kind: "context", conversation: id, pages, leftOut: 0, indexing: false });
     let answer = "";
     const reason = providerFailures.find((failure) => message === `fail:${failure}`);
     if (reason) {
       await pause(run, 300);
-      if (run.stopped) return { state: "stopped", conversation: id, text: answer };
-      return {
+      if (run.stopped) return saved({ state: "stopped", conversation: id, text: answer });
+      return saved({
         state: "failed",
         conversation: id,
         text: answer,
         reason,
         detail: "Sample detail from the preview",
         providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
-      };
+      });
     }
     for (const delta of cannedAnswer(active)) {
       await pause(run, 100);
-      if (run.stopped) return { state: "stopped", conversation: id, text: answer };
+      if (run.stopped) return saved({ state: "stopped", conversation: id, text: answer });
       answer += delta;
       onEvent({ kind: "text", delta });
     }
-    return { state: "complete", conversation: id, text: answer };
+    return saved({ state: "complete", conversation: id, text: answer });
   } finally {
     answering = null;
     run.end();
@@ -998,7 +1071,11 @@ export const previewFixtures: Record<string, unknown> = {
     remember(recent.world, recent.path);
     return opened(recent.world);
   },
-  workspace_save: () => null,
+  workspace_save: (args?: InvokeArgs) => {
+    const { workspace } = args as { workspace: Workspace };
+    lastShownConversations.set(requireWorld(), workspace.assistantConversation);
+    return null;
+  },
   app_close: () => null,
   backlinks_list: (args?: InvokeArgs): Backlinks => {
     const { path } = args as { path: string };
@@ -1052,6 +1129,35 @@ export const previewFixtures: Record<string, unknown> = {
   assistant_stop: async () => {
     requireAi();
     await stopAnswer();
+    return null;
+  },
+  assistant_conversations: (): Conversations => {
+    requireAi();
+    const open = requireWorld();
+    const items = conversationsIn(open)
+      .map(({ id, title, updated }) => ({ id, title, updated }))
+      .sort((a, b) => b.updated - a.updated || b.id - a.id);
+    return { items, notice: storeNotices.get(open) ?? null };
+  },
+  assistant_conversation: (args?: InvokeArgs): Conversation => {
+    requireAi();
+    const { id, title, messages } = requireConversation(
+      requireWorld(),
+      (args as { id: number }).id,
+    );
+    return { id, title, messages: [...messages] };
+  },
+  assistant_delete: async (args?: InvokeArgs) => {
+    requireAi();
+    const open = requireWorld();
+    const { id } = args as { id: number };
+    requireConversation(open, id);
+    // An approximation for the preview: it stops whatever answer runs, in any conversation.
+    await stopAnswer();
+    conversationsOf.set(
+      open,
+      conversationsIn(open).filter((conversation) => conversation.id !== id),
+    );
     return null;
   },
 };

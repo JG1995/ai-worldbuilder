@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import type { EditorLink } from "@/types/api";
+import type { ConversationSummary, EditorLink, StoreNotice } from "@/types/api";
 import { AssistantPane, type ChatMessage } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
 import { defaultAssistantWidth } from "@/ui/Shell";
@@ -181,12 +181,30 @@ const sampleEndings: ChatMessage[] = [
   },
 ];
 
+/** A message whose answer never arrived, as after a crash, then the last one, which can be retried. */
+const sampleUnanswered: ChatMessage[] = [
+  { id: 1, role: "user", text: "Who rules Saltmere?" },
+  { id: 2, role: "user", text: "Who rules Saltmere now?" },
+];
+
+const sampleConversations: ConversationSummary[] = [
+  { id: 3, title: "Who keeps the shrine at Kesh Tor?", updated: 1_798_800_000 },
+  { id: 2, title: "Describe the glass storm.", updated: 1_798_700_000 },
+  {
+    id: 1,
+    title: "A long first line that the core cut to sixty characters for t",
+    updated: 1_798_600_000,
+  },
+];
+
 /** The pane with a conversation, its composer holding a local draft. */
 function AssistantChatDemo({
   messages,
+  storeNotice,
   onEvent,
 }: {
   messages: ChatMessage[];
+  storeNotice?: StoreNotice;
   onEvent: (event: string) => void;
 }) {
   const [draft, setDraft] = useState("");
@@ -195,6 +213,9 @@ function AssistantChatDemo({
       model="mistral-small-latest"
       host="api.mistral.ai"
       onOpenSettings={() => onEvent("Open Settings")}
+      onNewConversation={() => onEvent("New conversation")}
+      onShowConversations={() => onEvent("Conversations")}
+      storeNotice={storeNotice}
       chat={{
         messages,
         draft,
@@ -207,6 +228,36 @@ function AssistantChatDemo({
         onCopy: () => onEvent("Copy the answer"),
         refusal: null,
         announcement: "",
+      }}
+    />
+  );
+}
+
+/** The pane's conversations list, whose Delete asks first and removes the row here. */
+function AssistantListDemo({
+  initialItems,
+  onEvent,
+}: {
+  initialItems: ConversationSummary[];
+  onEvent: (event: string) => void;
+}) {
+  const [items, setItems] = useState(initialItems);
+  return (
+    <AssistantPane
+      model="mistral-small-latest"
+      host="api.mistral.ai"
+      onOpenSettings={() => onEvent("Open Settings")}
+      onNewConversation={() => onEvent("New conversation")}
+      onShowConversations={() => onEvent("Conversations")}
+      conversations={{
+        items,
+        error: null,
+        onOpen: (id) => onEvent(`Open conversation ${id}`),
+        onDelete: async (id) => {
+          setItems((shown) => shown.filter((item) => item.id !== id));
+          onEvent(`Delete conversation ${id}`);
+        },
+        onBack: () => onEvent("Back"),
       }}
     />
   );
@@ -249,7 +300,7 @@ export function ShellSections() {
       </Section>
       <Section
         title="Assistant pane"
-        use="The pane's content: its header, then the notice that asks for a provider, or the explanation of an empty conversation, which names where messages go; the conversation, with each answer's Read N pages disclosure, its marks and failures; and the composer, where Enter sends and Send becomes Stop while an answer arrives."
+        use="The pane's content: its header with New conversation and Conversations, then the notice that asks for a provider and the storage notices, or the explanation of an empty conversation, which names where messages go; the conversation, with each answer's Read N pages disclosure, its marks and failures, and the line under a message whose answer never arrived; and the composer, where Enter sends and Send becomes Stop while an answer arrives. The conversations list replaces the conversation and the composer; Delete asks first."
       >
         <div className="flex flex-wrap gap-4">
           <AssistantPaneFrame title="No provider saved">
@@ -267,6 +318,29 @@ export function ShellSections() {
           </AssistantPaneFrame>
           <AssistantPaneFrame title="A stopped answer and a failure" tall>
             <AssistantChatDemo messages={sampleEndings} onEvent={setEvent} />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="No answer arrived; earlier conversations set aside" tall>
+            <AssistantChatDemo
+              messages={sampleUnanswered}
+              storeNotice={{ kind: "set_aside" }}
+              onEvent={setEvent}
+            />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="Conversations not being saved" tall>
+            <AssistantChatDemo
+              messages={[]}
+              storeNotice={{
+                kind: "not_saved",
+                reason: "The conversation store is in a newer format than this version knows.",
+              }}
+              onEvent={setEvent}
+            />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="The conversations list" tall>
+            <AssistantListDemo initialItems={sampleConversations} onEvent={setEvent} />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="No conversations yet">
+            <AssistantListDemo initialItems={[]} onEvent={setEvent} />
           </AssistantPaneFrame>
         </div>
         <p className="ui text-text-muted">Last event: {event}</p>

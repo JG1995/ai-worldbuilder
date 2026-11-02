@@ -2,17 +2,21 @@
 // Run `pnpm icons` after changing src/ui/icon-names.json.
 
 export const glyphs = {
+  add: "\u{e145}",
+  arrow_back: "\u{e5c4}",
   chat: "\u{e0b7}",
   check_circle: "\u{e86c}",
   chevron_right: "\u{e409}",
   close: "\u{e14c}",
   content_copy: "\u{e14d}",
   create_new_folder: "\u{e2cc}",
+  delete: "\u{e872}",
   description: "\u{e873}",
   error: "\u{e000}",
   expand_more: "\u{e5cf}",
   folder: "\u{e2c7}",
   folder_open: "\u{e2c8}",
+  forum: "\u{e0bf}",
   info: "\u{e88e}",
   menu: "\u{e5d2}",
   more_horiz: "\u{e5d3}",
@@ -24,4 +28,4 @@ export const glyphs = {
 } as const;
 
 /** SHA-256 of src/assets/icons/material-symbols-sharp.woff2. */
-export const fontSha256 = "3340e377e2cb9b54f9c1308697ff110cc104436525b276d1a13364a5e8f6fb84";
+export const fontSha256 = "f0664b2923e267a570d1c711b117eab89b2edfb305072994eb1b007fdcbe6cbf";

@@ -24,6 +24,7 @@ export const testWorld: WorldOpened = {
     treeWidth: 264,
     assistantOpen: true,
     assistantWidth: 360,
+    assistantConversation: null,
   },
 };
 
@@ -88,6 +89,11 @@ const defaults: Record<string, Handler> = {
     path: entryPath(parentOf(String(from)), `${String(target)}.md`),
   }),
   link_suggest: () => ({ indexing: false, items: [] }),
+  // The assistant, which the app mounts beside the world, reads the world's conversations.
+  assistant_conversations: () => ({ items: [], notice: null }),
+  assistant_conversation: () => {
+    throw { kind: "not_found", message: "The conversation does not exist." };
+  },
 };
 
 function entryPath(folder: unknown, name: string) {
