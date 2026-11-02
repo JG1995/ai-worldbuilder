@@ -21,6 +21,8 @@ import type {
   RecentWorld,
   RestoredPage,
   Settings,
+  TestFailure,
+  TestOutcome,
   TextLine,
   TextMatch,
   TextMatches,
@@ -679,6 +681,41 @@ function saveProvider(args: InvokeArgs | undefined): ProviderSaved {
   return { state: "saved", settings: previewSettings };
 }
 
+const testFailures: TestFailure[] = [
+  "unreachable",
+  "insecure",
+  "timeout",
+  "key_refused",
+  "key_needed",
+  "not_found",
+  "rate_limited",
+  "refused",
+  "provider_error",
+  "redirected",
+  "invalid_reply",
+  "key_unreadable",
+];
+
+/**
+ * Tests the saved provider without a network. An approximation for the preview: it answers after
+ * a short delay, and a saved model `fail:<reason>`, with a `TestFailure` as the reason, fails for
+ * that reason with a sample detail and provider message; any other model connects.
+ */
+async function testProvider(): Promise<TestOutcome> {
+  requireAi();
+  const provider = previewSettings.textProvider;
+  if (!provider) throw { kind: "not_found", message: "No provider is saved." };
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const reason = testFailures.find((failure) => provider.model === `fail:${failure}`);
+  if (!reason) return { state: "connected" };
+  return {
+    state: "failed",
+    reason,
+    detail: "Sample detail from the preview",
+    providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
+  };
+}
+
 /** Sample command results: values, or functions of the arguments that throw like the core. */
 export const previewFixtures: Record<string, unknown> = {
   // Opens the sample world at once: the preview has no folder dialog.
@@ -858,4 +895,6 @@ export const previewFixtures: Record<string, unknown> = {
     }
     return previewSettings;
   },
+  provider_test: () => testProvider(),
+  provider_test_cancel: () => null,
 };

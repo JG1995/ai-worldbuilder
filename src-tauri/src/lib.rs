@@ -93,6 +93,8 @@ pub fn run() {
             settings::settings_ai_set,
             settings::provider_save,
             settings::provider_key_remove,
+            settings::provider_test,
+            settings::provider_test_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

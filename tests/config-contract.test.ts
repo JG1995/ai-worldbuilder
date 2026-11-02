@@ -102,9 +102,27 @@ describe("bundled licence texts", () => {
   });
 });
 
+/** Every `.rs` file under `folder`, relative to the repository root. */
+function rustFiles(folder: string): string[] {
+  return readdirSync(new URL(folder, root), { withFileTypes: true }).flatMap((entry) => {
+    const path = `${folder}${entry.name}`;
+    if (entry.isDirectory()) return rustFiles(`${path}/`);
+    return entry.name.endsWith(".rs") ? [path] : [];
+  });
+}
+
 describe("Rust core", () => {
-  it("has no HTTP client dependency", () => {
-    expect(cargoToml).not.toMatch(/^(reqwest|hyper|ureq|isahc|surf|attohttpc|curl)\b/m);
+  it("has reqwest as its only HTTP client, without its default features", () => {
+    expect(cargoToml.match(/^(reqwest|hyper[\w-]*|ureq|isahc|surf|attohttpc|curl)\b.*$/gm)).toEqual(
+      ['reqwest = { version = "0.13", default-features = false, features = ["rustls"] }'],
+    );
+  });
+
+  it("sends requests only from the providers area", () => {
+    const outside = rustFiles("src-tauri/src/").filter(
+      (path) => !path.startsWith("src-tauri/src/providers/") && /\breqwest\b/.test(readText(path)),
+    );
+    expect(outside).toEqual([]);
   });
 
   it("never aborts on panic, so command panics become errors", () => {

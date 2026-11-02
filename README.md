@@ -59,6 +59,8 @@ The API key itself is stored in the operating system's keychain: Credential Mana
 
 `index/` holds a cache of each world's pages, aliases and links, and a copy of each page's text for search, one SQLite database per world, named like its history. It only repeats what the world's files hold: the application rebuilds it when it is deleted, damaged or from another version, and deleting it loses nothing.
 
+The application connects to nothing but the AI provider set in Settings, and only when you ask it to. In this version, the only request it sends is Test connection's, to the saved base URL followed by `/chat/completions`, with the saved model, a fixed prompt and the API key. It never sends page text, and it ignores proxy settings, both the system's and the `HTTP_PROXY` family of environment variables.
+
 On Linux, the webview keeps its own caches at the root of the same app data folder. The application writes nothing into a world folder except the pages and folders you create or edit.
 
 ## Continuous integration and releases
