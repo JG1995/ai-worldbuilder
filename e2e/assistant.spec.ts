@@ -117,3 +117,87 @@ test("the no-provider notice's Settings button opens Settings, where AI off remo
   await expect(button(page)).toBeVisible();
   await expect(pane(page)).toBeVisible();
 });
+
+// The preview's assistant streams a canned answer about the active page in chunks about 100 ms
+// apart, and fails a message `fail:<reason>` for that reason.
+
+/** Opens the sample world, saves a provider in Settings and opens a top-level page. */
+async function openWithProvider(page: Page) {
+  await openSampleWorld(page);
+  await pane(page).getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByLabel("Base URL").fill("https://api.mistral.ai/v1");
+  await settings.getByLabel("Model").fill("mistral-small-latest");
+  await settings.getByRole("button", { name: "Save" }).click();
+  await expect(pane(page)).toContainText("mistral-small-latest");
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await page.getByRole("treeitem", { name: "Campaign overview", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Campaign overview" })).toBeVisible();
+}
+
+async function send(page: Page, text: string) {
+  const message = pane(page).getByRole("textbox", { name: "Message" });
+  await message.fill(text);
+  await message.press("Enter");
+}
+
+const answer = (page: Page) => pane(page).getByRole("textbox", { name: "Answer" });
+
+test("an answer streams in, and its disclosure lists the active page and opens it", async ({
+  page,
+}) => {
+  await openWithProvider(page);
+
+  await send(page, "What is the steppe like?");
+
+  await expect(pane(page).getByText("What is the steppe like?")).toBeVisible();
+  await expect(pane(page).getByRole("button", { name: "Stop" })).toBeVisible();
+  await expect(answer(page)).toContainText("The pages I read");
+  await expect(pane(page).getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(answer(page)).toContainText("Ask about another page to compare them.");
+  await expect(answer(page)).toContainText("[[Campaign overview]]");
+
+  await page.getByRole("treeitem", { name: "Session notes", exact: true }).click();
+  await page.getByRole("treeitem", { name: "Session 1", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Session 1" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await pane(page).getByRole("button", { name: "Read 1 page" }).click();
+  await pane(page).getByRole("button", { name: "Campaign overview" }).click();
+  await expect(page.getByRole("tab", { name: "Campaign overview" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+test("Stop keeps the text so far, marked as stopped", async ({ page }) => {
+  await openWithProvider(page);
+
+  await send(page, "What is the steppe like?");
+  await expect(answer(page)).toContainText("The pages I read");
+  await pane(page).getByRole("button", { name: "Stop" }).click();
+
+  await expect(pane(page).getByText("Stopped.", { exact: true })).toBeVisible();
+  await expect(pane(page).getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(answer(page)).toContainText("The pages I read");
+  await expect(answer(page)).not.toContainText("compare them");
+});
+
+test("a rate-limited answer shows a warning with Retry, which answers again", async ({ page }) => {
+  await openWithProvider(page);
+
+  await send(page, "fail:rate_limited");
+
+  const notice = pane(page).getByRole("alert");
+  await expect(notice).toContainText("The provider is limiting requests. Try again later.");
+  await expect(notice).toContainText(
+    "The provider's message: Sample message from the provider, with <b>markup</b> shown as text.",
+  );
+  await notice.getByRole("button", { name: "Retry" }).click();
+  // The preview fails the same message again, and its failure replaces the first.
+  await expect(pane(page).getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(pane(page).getByRole("alert")).toHaveCount(1);
+  await expect(pane(page).getByRole("alert").getByRole("button", { name: "Retry" })).toBeVisible();
+});

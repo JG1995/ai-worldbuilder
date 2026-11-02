@@ -1,18 +1,24 @@
 import { EditorView } from "@codemirror/view";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorldOpened } from "@/types/api";
+import { closeRequestedEvent } from "../api/commands";
 import { mockWorldIpc, shellLayout, testWorld } from "../api/test-ipc";
 import { autosaveDelay } from "../logic/saving";
 import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
-function renderWorld(onOpenSettings?: () => void) {
+function renderWorld(onOpenSettings?: () => void, beforeWorldChange?: () => Promise<void>) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <World onOpenSettings={onOpenSettings} layout={shellLayout} />
+      <World
+        onOpenSettings={onOpenSettings}
+        layout={shellLayout}
+        beforeWorldChange={beforeWorldChange}
+      />
     </QueryClientProvider>,
   );
 }
@@ -158,8 +164,8 @@ describe("pages that cannot be shown", () => {
 });
 
 /** Opens the test world and its Overview page, and returns the page's editor. */
-async function openOverview() {
-  renderWorld();
+async function openOverview(beforeWorldChange?: () => Promise<void>) {
+  renderWorld(undefined, beforeWorldChange);
   fireEvent.click(await openWorldButton());
   fireEvent.click(within(await tree()).getByRole("treeitem", { name: "Overview" }));
   return screen.findByRole("textbox", { name: "Overview" });
@@ -416,6 +422,64 @@ describe("changing worlds", () => {
       "world_close",
       "recent_list",
     ]);
+  });
+
+  /**
+   * A `beforeWorldChange` that resolves at once, as for opening the test world, until `hold`; from
+   * then on it runs until the test settles it.
+   */
+  function pendingBeforeChange() {
+    const settle = { resolve: () => {}, reject: () => {} };
+    let held = false;
+    const beforeWorldChange = vi.fn(() =>
+      held
+        ? new Promise<void>((resolve, reject) => {
+            settle.resolve = resolve;
+            settle.reject = () => reject(new Error("Nothing to stop."));
+          })
+        : Promise.resolve(),
+    );
+    const hold = () => {
+      held = true;
+      beforeWorldChange.mockClear();
+    };
+    return { beforeWorldChange, settle, hold };
+  }
+
+  it("runs beforeWorldChange before the pages save, and a rejection does not stop the change", async () => {
+    const calls = mockWorldIpc();
+    const { beforeWorldChange, settle, hold } = pendingBeforeChange();
+    typeAtEnd(await openOverview(beforeWorldChange), "More");
+    hold();
+
+    await chooseFromWorldMenu("Close world");
+    await waitFor(() => expect(beforeWorldChange).toHaveBeenCalledOnce());
+    expect(commandsOf(calls)).not.toContain("page_write");
+    await act(async () => settle.reject());
+
+    expect(await openWorldButton()).toBeInTheDocument();
+    const commands = commandsOf(calls);
+    expect(commands.slice(commands.indexOf("page_write"))).toEqual([
+      "page_write",
+      "workspace_save",
+      "world_close",
+      "recent_list",
+    ]);
+  });
+
+  it("runs beforeWorldChange before the window closes", async () => {
+    const calls = mockWorldIpc();
+    const { beforeWorldChange, settle, hold } = pendingBeforeChange();
+    await openOverview(beforeWorldChange);
+    hold();
+
+    await act(() => emit(closeRequestedEvent));
+    await waitFor(() => expect(beforeWorldChange).toHaveBeenCalledOnce());
+    expect(commandsOf(calls)).not.toContain("workspace_save");
+    await act(async () => settle.resolve());
+
+    await waitFor(() => expect(commandsOf(calls)).toContain("app_close"));
+    expect(commandsOf(calls).slice(-2)).toEqual(["workspace_save", "app_close"]);
   });
 
   /** A test world whose second Open world… waits for `pick` to answer the folder dialog. */

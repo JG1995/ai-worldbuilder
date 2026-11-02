@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
+import { assistantStop } from "@/features/assistant/api/commands";
 import { QuickOpen } from "@/features/search/components/QuickOpen";
 import { Settings } from "@/features/settings/components/Settings";
 import { World } from "@/features/world/components/World";
@@ -22,6 +23,9 @@ export function App() {
         quickOpen={(ports) => <QuickOpen {...ports} />}
         onOpenSettings={openSettings}
         layout={(parts) => <WorldLayout {...parts} onOpenSettings={openSettings} />}
+        // A running answer stops and is saved before the world changes or the window closes.
+        // With AI off the core refuses, and there is nothing to stop.
+        beforeWorldChange={() => assistantStop().catch(() => {})}
       />
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
     </QueryClientProvider>

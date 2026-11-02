@@ -36,6 +36,13 @@ const newEntryItems: MenuItem[] = [
   { id: "new-folder", label: "New folder", shortcut: newFolderShortcut },
 ];
 
+/** Whether `entries` or their folders hold the page at `path`. */
+function treeHasPage(entries: TreeEntry[], path: string): boolean {
+  return entries.some((entry) =>
+    entry.kind === "page" ? entry.path === path : treeHasPage(entry.children ?? [], path),
+  );
+}
+
 /**
  * What the quick open dialog gets from the world's screen. `openPage` opens a page by the tab rules
  * of the tree, saving the page it replaces first, with focus in its editor; `pageCreated` opens a
@@ -53,9 +60,22 @@ export type QuickOpenPorts = {
 };
 
 /**
+ * What the assistant gets from the world's screen. `openPage` opens a page by the tab rules of the
+ * tree; `flushActive` resolves once the active page's pending edits have saved or failed to;
+ * `hasPage` answers from the loaded tree.
+ */
+export type AssistantPorts = {
+  session: number;
+  activePage: string | null;
+  openPage: (path: string, options: { newTab: boolean }) => void;
+  flushActive: () => Promise<void>;
+  hasPage: (path: string) => boolean;
+};
+
+/**
  * What the world's screen hands to its layout: the tree, the tab strip, the page region and the
  * toasts, with the tree pane's width and overlay state, the assistant pane's open state, width
- * and overlay state, and whether a world change runs.
+ * and overlay state, the assistant's ports, and whether a world change runs.
  */
 export type WorldScreenParts = {
   tree: ReactNode;
@@ -76,6 +96,7 @@ export type WorldScreenParts = {
   onAssistantWidthChange: (width: number) => void;
   assistantOverlayOpen: boolean;
   onAssistantOverlayOpenChange: (open: boolean) => void;
+  assistantPorts: AssistantPorts;
   changingWorld: boolean;
 };
 
@@ -245,6 +266,18 @@ export function WorldScreen({
     close: () => setSearching(false),
   };
 
+  const assistantPorts: AssistantPorts = {
+    session,
+    activePage: active,
+    openPage: (path, { newTab }) => void openFromTree(path, { newTab }),
+    flushActive: async () => {
+      const { active } = useWorldStore.getState();
+      if (active !== null) await flush(active);
+    },
+    // Until the tree has loaded, every page counts as there.
+    hasPage: (path) => tree.data === undefined || treeHasPage(tree.data, path),
+  };
+
   /** Opens a page from the tree in the current tab, as a click does, then shows its history. */
   async function openHistory(path: string) {
     await openFromTree(path, { newTab: false });
@@ -386,6 +419,7 @@ export function WorldScreen({
         onAssistantWidthChange: setAssistantWidth,
         assistantOverlayOpen,
         onAssistantOverlayOpenChange: setAssistantOverlayOpen,
+        assistantPorts,
         changingWorld,
         tree:
           // Until the first listing arrives, an empty pane, not the empty-world message.
