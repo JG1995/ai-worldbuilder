@@ -248,6 +248,8 @@ struct Events<'k> {
     line: Vec<u8>,
     /// The `data` of the event not yet ended, its lines joined by `\n`.
     data: Option<String>,
+    /// Whether any `data` field arrived: a body without one is not an event stream.
+    any_data: bool,
     text: Text,
 }
 
@@ -257,6 +259,7 @@ impl<'k> Events<'k> {
             key,
             line: Vec::new(),
             data: None,
+            any_data: false,
             text: Text::default(),
         }
     }
@@ -283,7 +286,7 @@ impl<'k> Events<'k> {
     }
 
     /// The end of a body that closed: its last line and event count, but an answer that was never
-    /// finished was interrupted.
+    /// finished was interrupted, and a body without events is not a chat answer.
     fn finish(&mut self, on_text: &mut impl FnMut(&str)) -> StreamEnd {
         let line = std::mem::take(&mut self.line);
         if !line.is_empty()
@@ -292,7 +295,10 @@ impl<'k> Events<'k> {
             return end;
         }
         self.dispatch(on_text)
-            .unwrap_or_else(|| StreamEnd::failed(ProviderFailure::Interrupted, None))
+            .unwrap_or_else(|| match self.any_data {
+                true => StreamEnd::failed(ProviderFailure::Interrupted, None),
+                false => StreamEnd::invalid(),
+            })
     }
 
     fn take_line(&mut self, line: &[u8], on_text: &mut impl FnMut(&str)) -> Option<StreamEnd> {
@@ -312,6 +318,7 @@ impl<'k> Events<'k> {
         let Ok(value) = std::str::from_utf8(value) else {
             return Some(StreamEnd::invalid());
         };
+        self.any_data = true;
         match &mut self.data {
             Some(data) => {
                 data.push('\n');
@@ -514,6 +521,14 @@ mod tests {
 
         assert_eq!(reason(&end), ProviderFailure::Interrupted);
         assert_eq!(text, "Half");
+    }
+
+    #[test]
+    fn a_web_page_is_not_a_chat_answer() {
+        let page = b"<!doctype html>\n<html>\n<body>Welcome</body>\n</html>\n";
+        let server = Server::answering(answer("200 OK", &[("Content-Type", "text/html")], page));
+
+        assert_eq!(run(&server), (StreamEnd::invalid(), String::new()));
     }
 
     #[test]

@@ -33,7 +33,12 @@ pub fn build(world_name: &str, pages: &[ChosenPage], earlier: &[Message], new: &
             page.path, page.text
         ));
     }
-    let kept = &earlier[earlier.len() - fitting(earlier)..];
+    // An answer stopped before any text has nothing to send, and some providers refuse it.
+    let earlier: Vec<&Message> = earlier
+        .iter()
+        .filter(|message| !message.text.is_empty())
+        .collect();
+    let kept = &earlier[earlier.len() - fitting(&earlier)..];
     let mut messages = vec![ChatMessage {
         role: Role::System,
         content: system,
@@ -64,7 +69,7 @@ pub fn build(world_name: &str, pages: &[ChosenPage], earlier: &[Message], new: &
 
 /// How many of the latest `earlier` messages fit in `EARLIER_LIMIT` characters, taken newest
 /// first; a message that does not fit leaves out every older one.
-fn fitting(earlier: &[Message]) -> usize {
+fn fitting(earlier: &[&Message]) -> usize {
     let mut used = 0;
     earlier
         .iter()
@@ -117,5 +122,34 @@ mod tests {
         );
         assert_eq!(request.left_out, 1);
         assert!(request.messages[0].content.contains("The world: Kesh"));
+    }
+
+    #[test]
+    fn answers_stopped_before_any_text_are_neither_sent_nor_left_out() {
+        // Providers such as Anthropic refuse an empty earlier message.
+        let earlier = [
+            message("Older".to_owned(), None),
+            message(String::new(), Some(AnswerState::Stopped)),
+            message("a".repeat(EARLIER_LIMIT), None),
+            message("Brief.".to_owned(), Some(AnswerState::Complete)),
+            message("Again?".to_owned(), None),
+            message(String::new(), Some(AnswerState::Stopped)),
+        ];
+
+        let request = build("Kesh", &[], &earlier, "Now?");
+
+        let sent: Vec<(Role, &str)> = request.messages[1..]
+            .iter()
+            .map(|message| (message.role, message.content.as_str()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (Role::Assistant, "Brief."),
+                (Role::User, "Again?"),
+                (Role::User, "Now?"),
+            ]
+        );
+        assert_eq!(request.left_out, 2);
     }
 }
