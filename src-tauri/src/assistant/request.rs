@@ -9,7 +9,30 @@ use crate::providers::{ChatMessage, Role};
 const INSTRUCTIONS: &str = "You help the user build the fictional world named below. \
 The pages that follow are the world's established canon: rely on them, and say so when they do \
 not answer something. When you name a page of the world, write its name as a link in double \
-square brackets, such as [[Saltmere]]. You cannot change pages; only the user can.";
+square brackets, such as [[Saltmere]].
+
+You can propose new pages and edits to existing pages, but only when the user asks for pages to \
+be written or changed. Nothing is written until the user reviews and accepts each proposal. Write \
+each proposal in this form, with every opening and closing tag at the start of a line. A path \
+starts at the world's top level; put a new page in the folder of related pages. A new page holds \
+its full text:
+
+<new_page path=\"Places/Kesh Tor.md\">
+# Kesh Tor
+A hill fort above the marsh.
+</new_page>
+
+An edit changes an existing page. Each <find> quotes a passage of the page's current text \
+exactly, and only once; its <replace> gives the new text, and an empty <replace> removes the \
+passage:
+
+<edit path=\"People/Mirela.md\">
+<find>Mirela commands the Gull.</find>
+<replace>Mirela commanded the Gull until her capture.</replace>
+</edit>
+
+Lines such as [Proposed new page \"Places/Kesh Tor.md\": accepted] record your earlier proposals \
+and what became of them; never write them yourself.";
 
 /// A request's messages, and what its context event tells: the pages it carries, how many earlier
 /// messages it leaves out, and whether the index was still being built. All come from this one
@@ -37,23 +60,25 @@ pub fn build(world_name: &str, context: &Context, earlier: &[Message], new: &str
             page.path, page.text
         ));
     }
-    // An answer stopped before any text has nothing to send, and some providers refuse it.
-    let earlier: Vec<&Message> = earlier
+    // An answer stopped before any text or proposal has nothing to send, and some providers
+    // refuse it.
+    let earlier: Vec<ChatMessage> = earlier
         .iter()
-        .filter(|message| !message.text.is_empty())
+        .map(|message| ChatMessage {
+            role: match message.answer {
+                Some(_) => Role::Assistant,
+                None => Role::User,
+            },
+            content: content(message),
+        })
+        .filter(|message| !message.content.is_empty())
         .collect();
     let kept = &earlier[earlier.len() - fitting(&earlier)..];
     let mut messages = vec![ChatMessage {
         role: Role::System,
         content: system,
     }];
-    messages.extend(kept.iter().map(|message| ChatMessage {
-        role: match message.answer {
-            Some(_) => Role::Assistant,
-            None => Role::User,
-        },
-        content: message.text.clone(),
-    }));
+    messages.extend_from_slice(kept);
     messages.push(ChatMessage {
         role: Role::User,
         content: new.to_owned(),
@@ -72,15 +97,25 @@ pub fn build(world_name: &str, context: &Context, earlier: &[Message], new: &str
     }
 }
 
+/// What an earlier message sends: its text, followed for an answer by one line per proposal.
+fn content(message: &Message) -> String {
+    let mut content = message.text.clone();
+    if !content.is_empty() && !message.proposals.is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str(&message.proposals.join("\n"));
+    content
+}
+
 /// How many of the latest `earlier` messages fit in `EARLIER_LIMIT` characters, taken newest
 /// first; a message that does not fit leaves out every older one.
-fn fitting(earlier: &[&Message]) -> usize {
+fn fitting(earlier: &[ChatMessage]) -> usize {
     let mut used = 0;
     earlier
         .iter()
         .rev()
         .take_while(|message| {
-            used += message.text.chars().count();
+            used += message.content.chars().count();
             used <= EARLIER_LIMIT
         })
         .count()
@@ -92,7 +127,11 @@ mod tests {
     use crate::assistant::store::AnswerState;
 
     fn message(text: String, answer: Option<AnswerState>) -> Message {
-        Message { text, answer }
+        Message {
+            text,
+            answer,
+            proposals: Vec::new(),
+        }
     }
 
     #[test]
@@ -156,5 +195,37 @@ mod tests {
             ]
         );
         assert_eq!(request.left_out, 2);
+    }
+
+    #[test]
+    fn earlier_answers_send_their_proposals_as_lines_after_their_text() {
+        let line = "[Proposed new page \"Places/Kesh Tor.md\": accepted]";
+        let with = |text: &str, proposals: &[&str]| Message {
+            text: text.to_owned(),
+            answer: Some(AnswerState::Complete),
+            proposals: proposals.iter().map(|line| (*line).to_owned()).collect(),
+        };
+        let earlier = [
+            with(
+                "Here it is.",
+                &[line, "[Proposed edit of \"A.md\": undone]"],
+            ),
+            with("", &[line]),
+        ];
+
+        let request = build("Kesh", &Context::default(), &earlier, "Now?");
+
+        let sent: Vec<&str> = request.messages[1..3]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                format!("Here it is.\n\n{line}\n[Proposed edit of \"A.md\": undone]").as_str(),
+                line,
+            ]
+        );
+        assert!(request.messages[0].content.contains("<edit path="));
     }
 }

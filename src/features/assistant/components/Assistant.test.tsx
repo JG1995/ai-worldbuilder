@@ -141,7 +141,12 @@ describe("sending a message", () => {
     act(() => pending.send({ kind: "text", delta: "Ketil." }));
     expect(answers()[0]).toHaveTextContent("Brother Ketil.");
     await act(async () =>
-      pending.end({ state: "complete", conversation: 7, text: "Brother Ketil, the monk." }),
+      pending.end({
+        state: "complete",
+        conversation: 7,
+        text: "Brother Ketil, the monk.",
+        answer: 11,
+      }),
     );
 
     expect(answers()[0]).toHaveTextContent("Brother Ketil, the monk.");
@@ -153,7 +158,9 @@ describe("sending a message", () => {
     const { sends, sent } = mockPendingSends();
     renderAssistant();
     const pending = await startAnswer(sends, "Who lives at Kesh Tor?");
-    await act(async () => pending.end({ state: "complete", conversation: 7, text: "A monk." }));
+    await act(async () =>
+      pending.end({ state: "complete", conversation: 7, text: "A monk.", answer: 11 }),
+    );
 
     sendMessage("And who else?");
 
@@ -169,7 +176,9 @@ describe("sending a message", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(calls.map(({ command }) => command)).toContain("assistant_stop"));
-    await act(async () => pending.end({ state: "stopped", conversation: 7, text: "Brother" }));
+    await act(async () =>
+      pending.end({ state: "stopped", conversation: 7, text: "Brother", answer: 11 }),
+    );
 
     expect(answers()[0]).toHaveTextContent("Brother");
     expect(screen.getByText("Stopped.")).toBeInTheDocument();
@@ -251,6 +260,7 @@ describe("failures", () => {
         state: "failed",
         conversation: 7,
         text: "",
+        answer: null,
         reason: "key_unreadable",
         detail: "The keychain is locked.",
         providerMessage: null,
@@ -283,6 +293,7 @@ describe("failures", () => {
       state: "failed",
       conversation: 7,
       text: "",
+      answer: null,
       reason: "interrupted",
       detail: null,
       providerMessage: null,
@@ -322,6 +333,7 @@ describe("failures", () => {
         state: "failed",
         conversation: 7,
         text: "Brother",
+        answer: 11,
         reason,
         detail: "Connection refused",
         providerMessage: "<b>Slow down</b>",
@@ -379,7 +391,7 @@ describe("answers as references into the world", () => {
   /** Sends a message whose answer ends with `text`, and returns the answer's editor. */
   async function answered(sends: PendingSend[]) {
     const pending = await startAnswer(sends, "Where is the shrine?");
-    await act(async () => pending.end({ state: "complete", conversation: 7, text }));
+    await act(async () => pending.end({ state: "complete", conversation: 7, text, answer: 11 }));
     return answers()[0];
   }
 
@@ -437,7 +449,7 @@ describe("answers as references into the world", () => {
     const pending = await startAnswer(sends, "Where is the shrine?");
     act(() => pending.send({ kind: "text", delta: "See" }));
     expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
-    await act(async () => pending.end({ state: "complete", conversation: 7, text }));
+    await act(async () => pending.end({ state: "complete", conversation: 7, text, answer: 11 }));
 
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
 
@@ -458,6 +470,7 @@ describe("saved conversations", () => {
       { role: "user", text: "Where is Saltmere?", time: 100 },
       {
         role: "answer",
+        id: 12,
         text: "See [[Kesh Tor#Shrine]].",
         time: 101,
         state: "complete",
@@ -559,7 +572,7 @@ describe("saved conversations", () => {
       assistant_conversation: byId,
       // Ends the running answer as the core does, before it resolves.
       assistant_stop: () => {
-        sends.at(-1)?.end({ state: "stopped", conversation: 7, text: "" });
+        sends.at(-1)?.end({ state: "stopped", conversation: 7, text: "", answer: 11 });
         return null;
       },
     });
@@ -697,7 +710,9 @@ describe("saved conversations", () => {
     );
     const pending = await startAnswer(sends, "Who lives at Kesh Tor?");
     notice = { kind: "not_saved", reason: "The conversation store cannot be written." };
-    await act(async () => pending.end({ state: "complete", conversation: 7, text: "A monk." }));
+    await act(async () =>
+      pending.end({ state: "complete", conversation: 7, text: "A monk.", answer: 11 }),
+    );
 
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(

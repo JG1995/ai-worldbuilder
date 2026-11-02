@@ -171,11 +171,13 @@ impl AnswerState {
 }
 
 /// A stored message as a request carries it: a user message (`answer` is `None`) or an answer and
-/// how it ended.
+/// how it ended, with one line for each of its proposals that names its kind, its path and what
+/// became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub text: String,
     pub answer: Option<AnswerState>,
+    pub proposals: Vec<String>,
 }
 
 /// What an answer's request carried, saved with the answer.
@@ -224,7 +226,9 @@ pub struct Passage {
 }
 
 /// Where a proposal stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
 pub enum ProposalState {
     Pending,
     Accepted,
@@ -394,9 +398,10 @@ pub enum SavedMessage {
         text: String,
         time: i64,
     },
-    /// An answer, with the pages its request carried in the order chosen, how many earlier
-    /// messages it left out, and whether the world was still being indexed.
+    /// An answer, by its id, with the pages its request carried in the order chosen, how many
+    /// earlier messages it left out, and whether the world was still being indexed.
     Answer {
+        id: i64,
         text: String,
         time: i64,
         state: AnswerState,
@@ -465,10 +470,6 @@ impl Store {
 
     /// Takes the sets that were unfinished when the store opened, so they are resolved once. Sets
     /// begun since are never among them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     pub fn take_unfinished(&mut self) -> Vec<UnfinishedSet> {
         std::mem::take(&mut self.unfinished)
     }
@@ -633,10 +634,6 @@ impl Store {
     }
 
     /// Rejects a pending proposal that belongs to no set.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     pub fn reject(&mut self, proposal: i64) -> Result<(), AppError> {
         self.write(|transaction| {
             let standing = proposal_standing(transaction, proposal)?
@@ -655,10 +652,6 @@ impl Store {
     /// Begins a set of `answer`'s proposals for an accept that recorded `change`, before the
     /// accept writes anything: each proposal must be pending and in no set, and takes the path
     /// the accept writes and the hash of the text it writes there. Returns the set's id.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     pub fn begin_accept(
         &mut self,
         answer: i64,
@@ -697,10 +690,6 @@ impl Store {
 
     /// Marks an accepted set as being undone, before the undo writes anything, and returns its
     /// accepted proposals' pages.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     pub fn begin_undo(&mut self, set: i64) -> Result<UnfinishedSet, AppError> {
         self.write(|transaction| {
             let state: SetState = transaction
@@ -732,10 +721,6 @@ impl Store {
     /// accept with the proposals it wrote, an undo with none, and resolves a set left unfinished
     /// with the proposals whose pages hold their results. A set that is no longer unfinished is
     /// left as it is.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     pub fn settle(&mut self, set: i64, accepted: &[i64]) -> Result<Settling, AppError> {
         self.write(|transaction| {
             let state = transaction
@@ -789,20 +774,36 @@ impl Store {
 
     /// `conversation`'s messages in order, as a request carries them.
     pub fn messages(&self, conversation: i64) -> Result<Vec<Message>, AppError> {
+        self.read_messages(conversation).map_err(store_error)
+    }
+
+    fn read_messages(&self, conversation: i64) -> rusqlite::Result<Vec<Message>> {
+        let mut proposals = self.connection.prepare(
+            "SELECT kind, path, state, undone FROM proposals WHERE message = ?1 ORDER BY ordinal",
+        )?;
         let mut statement = self
             .connection
-            .prepare("SELECT text, state FROM messages WHERE conversation = ?1 ORDER BY id")
-            .map_err(store_error)?;
-        statement
-            .query_map([conversation], |row| {
-                let state: Option<String> = row.get(1)?;
-                Ok(Message {
-                    text: row.get(0)?,
-                    answer: state.as_deref().and_then(AnswerState::parse),
-                })
-            })
-            .and_then(Iterator::collect)
-            .map_err(store_error)
+            .prepare("SELECT id, text, state FROM messages WHERE conversation = ?1 ORDER BY id")?;
+        let mut rows = statement.query([conversation])?;
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next()? {
+            let state: Option<String> = row.get(2)?;
+            messages.push(Message {
+                text: row.get(1)?,
+                answer: state.as_deref().and_then(AnswerState::parse),
+                proposals: proposals
+                    .query_map([row.get::<_, i64>(0)?], |proposal| {
+                        Ok(summary(
+                            stored(proposal, 0, Kind::parse)?,
+                            &proposal.get::<_, String>(1)?,
+                            stored(proposal, 2, ProposalState::parse)?,
+                            proposal.get(3)?,
+                        ))
+                    })?
+                    .collect::<Result<_, _>>()?,
+            });
+        }
+        Ok(messages)
     }
 
     /// The conversations, the latest message's newest first, and the store's notice.
@@ -834,22 +835,54 @@ impl Store {
             .ok_or_else(no_conversation)
     }
 
+    /// The proposals, notes and sets of the answer `answer`.
+    pub fn answer_proposals(&self, answer: i64) -> Result<AnswerProposals, AppError> {
+        let conversation: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT conversation FROM messages WHERE id = ?1 AND role = ?2",
+                params![answer, ASSISTANT],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(store_error)?;
+        let answers = match conversation {
+            Some(conversation) => self.proposals(conversation)?,
+            None => Vec::new(),
+        };
+        answers
+            .into_iter()
+            .find(|proposals| proposals.answer == answer)
+            .ok_or_else(no_proposal)
+    }
+
+    /// The set `set`.
+    pub fn accept_set(&self, set: i64) -> Result<AcceptSet, AppError> {
+        self.connection
+            .query_row(
+                "SELECT change, started, state FROM accepts WHERE id = ?1",
+                [set],
+                |row| {
+                    Ok(AcceptSet {
+                        id: set,
+                        change: history_change(row.get(0)?, row.get(1)?),
+                        state: stored(row, 2, SetState::parse)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(store_error)?
+            .ok_or_else(no_set)
+    }
+
     /// The answers of `conversation` that have proposals or notes, in order, each with its
     /// proposals and sets.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     pub fn proposals(&self, conversation: i64) -> Result<Vec<AnswerProposals>, AppError> {
         self.read_proposals(conversation)
             .map_err(store_error)?
             .ok_or_else(no_conversation)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from package proposal-flow")
-    )]
     fn read_proposals(&self, conversation: i64) -> rusqlite::Result<Option<Vec<AnswerProposals>>> {
         let exists: bool = self.connection.query_row(
             "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1)",
@@ -911,14 +944,9 @@ impl Store {
             }
             let answer_sets = sets
                 .query_map([answer], |set| {
-                    let change: Option<i64> = set.get(1)?;
-                    let started: Option<i64> = set.get(2)?;
                     Ok(AcceptSet {
                         id: set.get(0)?,
-                        change: change.zip(started).map(|(id, started)| HistoryChange {
-                            id,
-                            started: started as u64,
-                        }),
+                        change: history_change(set.get(1)?, set.get(2)?),
                         state: stored(set, 3, SetState::parse)?,
                     })
                 })?
@@ -962,6 +990,7 @@ impl Store {
             let message = match state.as_deref().and_then(AnswerState::parse) {
                 None => SavedMessage::User { text, time },
                 Some(state) => SavedMessage::Answer {
+                    id: row.get(0)?,
                     text,
                     time,
                     state,
@@ -1297,6 +1326,29 @@ fn stored<T>(
     })
 }
 
+/// The history change stored as its id and start time, when there is one.
+fn history_change(id: Option<i64>, started: Option<i64>) -> Option<HistoryChange> {
+    id.zip(started).map(|(id, started)| HistoryChange {
+        id,
+        started: started as u64,
+    })
+}
+
+/// The line a request carries for a proposal: its kind, its path and what became of it.
+fn summary(kind: Kind, path: &str, state: ProposalState, undone: bool) -> String {
+    let kind = match kind {
+        Kind::NewPage => "new page",
+        Kind::Edit => "edit of",
+    };
+    let outcome = match (state, undone) {
+        (ProposalState::Pending, false) => "pending",
+        (ProposalState::Pending, true) => "undone",
+        (ProposalState::Accepted, _) => "accepted",
+        (ProposalState::Rejected, _) => "rejected",
+    };
+    format!("[Proposed {kind} \"{path}\": {outcome}]")
+}
+
 /// A hash as it is stored: its bits as a signed integer, since SQLite has no unsigned one.
 fn hash_value(hash: u64) -> i64 {
     hash as i64
@@ -1378,6 +1430,7 @@ mod tests {
         Message {
             text: text.to_owned(),
             answer: None,
+            proposals: Vec::new(),
         }
     }
 
@@ -1420,7 +1473,7 @@ mod tests {
         let first = store.add_user_message(None, &long, 10).unwrap();
         let second = store.add_user_message(None, "Saltmere", 20).unwrap();
         let pages = [("Places/Saltmere.md".to_owned(), true)];
-        store
+        let answer = store
             .add_answer(
                 first,
                 &Answer {
@@ -1454,6 +1507,7 @@ mod tests {
                         time: 10
                     },
                     SavedMessage::Answer {
+                        id: answer,
                         text: "Long".to_owned(),
                         time: 30,
                         state: AnswerState::CutOff,
@@ -1534,7 +1588,8 @@ mod tests {
                 user("Hello"),
                 Message {
                     text: "Hi".to_owned(),
-                    answer: Some(AnswerState::Complete)
+                    answer: Some(AnswerState::Complete),
+                    proposals: Vec::new(),
                 }
             ]
         );

@@ -217,7 +217,7 @@ fn strip_suffix_ignoring_case<'a>(text: &'a str, suffix: &str) -> &'a str {
     }
 }
 
-fn is_attachment(target: &str) -> bool {
+pub(crate) fn is_attachment(target: &str) -> bool {
     target.rsplit_once('.').is_some_and(|(_, extension)| {
         ATTACHMENTS
             .iter()

@@ -754,6 +754,7 @@ type PreviewConversation = Conversation & { updated: number };
 const conversationsOf = new Map<PreviewWorld, PreviewConversation[]>();
 const storeNotices = new Map<PreviewWorld, StoreNotice>();
 let nextConversation = 1;
+let nextAnswer = 1;
 
 function conversationsIn(open: PreviewWorld) {
   const known = conversationsOf.get(open) ?? [];
@@ -769,13 +770,15 @@ function requireConversation(open: PreviewWorld, id: unknown) {
 
 const nowInSeconds = () => Math.floor(Date.now() / 1000);
 
-/** Saves how an answer ended in its conversation, as the core does. */
+/** Saves how an answer ended in its conversation, as the core does, and returns its id. */
 function saveAnswer(conversation: PreviewConversation, end: AnswerEnd, pages: ContextPage[]) {
   const state = end.state === "failed" ? (end.text === "" ? null : "stopped") : end.state;
-  if (state === null) return;
+  if (state === null) return null;
   const time = nowInSeconds();
+  const id = nextAnswer++;
   const answer: SavedMessage = {
     role: "answer",
+    id,
     text: end.text,
     time,
     state,
@@ -785,6 +788,7 @@ function saveAnswer(conversation: PreviewConversation, end: AnswerEnd, pages: Co
   };
   conversation.messages.push(answer);
   conversation.updated = time;
+  return id;
 }
 
 /** Waits `ms` milliseconds, or until a stop. */
@@ -891,10 +895,7 @@ async function sendAnswer(
   }
   const id = shown.id;
   const pages = contextOf(open, active, message);
-  const saved = (end: AnswerEnd) => {
-    saveAnswer(shown, end, pages);
-    return end;
-  };
+  const saved = (end: AnswerEnd): AnswerEnd => ({ ...end, answer: saveAnswer(shown, end, pages) });
 
   let end = () => {};
   const ended = new Promise<void>((resolve) => {
@@ -908,11 +909,13 @@ async function sendAnswer(
     const reason = providerFailures.find((failure) => message === `fail:${failure}`);
     if (reason) {
       await pause(run, 300);
-      if (run.stopped) return saved({ state: "stopped", conversation: id, text: answer });
+      if (run.stopped)
+        return saved({ state: "stopped", conversation: id, text: answer, answer: null });
       return saved({
         state: "failed",
         conversation: id,
         text: answer,
+        answer: null,
         reason,
         detail: "Sample detail from the preview",
         providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
@@ -920,11 +923,12 @@ async function sendAnswer(
     }
     for (const delta of cannedAnswer(active)) {
       await pause(run, 100);
-      if (run.stopped) return saved({ state: "stopped", conversation: id, text: answer });
+      if (run.stopped)
+        return saved({ state: "stopped", conversation: id, text: answer, answer: null });
       answer += delta;
       onEvent({ kind: "text", delta });
     }
-    return saved({ state: "complete", conversation: id, text: answer });
+    return saved({ state: "complete", conversation: id, text: answer, answer: null });
   } finally {
     answering = null;
     run.end();

@@ -23,6 +23,7 @@ use serde::Serialize;
 
 use crate::order::{natural_order, path_order};
 pub use database::file;
+pub(crate) use parse::is_attachment;
 pub use parse::{Parsed, parse};
 use resolve::Table;
 pub use resolve::creation_path;

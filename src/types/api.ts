@@ -1,8 +1,12 @@
 // The shapes the Rust core sends and takes. ts-rs generates them from the Rust types into
 // ./generated/ when the Rust tests run (`pnpm bindings`); never edit those files by hand.
 
+export type { Accepted } from "./generated/Accepted";
+export type { AcceptedSet } from "./generated/AcceptedSet";
+export type { AcceptFailure } from "./generated/AcceptFailure";
 export type { AnswerEnd } from "./generated/AnswerEnd";
 export type { AnswerEvent } from "./generated/AnswerEvent";
+export type { AnswerReview } from "./generated/AnswerReview";
 export type { AnswerState } from "./generated/AnswerState";
 export type { Backlink } from "./generated/Backlink";
 export type { Backlinks } from "./generated/Backlinks";
@@ -31,6 +35,11 @@ export type { PageMatch } from "./generated/PageMatch";
 export type { PageMatches } from "./generated/PageMatches";
 export type { PageText } from "./generated/PageText";
 export type { PageVersion } from "./generated/PageVersion";
+export type { ProposalCheck } from "./generated/ProposalCheck";
+export type { ProposalKind } from "./generated/ProposalKind";
+export type { ProposalReview } from "./generated/ProposalReview";
+export type { ProposalState } from "./generated/ProposalState";
+export type { ProposalVersion } from "./generated/ProposalVersion";
 export type { ProviderFailure } from "./generated/ProviderFailure";
 export type { ProviderField } from "./generated/ProviderField";
 export type { ProviderSaved } from "./generated/ProviderSaved";
@@ -45,9 +54,11 @@ export type { TextMatch } from "./generated/TextMatch";
 export type { TextMatches } from "./generated/TextMatches";
 export type { TextProvider } from "./generated/TextProvider";
 export type { TreeEntry } from "./generated/TreeEntry";
+export type { Undone } from "./generated/Undone";
 export type { VersionKind } from "./generated/VersionKind";
 export type { Workspace } from "./generated/Workspace";
 export type { WorldOpened } from "./generated/WorldOpened";
+export type { WrittenPage } from "./generated/WrittenPage";
 
 /**
  * The watcher's, the world history's and the page index's events, by the name each is sent under. Each carries the

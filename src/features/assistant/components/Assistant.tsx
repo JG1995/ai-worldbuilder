@@ -262,7 +262,8 @@ export function Assistant({
     if (shownCount.current !== count) return;
     // Text that arrives after the answer has ended is dropped: the end carries the final text.
     const onEvent = (event: AnswerEvent) => {
-      if (shownCount.current !== count) return;
+      // Proposals are not shown yet.
+      if (shownCount.current !== count || event.kind === "proposal") return;
       if (event.kind === "context") {
         const context = {
           pages: event.pages,
