@@ -3179,6 +3179,7 @@ mod tests {
                 let (world, mut history) = batch_world(&app_data);
                 fs::write(world.path().join("Latin.md"), b"caf\xe9\n").unwrap();
                 let latin = page::version_of(b"caf\xe9\n");
+                #[cfg_attr(not(unix), allow(unused_mut))]
                 let mut cases = vec![
                     (
                         edit("Lf.md", "# Lf\nNew\n", &page::version_of(b"before\n")),
