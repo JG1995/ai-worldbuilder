@@ -29,6 +29,8 @@ export type { ProviderSaved } from "./generated/ProviderSaved";
 export type { RecentWorld } from "./generated/RecentWorld";
 export type { RestoredPage } from "./generated/RestoredPage";
 export type { Settings } from "./generated/Settings";
+export type { TestFailure } from "./generated/TestFailure";
+export type { TestOutcome } from "./generated/TestOutcome";
 export type { TextLine } from "./generated/TextLine";
 export type { TextMatch } from "./generated/TextMatch";
 export type { TextMatches } from "./generated/TextMatches";

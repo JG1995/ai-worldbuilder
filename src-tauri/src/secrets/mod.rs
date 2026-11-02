@@ -4,10 +4,11 @@
 //! file `grimoire-data/keys.json`, `{ "format": 1, "textProvider": "<key>" }`, which only the
 //! user's account can read.
 //!
-//! No function here returns, formats or prints a key, and nothing that holds one derives `Debug`.
+//! Only `read` returns the key, for the request that sends it. Nothing here formats or prints a
+//! key, and nothing that holds one derives `Debug`.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -102,6 +103,20 @@ impl Secrets {
         }
     }
 
+    /// The key stored in `storage`, or `None` when none is stored. A key file that group or others
+    /// can read is never used.
+    pub fn read(&self, storage: KeyStorage) -> Result<Option<String>, SecretsError> {
+        match storage {
+            KeyStorage::Keychain => self
+                .entry()?
+                .get_password()
+                .map(Some)
+                .map_err(keychain_error),
+            KeyStorage::File => self.read_key_file().map(Some),
+            KeyStorage::None => Ok(None),
+        }
+    }
+
     /// The keychain entry of the text provider's key, building the store if it is not built yet.
     fn entry(&self) -> Result<Entry, SecretsError> {
         let mut store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -126,6 +141,37 @@ impl Secrets {
         write_atomically(file, &bytes, true).map_err(SecretsError::File)
     }
 
+    /// The key file's key. No reason quotes the file's content, which holds the key.
+    fn read_key_file(&self) -> Result<String, SecretsError> {
+        let path = self.key_file.as_deref().ok_or_else(no_data_folder)?;
+        let mut file = File::open(path).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => file_error("The key file is missing."),
+            _ => SecretsError::File(error),
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The open file's own mode, so it cannot change between the check and the read.
+            let mode = file
+                .metadata()
+                .map_err(SecretsError::File)?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                return Err(file_error(
+                    "The key file is open to other users, so it is not used. Remove the key and save it again.",
+                ));
+            }
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(SecretsError::File)?;
+        serde_json::from_slice::<KeyFile>(&bytes)
+            .ok()
+            .filter(|stored| stored.format == KEY_FILE_FORMAT)
+            .map(|stored| stored.text_provider)
+            .ok_or_else(|| file_error("The key file holds no key Grimoire.md can read."))
+    }
+
     /// The key file holds only the text provider's key, so without it the file is deleted.
     fn delete_key_file(&self) -> Result<(), SecretsError> {
         let Some(file) = &self.key_file else {
@@ -136,6 +182,18 @@ impl Secrets {
             _ => Ok(()),
         }
     }
+}
+
+/// The key file's content. It holds the key, so it derives no `Debug`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyFile {
+    format: u32,
+    text_provider: String,
+}
+
+fn file_error(reason: &str) -> SecretsError {
+    SecretsError::File(io::Error::other(reason))
 }
 
 fn no_data_folder() -> SecretsError {
@@ -350,6 +408,74 @@ mod tests {
 
         assert_eq!(keychain.password().unwrap(), "sk-new");
         assert!(!key_file(&folder).exists());
+    }
+
+    #[test]
+    fn a_stored_key_is_read_back_from_the_keychain_and_the_key_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let keychain = MockKeychain::new();
+        let secrets = keychain.secrets(Some(folder.path()));
+        secrets.store(KEY, false).unwrap();
+        let file_only = MockKeychain::unreachable(Some(folder.path()));
+        file_only.store("sk-in-file", true).unwrap();
+
+        assert_eq!(
+            secrets.read(KeyStorage::Keychain).unwrap().as_deref(),
+            Some(KEY)
+        );
+        assert_eq!(
+            secrets.read(KeyStorage::File).unwrap().as_deref(),
+            Some("sk-in-file")
+        );
+        assert_eq!(secrets.read(KeyStorage::None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_read_gives_a_reason_without_the_key() {
+        let folder = tempfile::tempdir().unwrap();
+        let keychain = MockKeychain::new();
+        let secrets = keychain.secrets(Some(folder.path()));
+
+        let SecretsError::Keychain(reason) = secrets.read(KeyStorage::Keychain).unwrap_err() else {
+            panic!("expected a keychain error");
+        };
+        assert_eq!(reason, "The system keychain holds no key.");
+        let SecretsError::File(error) = secrets.read(KeyStorage::File).unwrap_err() else {
+            panic!("expected a file error");
+        };
+        assert_eq!(error.to_string(), "The key file is missing.");
+        assert!(matches!(
+            MockKeychain::unreachable(None).read(KeyStorage::Keychain),
+            Err(SecretsError::NoKeychain)
+        ));
+
+        // A key file that holds the key in a form it cannot use never quotes it.
+        fs::write(key_file(&folder), json!({ "format": KEY }).to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(key_file(&folder), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let SecretsError::File(error) = secrets.read(KeyStorage::File).unwrap_err() else {
+            panic!("expected a file error");
+        };
+        assert!(!error.to_string().contains(KEY), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_file_open_to_other_users_is_not_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let secrets = MockKeychain::unreachable(Some(folder.path()));
+        secrets.store(KEY, true).unwrap();
+        fs::set_permissions(key_file(&folder), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let SecretsError::File(error) = secrets.read(KeyStorage::File).unwrap_err() else {
+            panic!("expected a file error");
+        };
+
+        assert!(error.to_string().contains("open to other users"), "{error}");
     }
 
     /// Stores, finds and deletes a key in the real platform keychain, under a service of its own.

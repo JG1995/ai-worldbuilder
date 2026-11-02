@@ -71,6 +71,35 @@ test("without a keychain, the key is stored in a file only after the warning", a
   await expect(settings.getByRole("alert")).toHaveCount(0);
 });
 
+test("Test connection shows success, and the preview's rate-limited model a warning", async ({
+  page,
+}) => {
+  const { settings } = await openFromWelcome(page);
+  const testButton = settings.getByRole("button", { name: "Test connection" });
+  await expect(testButton).toBeDisabled();
+  await settings.getByLabel("Base URL").fill("https://openrouter.ai/api/v1");
+  await settings.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
+  await settings.getByRole("button", { name: "Save" }).click();
+  await expect(testButton).toBeEnabled();
+
+  await testButton.click();
+
+  await expect(settings.getByRole("status")).toContainText(
+    "The connection works. anthropic/claude-sonnet-4.5 answered.",
+  );
+
+  // The preview's stand-in for a provider that limits requests.
+  await settings.getByLabel("Model").fill("fail:rate_limited");
+  await expect(testButton).toBeDisabled();
+  await settings.getByRole("button", { name: "Save" }).click();
+  await expect(settings.getByRole("status")).toHaveCount(0);
+  await testButton.click();
+
+  await expect(settings.getByRole("alert")).toContainText(
+    "The provider is limiting requests. Try again later.",
+  );
+});
+
 test("Ctrl+, opens Settings from a world", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");

@@ -1,7 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import type { IpcError } from "@/lib/ipc";
-import type { ProviderField, Settings as SavedSettings, TextProvider } from "@/types/api";
+import type {
+  ProviderField,
+  Settings as SavedSettings,
+  TestOutcome,
+  TextProvider,
+} from "@/types/api";
 import { Button } from "@/ui/Button";
 import { Dialog } from "@/ui/Dialog";
 import { Notice } from "@/ui/Notice";
@@ -10,6 +15,8 @@ import { Toggle } from "@/ui/Toggle";
 import {
   providerKeyRemove,
   providerSave,
+  providerTest,
+  providerTestCancel,
   settingsAiSet,
   settingsGet,
   settingsGetKey,
@@ -53,6 +60,44 @@ function keyStatus(provider: TextProvider | null) {
   }
 }
 
+/** `text`, then `reason` when there is one, as one sentence. */
+function withReason(text: string, reason: string | null) {
+  if (!reason) return `${text}.`;
+  return /[.!?]$/.test(reason) ? `${text}: ${reason}` : `${text}: ${reason}.`;
+}
+
+type FailedTest = Extract<TestOutcome, { state: "failed" }>;
+
+/** What a failed test means for the provider saved at `host`, and what to check. */
+function failureText({ reason, detail }: FailedTest, host: string) {
+  switch (reason) {
+    case "unreachable":
+      return `${withReason(`${host} could not be reached`, detail)} Check the base URL and your network connection.`;
+    case "insecure":
+      return `${withReason(`The secure connection to ${host} failed`, detail)} Check the base URL, and that the server's certificate is valid.`;
+    case "timeout":
+      return `${host} did not answer within 60 seconds. Try again later, or check the base URL.`;
+    case "key_refused":
+      return "The provider refused the API key. Check that the key is valid for this provider.";
+    case "key_needed":
+      return "The provider needs an API key. Type one and save it.";
+    case "not_found":
+      return "The base URL or the model was not found. Check the base URL, and copy the model's ID from the provider's list of models.";
+    case "rate_limited":
+      return "The provider is limiting requests. Try again later.";
+    case "refused":
+      return "The provider refused the request.";
+    case "provider_error":
+      return "The provider reported a problem on its side. Try again later.";
+    case "redirected":
+      return `The provider redirected the request to ${detail ?? "another address"}. Check the base URL.`;
+    case "invalid_reply":
+      return "The answer is not an OpenAI-compatible chat reply. Check the base URL.";
+    case "key_unreadable":
+      return withReason("The key cannot be read from its storage", detail);
+  }
+}
+
 /** The origin of `text` as a URL, or null when it is not one. */
 function originOf(text: string) {
   try {
@@ -81,10 +126,23 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
   // Bumped to move focus to the key field once the control that had it is gone.
   const [keyFocusRequest, setKeyFocusRequest] = useState(0);
   const groupId = useId();
+  const testHintId = useId();
+  // A test runs on its own, so a save, a removal or the switch can abandon it.
+  const testRunning = useRef(false);
+  const [testing, setTesting] = useState(false);
+  const [testOutcome, setTestOutcome] = useState<TestOutcome | null>(null);
 
   useEffect(() => {
     if (keyFocusRequest > 0) keyInput.current?.focus();
   }, [keyFocusRequest]);
+
+  // Closing Settings abandons a running test.
+  useEffect(
+    () => () => {
+      if (testRunning.current) providerTestCancel().catch(() => {});
+    },
+    [],
+  );
 
   const focusKeyField = () => setKeyFocusRequest((request) => request + 1);
   const keyTyped = draft.key.trim() !== "";
@@ -106,6 +164,23 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
     setFieldError(null);
     setAskKeyFile(false);
     setFailure(null);
+    setTestOutcome(null);
+  }
+
+  async function testConnection() {
+    if (testRunning.current) return;
+    testRunning.current = true;
+    setTesting(true);
+    setTestOutcome(null);
+    setFailure(null);
+    try {
+      setTestOutcome(await providerTest());
+    } catch (error) {
+      setFailure(`The connection could not be tested: ${(error as IpcError).message}`);
+    } finally {
+      testRunning.current = false;
+      setTesting(false);
+    }
   }
 
   function edit(field: keyof Draft, value: string) {
@@ -278,12 +353,27 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
               <Button variant="primary" type="submit" disabled={!edited} loading={saving}>
                 Save
               </Button>
+              <Button
+                variant="secondary"
+                disabled={!provider || edited}
+                loading={testing}
+                onClick={() => void testConnection()}
+                aria-describedby={edited ? testHintId : undefined}
+              >
+                Test connection
+              </Button>
               {keyStored && (
                 <Button variant="ghost" onClick={() => setConfirmingRemoval(true)}>
                   Remove key
                 </Button>
               )}
             </div>
+            {edited && (
+              <p id={testHintId} className="ui-small text-text-muted">
+                Save your changes to test the connection.
+              </p>
+            )}
+            {testOutcome && provider && <TestResult outcome={testOutcome} provider={provider} />}
           </form>
         )}
       </Dialog>
@@ -294,6 +384,22 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
         />
       )}
     </>
+  );
+}
+
+/** The test's result; a cancelled test shows none. The provider's message is plain text. */
+function TestResult({ outcome, provider }: { outcome: TestOutcome; provider: TextProvider }) {
+  if (outcome.state === "cancelled") return null;
+  if (outcome.state === "connected") {
+    return <Notice status="success">The connection works. {provider.model} answered.</Notice>;
+  }
+  return (
+    <Notice status={outcome.reason === "rate_limited" ? "warning" : "error"}>
+      <span className="block">{failureText(outcome, provider.host)}</span>
+      {outcome.providerMessage && (
+        <span className="block break-words">The provider's message: {outcome.providerMessage}</span>
+      )}
+    </Notice>
   );
 }
 

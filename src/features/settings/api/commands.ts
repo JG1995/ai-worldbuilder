@@ -1,5 +1,5 @@
 import { invokeCommand } from "@/lib/ipc";
-import type { ProviderSaved, Settings } from "@/types/api";
+import type { ProviderSaved, Settings, TestOutcome } from "@/types/api";
 
 /** The saved settings: whether AI is on, and the saved text provider without its key. */
 export const settingsGet = () => invokeCommand<Settings>("settings_get");
@@ -32,3 +32,13 @@ export const providerSave = (
  * and with `keychain` or `io` when the key cannot be deleted, which keeps it recorded.
  */
 export const providerKeyRemove = () => invokeCommand<Settings>("provider_key_remove");
+
+/**
+ * Sends one test request to the saved provider. Answers `cancelled` when the test was abandoned
+ * meanwhile, and `failed` with the reason otherwise. Rejects with `ai_off` while AI is off,
+ * `not_found` without a saved provider and `conflict` while another test runs.
+ */
+export const providerTest = () => invokeCommand<TestOutcome>("provider_test");
+
+/** Abandons a running test, whose result is then discarded. */
+export const providerTestCancel = () => invokeCommand<null>("provider_test_cancel");

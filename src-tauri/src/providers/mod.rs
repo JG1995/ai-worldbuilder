@@ -1,7 +1,13 @@
-//! The `providers` area: where requests to an AI provider go. For now, the rules a text provider's
-//! base URL must follow.
+//! The `providers` area: where requests to an AI provider go. It holds the rules a text provider's
+//! base URL must follow, and in `chat` the only code that sends a request.
+
+mod chat;
 
 use std::net::IpAddr;
+
+#[cfg(test)]
+pub use chat::test_support;
+pub use chat::{TIMEOUT, TestFailure, TestOutcome, test};
 
 use url::{Host, Origin, Url};
 
@@ -60,6 +66,11 @@ impl BaseUrl {
             "/" => text.strip_suffix('/').unwrap_or(text),
             _ => text,
         }
+    }
+
+    /// Where a chat request goes: the base URL followed by `/chat/completions`.
+    pub fn chat_url(&self) -> String {
+        format!("{}{CHAT_PATH}", self.as_str())
     }
 
     /// The scheme, host and port that a stored key belongs to.

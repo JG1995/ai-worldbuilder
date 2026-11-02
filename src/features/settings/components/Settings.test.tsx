@@ -2,7 +2,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderSaved, Settings as SavedSettings, TextProvider } from "@/types/api";
+import type {
+  ProviderSaved,
+  Settings as SavedSettings,
+  TestFailure,
+  TestOutcome,
+  TextProvider,
+} from "@/types/api";
+import { glyphs } from "@/ui/icon-glyphs";
 import { Settings } from "./Settings";
 
 type Handler = (args: Record<string, unknown>) => unknown;
@@ -23,6 +30,7 @@ const saved = (settings: SavedSettings): ProviderSaved => ({ state: "saved", set
 
 const keychainLine = "Stored in the system keychain. Sent only to openrouter.ai.";
 const fileLine = "Stored in a file only your account can read. Sent only to openrouter.ai.";
+const saveFirst = "Save your changes to test the connection.";
 const keyFileWarning =
   "No system keychain is available, so the key cannot be stored there. Grimoire.md can store it in a file in its data folder that only your user account can read. Anyone who can use your account or read your backups can read the key.";
 
@@ -250,6 +258,114 @@ describe("Settings", () => {
     expect(calls.at(-1)?.command).toBe("provider_key_remove");
     expect(screen.queryByRole("button", { name: "Remove key" })).not.toBeInTheDocument();
     expect(field("API key")).toHaveFocus();
+  });
+
+  it("offers Test connection only for a saved provider without unsaved edits", async () => {
+    renderSettings(empty);
+    await dialog();
+    const test = screen.getByRole("button", { name: "Test connection" });
+    expect(test).toBeDisabled();
+    expect(screen.queryByText(saveFirst)).not.toBeInTheDocument();
+
+    type("Base URL", BASE_URL);
+
+    expect(test).toBeDisabled();
+    expect(test).toHaveAccessibleDescription(saveFirst);
+  });
+
+  it("shows the working state while a test runs, then the success line", async () => {
+    let answer: (outcome: TestOutcome) => void = () => {};
+    const { calls } = renderSettings(withKey, {
+      provider_test: () => new Promise<TestOutcome>((resolve) => (answer = resolve)),
+    });
+    await dialog();
+    const test = screen.getByRole("button", { name: "Test connection" });
+    expect(test).toBeEnabled();
+
+    fireEvent.click(test);
+
+    await waitFor(() => expect(test).toHaveAttribute("aria-busy", "true"));
+    expect(test).toHaveTextContent("Working…");
+    // A second press while the test runs starts nothing.
+    fireEvent.click(test);
+    answer({ state: "connected" });
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      `The connection works. ${MODEL} answered.`,
+    );
+    expect(test).not.toHaveAttribute("aria-busy");
+    expect(calls.filter(({ command }) => command === "provider_test")).toHaveLength(1);
+  });
+
+  it.each([
+    ["unreachable", "openrouter.ai could not be reached: Connection refused (os error 111)."],
+    [
+      "insecure",
+      "The secure connection to openrouter.ai failed: Connection refused (os error 111).",
+    ],
+    ["timeout", "openrouter.ai did not answer within 60 seconds."],
+    ["key_refused", "The provider refused the API key."],
+    ["key_needed", "The provider needs an API key."],
+    ["not_found", "The base URL or the model was not found."],
+    ["rate_limited", "The provider is limiting requests. Try again later."],
+    ["refused", "The provider refused the request."],
+    ["provider_error", "The provider reported a problem on its side."],
+    ["redirected", "The provider redirected the request to Connection refused (os error 111)."],
+    ["invalid_reply", "The answer is not an OpenAI-compatible chat reply."],
+    [
+      "key_unreadable",
+      "The key cannot be read from its storage: Connection refused (os error 111).",
+    ],
+  ] satisfies [TestFailure, string][])("explains a failed test: %s", async (reason, text) => {
+    renderSettings(withKey, {
+      provider_test: () => ({
+        state: "failed",
+        reason,
+        detail: "Connection refused (os error 111)",
+        providerMessage: "Model <b>gone</b> & retired",
+      }),
+    });
+    await dialog();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent(text);
+    expect(notice).toHaveTextContent("Model <b>gone</b> & retired");
+    expect(notice.querySelector("b")).toBeNull();
+    expect(notice.querySelector(".icon")).toHaveTextContent(
+      reason === "rate_limited" ? glyphs.warning : glyphs.error,
+    );
+  });
+
+  it("abandons a running test when it closes", async () => {
+    const { calls, reopen } = renderSettings(withKey, {
+      provider_test: () => new Promise<TestOutcome>(() => {}),
+      provider_test_cancel: () => null,
+    });
+    await dialog();
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await waitFor(() => expect(calls.at(-1)?.command).toBe("provider_test"));
+
+    reopen();
+
+    await waitFor(() =>
+      expect(calls.map(({ command }) => command)).toContain("provider_test_cancel"),
+    );
+  });
+
+  it("clears the test result when the provider is saved", async () => {
+    renderSettings(withKey, {
+      provider_test: () => ({ state: "connected" }),
+      provider_save: () => saved(withKey),
+    });
+    await dialog();
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByRole("status");
+
+    type("Model", "another/model");
+    fireEvent.click(save());
+
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
   });
 
   it("discards unsaved edits when it closes", async () => {
