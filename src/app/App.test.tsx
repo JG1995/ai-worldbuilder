@@ -165,7 +165,7 @@ describe("the assistant", () => {
     fireEvent.change(message, { target: { value: "Who lives at Kesh Tor?" } });
     fireEvent.keyDown(message, { key: "Enter" });
     await screen.findByRole("button", { name: "Stop" });
-    act(() => send({ kind: "context", conversation: 1, pages: [], leftOut: 0 }));
+    act(() => send({ kind: "context", conversation: 1, pages: [], leftOut: 0, indexing: false }));
     act(() => send({ kind: "text", delta: "Brother Ketil" }));
 
     fireEvent.click(button);

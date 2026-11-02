@@ -44,6 +44,8 @@ function chatWith(overrides: Partial<AssistantChat> = {}): AssistantChat {
     onStop: vi.fn(),
     onRetry: vi.fn(),
     onOpenPage: vi.fn(),
+    onFollowLink: vi.fn(),
+    onCopy: vi.fn(),
     refusal: null,
     announcement: "",
     ...overrides,

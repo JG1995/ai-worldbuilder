@@ -1,6 +1,7 @@
+import { EditorView } from "@codemirror/view";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { AnswerEnd, AnswerEvent, ContextPage } from "@/types/api";
+import type { AnswerEnd, AnswerEvent, ContextPage, EditorLinks } from "@/types/api";
 import { answerChannel, mockAssistantIpc } from "../api/test-ipc";
 import { Assistant, type AssistantPorts } from "./Assistant";
 
@@ -10,34 +11,46 @@ type PendingSend = {
   end: (end: AnswerEnd) => void;
 };
 
-/** Mocks the core with sends that wait for the test to stream and end them. */
-function mockPendingSends() {
+/**
+ * Mocks the core with sends that wait for the test to stream and end them, and with the links of
+ * an answer's text from `links`, none by default.
+ */
+function mockPendingSends(
+  links: (text: string) => EditorLinks = () => ({ state: "ready", links: [] }),
+) {
   const sends: PendingSend[] = [];
   const calls = mockAssistantIpc({
     assistant_send: (args) =>
       new Promise((resolve) => sends.push({ args, send: answerChannel(args), end: resolve })),
+    assistant_links: (args) => links(args.text as string),
   });
-  return { calls, sends };
+  /** The calls that sent a message, in order. */
+  const sent = () => calls.filter(({ command }) => command === "assistant_send");
+  return { calls, sends, sent };
 }
 
 function renderAssistant(ports: Partial<AssistantPorts> = {}) {
   const all: AssistantPorts = {
     session: 1,
     activePage: "Places/Kesh Tor.md",
+    indexRevision: 0,
     openPage: vi.fn(),
     flushActive: vi.fn(() => Promise.resolve()),
     hasPage: () => true,
     ...ports,
   };
-  render(
+  const element = (ports: AssistantPorts) => (
     <Assistant
-      ports={all}
+      ports={ports}
       model="mistral-small"
       host="api.example.com"
       onOpenSettings={() => {}}
-    />,
+    />
   );
-  return all;
+  const { rerender } = render(element(all));
+  /** Renders the assistant again as after the world's index changed. */
+  const indexChanged = () => rerender(element({ ...all, indexRevision: all.indexRevision + 1 }));
+  return { ...all, indexChanged };
 }
 
 const composer = () => screen.getByRole("textbox", { name: "Message" });
@@ -57,7 +70,7 @@ async function startAnswer(sends: PendingSend[], text: string, pages: ContextPag
   sendMessage(text);
   await waitFor(() => expect(sends).toHaveLength(1));
   const pending = sends[0];
-  act(() => pending.send({ kind: "context", conversation: 7, pages, leftOut: 0 }));
+  act(() => pending.send({ kind: "context", conversation: 7, pages, leftOut: 0, indexing: false }));
   return pending;
 }
 
@@ -108,7 +121,7 @@ describe("sending a message", () => {
   });
 
   it("continues the conversation the core named", async () => {
-    const { calls, sends } = mockPendingSends();
+    const { sends, sent } = mockPendingSends();
     renderAssistant();
     const pending = await startAnswer(sends, "Who lives at Kesh Tor?");
     await act(async () => pending.end({ state: "complete", conversation: 7, text: "A monk." }));
@@ -116,7 +129,7 @@ describe("sending a message", () => {
     sendMessage("And who else?");
 
     await waitFor(() => expect(sends).toHaveLength(2));
-    expect(calls[1].args).toMatchObject({ conversation: 7, text: "And who else?", retry: false });
+    expect(sent()[1].args).toMatchObject({ conversation: 7, text: "And who else?", retry: false });
   });
 
   it("calls Stop on Stop, and marks the answer the core stopped", async () => {
@@ -178,23 +191,28 @@ describe("the context disclosure", () => {
     expect(screen.queryByRole("button", { name: "Gone" })).toBeNull();
   });
 
-  it("says when no pages were read and how many earlier messages were left out", async () => {
+  it("says when no pages were read, how many earlier messages were left out, and that the world was being indexed", async () => {
     const { sends } = mockPendingSends();
     renderAssistant();
     sendMessage("Hello");
     await waitFor(() => expect(sends).toHaveLength(1));
-    act(() => sends[0].send({ kind: "context", conversation: 7, pages: [], leftOut: 3 }));
+    act(() =>
+      sends[0].send({ kind: "context", conversation: 7, pages: [], leftOut: 3, indexing: true }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Read 0 pages" }));
 
     expect(screen.getByText("No pages were read.")).toBeVisible();
     expect(screen.getByText("3 earlier messages were left out.")).toBeVisible();
+    expect(
+      screen.getByText("The world was still being indexed, so some pages may be missing."),
+    ).toBeVisible();
   });
 });
 
 describe("failures", () => {
   it("retries a first message whose key could not be read in the conversation the core named", async () => {
-    const { calls, sends } = mockPendingSends();
+    const { sends, sent } = mockPendingSends();
     renderAssistant();
     sendMessage("Who lives at Kesh Tor?");
     await waitFor(() => expect(sends).toHaveLength(1));
@@ -217,7 +235,7 @@ describe("failures", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     await waitFor(() => expect(sends).toHaveLength(2));
-    expect(calls[1].args).toEqual({
+    expect(sent()[1].args).toEqual({
       conversation: 7,
       text: "",
       active: "Places/Kesh Tor.md",
@@ -288,5 +306,116 @@ describe("failures", () => {
     expect(notice).toHaveClass(reason === "rate_limited" ? "border-warning" : "border-error");
     // The text that arrived stays.
     expect(answers()[0]).toHaveTextContent("Brother");
+  });
+});
+
+describe("answers as references into the world", () => {
+  const text = "See [[Kesh Tor#Shrine]] and [[Nowhere]].";
+
+  /** The core's links of `text`: Kesh Tor resolves, Nowhere does not. */
+  const keshTorLinks = (): EditorLinks => ({
+    state: "ready",
+    links: [
+      {
+        from: 4,
+        to: 23,
+        state: "resolved",
+        target: "Kesh Tor",
+        path: "Places/Kesh Tor.md",
+        heading: "Shrine",
+        block: null,
+      },
+      {
+        from: 28,
+        to: 39,
+        state: "unresolved",
+        target: "Nowhere",
+        path: null,
+        heading: null,
+        block: null,
+      },
+    ],
+  });
+
+  /** Puts the cursor in the link written as `written` in `answer`, and presses Alt+Enter. */
+  function follow(answer: HTMLElement, written: string) {
+    const view = EditorView.findFromDOM(answer);
+    if (!view) throw new Error("No editor");
+    const at = view.state.doc.toString().indexOf(written) + 2;
+    act(() => view.dispatch({ selection: { anchor: at } }));
+    fireEvent.keyDown(answer, { key: "Enter", altKey: true });
+  }
+
+  /** Sends a message whose answer ends with `text`, and returns the answer's editor. */
+  async function answered(sends: PendingSend[]) {
+    const pending = await startAnswer(sends, "Where is the shrine?");
+    await act(async () => pending.end({ state: "complete", conversation: 7, text }));
+    return answers()[0];
+  }
+
+  it("marks an answer's links once it ends, and follows only a resolved one, in a new tab", async () => {
+    const { calls, sends } = mockPendingSends(keshTorLinks);
+    const ports = renderAssistant();
+
+    const answer = await answered(sends);
+
+    await waitFor(() =>
+      expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
+    );
+    expect(answer.querySelector(".cm-link-unresolved")).toHaveTextContent("[[Nowhere]]");
+    expect(calls.filter(({ command }) => command === "assistant_links")).toEqual([
+      { command: "assistant_links", args: { text } },
+    ]);
+    follow(answer, "[[Kesh Tor");
+    expect(ports.openPage).toHaveBeenCalledExactlyOnceWith("Places/Kesh Tor.md", {
+      newTab: true,
+      at: { heading: "Shrine", block: null },
+    });
+    follow(answer, "[[Nowhere");
+    expect(ports.openPage).toHaveBeenCalledOnce();
+    // Nothing is created: the core is asked only to send and for links.
+    expect(new Set(calls.map(({ command }) => command))).toEqual(
+      new Set(["assistant_send", "assistant_links"]),
+    );
+  });
+
+  it("marks an answer that ended while the index was built once the index changes", async () => {
+    let built = false;
+    const { calls, sends } = mockPendingSends(() =>
+      built ? keshTorLinks() : { state: "not_ready" },
+    );
+    const ports = renderAssistant();
+    const answer = await answered(sends);
+    const asked = () => calls.filter(({ command }) => command === "assistant_links");
+    await waitFor(() => expect(asked()).toHaveLength(1));
+    expect(answer.querySelector(".cm-link")).toBeNull();
+
+    built = true;
+    ports.indexChanged();
+
+    await waitFor(() =>
+      expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
+    );
+    expect(asked()).toHaveLength(2);
+  });
+
+  it("copies an answer's text once it has ended, and says whether it could", async () => {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const { sends } = mockPendingSends();
+    renderAssistant();
+    const pending = await startAnswer(sends, "Where is the shrine?");
+    act(() => pending.send({ kind: "text", delta: "See" }));
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+    await act(async () => pending.end({ state: "complete", conversation: 7, text }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(text));
+    await waitFor(() => announced("Copied"));
+    writeText.mockImplementation(() => Promise.reject(new Error("Denied")));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => announced("The answer could not be copied."));
+    vi.unstubAllGlobals();
   });
 });

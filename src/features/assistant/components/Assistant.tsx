@@ -1,13 +1,14 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { IpcError } from "@/lib/ipc";
-import type { AnswerEnd, AnswerEvent, ContextPage } from "@/types/api";
+import type { AnswerEnd, AnswerEvent, ContextPage, EditorLink } from "@/types/api";
 import {
   type AnswerFailure,
   type AnswerState,
   AssistantPane,
   type ChatMessage,
 } from "@/ui/AssistantPane";
-import { assistantSend, assistantStop } from "../api/commands";
+import type { LinkAnchor } from "@/ui/editor-links";
+import { assistantLinks, assistantSend, assistantStop } from "../api/commands";
 
 /** What the assistant gets from the open world. */
 export type AssistantPorts = {
@@ -15,8 +16,13 @@ export type AssistantPorts = {
   session: number;
   /** The active tab's page, which a request carries as context. */
   activePage: string | null;
-  /** Opens a page by the tree's tab rules: in the current tab, or in a new one. */
-  openPage: (path: string, options: { newTab: boolean }) => void;
+  /**
+   * Opens a page by the tree's tab rules: in the current tab, or in a new one, with the cursor at
+   * `at` if the page has it.
+   */
+  openPage: (path: string, options: { newTab: boolean; at?: LinkAnchor }) => void;
+  /** Changes whenever what the world's index holds changes. */
+  indexRevision: number;
   /** Resolves once the active page's pending edits are saved, or have failed to save. */
   flushActive: () => Promise<void>;
   /** Whether the world still has the page at `path`. */
@@ -39,11 +45,24 @@ type AnswerMessage = {
   role: "answer";
   text: string;
   state: AnswerState;
-  context: { pages: ContextPage[]; leftOut: number } | null;
+  context: { pages: ContextPage[]; leftOut: number; indexing: boolean } | null;
   failure: AnswerFailure | null;
+  /** The links the core found in `text`, which are stale once the text differs. */
+  linked: { text: string; links: readonly EditorLink[] } | null;
 };
 
 type Message = UserMessage | AnswerMessage;
+
+/** `messages` with the answer `id` changed by `change`. */
+function withAnswer(
+  messages: Message[],
+  id: number,
+  change: (answer: AnswerMessage) => AnswerMessage,
+): Message[] {
+  return messages.map((message) =>
+    message.id === id && message.role === "answer" ? change(message) : message,
+  );
+}
 
 const announcements: Record<AnswerEnd["state"], string> = {
   complete: "The answer is complete.",
@@ -64,18 +83,50 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
   const [refusal, setRefusal] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const nextId = useRef(0);
+  /** For each answer, the index revision and text its links were last asked for. */
+  const linksAsked = useRef(new Map<number, string>());
+  const { indexRevision } = ports;
 
   function updateAnswer(id: number, change: (answer: AnswerMessage) => AnswerMessage) {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === id && message.role === "answer" ? change(message) : message,
-      ),
-    );
+    setMessages((current) => withAnswer(current, id, change));
   }
+
+  // Each answer's links, once its text is final, and again for every answer when the index
+  // changes. An answer asked while the index is built stays plain until then.
+  useEffect(() => {
+    for (const message of messages) {
+      if (message.role !== "answer" || message.state === "streaming" || message.text === "") {
+        continue;
+      }
+      const { id, text } = message;
+      const asked = `${indexRevision}:${text}`;
+      if (linksAsked.current.get(id) === asked) continue;
+      linksAsked.current.set(id, asked);
+      assistantLinks(text).then(
+        (found) => {
+          if (linksAsked.current.get(id) !== asked) return;
+          const links = found.state === "ready" ? found.links : [];
+          setMessages((current) =>
+            withAnswer(current, id, (shown) => ({ ...shown, linked: { text, links } })),
+          );
+        },
+        // Without an answer, such as with AI just switched off, the text stays as it is.
+        () => {},
+      );
+    }
+  }, [messages, indexRevision]);
 
   function newAnswer(): AnswerMessage {
     const id = nextId.current++;
-    return { id, role: "answer", text: "", state: "streaming", context: null, failure: null };
+    return {
+      id,
+      role: "answer",
+      text: "",
+      state: "streaming",
+      context: null,
+      failure: null,
+      linked: null,
+    };
   }
 
   /**
@@ -93,7 +144,11 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
     // Text that arrives after the answer has ended is dropped: the end carries the final text.
     const onEvent = (event: AnswerEvent) => {
       if (event.kind === "context") {
-        const context = { pages: event.pages, leftOut: event.leftOut };
+        const context = {
+          pages: event.pages,
+          leftOut: event.leftOut,
+          indexing: event.indexing,
+        };
         updateAnswer(answer.id, (shown) => ({ ...shown, context }));
       } else {
         updateAnswer(answer.id, (shown) =>
@@ -145,13 +200,37 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
     });
   }
 
-  /** The message as the pane shows it, with each context page marked when the world lost it. */
+  /**
+   * The message as the pane shows it, with each context page marked when the world lost it, and
+   * the links of its current text.
+   */
   function shown(message: Message): ChatMessage {
     if (message.role === "user") return message;
-    if (!message.context) return { ...message, context: null };
-    const { pages, leftOut } = message.context;
-    const marked = pages.map((page) => ({ ...page, gone: !ports.hasPage(page.path) }));
-    return { ...message, context: { pages: marked, leftOut } };
+    const { linked, context, ...answer } = message;
+    const links = linked?.text === message.text ? linked.links : undefined;
+    if (!context) return { ...answer, context: null, links };
+    const marked = context.pages.map((page) => ({ ...page, gone: !ports.hasPage(page.path) }));
+    return { ...answer, context: { ...context, pages: marked }, links };
+  }
+
+  /**
+   * Opens the page a followed link in an answer resolved to, in a new tab at its heading or block.
+   * Answers are untrusted: a link to no page does nothing and never creates one.
+   */
+  function follow(link: EditorLink) {
+    if (link.state !== "resolved" || link.path === null) return;
+    ports.openPage(link.path, { newTab: true, at: { heading: link.heading, block: link.block } });
+  }
+
+  function copy(text: string) {
+    setAnnouncement("");
+    // `navigator.clipboard` is missing outside a secure context, which a rejection reports too.
+    Promise.resolve()
+      .then(() => navigator.clipboard.writeText(text))
+      .then(
+        () => setAnnouncement("Copied"),
+        () => setAnnouncement("The answer could not be copied."),
+      );
   }
 
   return (
@@ -169,6 +248,8 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
         onStop: () => void assistantStop().catch(() => {}),
         onRetry: retry,
         onOpenPage: ports.openPage,
+        onFollowLink: follow,
+        onCopy: copy,
         refusal,
         announcement,
       }}

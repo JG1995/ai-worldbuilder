@@ -1,7 +1,8 @@
 import type { EditorView } from "@codemirror/view";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { ProviderFailure } from "@/types/api";
-import { Button } from "./Button";
+import type { EditorLink, ProviderFailure } from "@/types/api";
+import { Button, IconButton } from "./Button";
+import { setLinks } from "./editor-links";
 import { Icon } from "./Icon";
 import { createPageState, MarkdownEditor } from "./MarkdownEditor";
 import { Notice } from "./Notice";
@@ -10,11 +11,15 @@ import { Tooltip } from "./Tooltip";
 /** How an answer stands: still arriving, or how it ended. */
 export type AnswerState = "streaming" | "complete" | "stopped" | "cut_off" | "failed";
 
-/** The pages an answer's request carried, and how many earlier messages it left out. */
+/**
+ * The pages an answer's request carried, how many earlier messages it left out, and whether the
+ * world was still being indexed when the pages were chosen.
+ */
 export type AnswerContext = {
   /** In the order the core chose them; `gone` when the world no longer has the page. */
   pages: { path: string; partial: boolean; gone: boolean }[];
   leftOut: number;
+  indexing: boolean;
 };
 
 export type AnswerFailure = {
@@ -35,6 +40,8 @@ export type ChatMessage =
       /** Absent until the request leaves, and when none did. */
       context: AnswerContext | null;
       failure: AnswerFailure | null;
+      /** The links of its text, marked once known; absent leaves the marks as they are. */
+      links?: readonly EditorLink[];
     };
 
 /** The conversation and its composer. */
@@ -47,6 +54,10 @@ export type AssistantChat = {
   /** Sends the conversation's last message again, after its answer failed. */
   onRetry: () => void;
   onOpenPage: (path: string, options: { newTab: boolean }) => void;
+  /** Follows a link in an answer: Ctrl/Cmd+click on it, or Alt/Option+Enter with the cursor in it. */
+  onFollowLink: (link: EditorLink) => void;
+  /** Copies an answer's Markdown text. */
+  onCopy: (text: string) => void;
   /** Why the core refused the last message or retry, shown above the composer. */
   refusal: string | null;
   /** What the polite live region announces, such as an answer's end. */
@@ -147,8 +158,7 @@ export function AssistantPane({ model, host, onOpenSettings, chat }: AssistantPa
                   answer={message}
                   host={host}
                   canRetry={message === last && !running}
-                  onRetry={chat.onRetry}
-                  onOpenPage={chat.onOpenPage}
+                  chat={chat}
                 />
               ),
             )}
@@ -173,23 +183,26 @@ function Answer({
   answer,
   host,
   canRetry,
-  onRetry,
-  onOpenPage,
+  chat,
 }: {
   answer: Extract<ChatMessage, { role: "answer" }>;
   host: string | undefined;
   canRetry: boolean;
-  onRetry: () => void;
-  onOpenPage: AssistantChat["onOpenPage"];
+  chat: AssistantChat;
 }) {
-  const { text, state, context, failure } = answer;
+  const { text, state, context, failure, links } = answer;
   return (
     <li className="flex flex-col gap-2">
-      {context && <ContextDisclosure context={context} onOpenPage={onOpenPage} />}
+      {context && <ContextDisclosure context={context} onOpenPage={chat.onOpenPage} />}
       {/* Mounted while still empty, so the arriving text can grow into it. */}
       <div className={`assistant text-text ${text === "" ? "hidden" : ""}`}>
-        <AnswerText text={text} />
+        <AnswerText text={text} links={links} onFollow={chat.onFollowLink} />
       </div>
+      {state !== "streaming" && text !== "" && (
+        <div className="flex">
+          <IconButton icon="content_copy" label="Copy" onClick={() => chat.onCopy(text)} />
+        </div>
+      )}
       {state === "streaming" && text === "" && (
         <p className="ui-small text-text-muted">Waiting for the answer…</p>
       )}
@@ -202,7 +215,7 @@ function Answer({
           status={failure.reason === "rate_limited" ? "warning" : "error"}
           actions={
             canRetry && (
-              <Button variant="secondary" onClick={onRetry}>
+              <Button variant="secondary" onClick={chat.onRetry}>
                 Retry
               </Button>
             )
@@ -222,9 +235,18 @@ function Answer({
 
 /**
  * An answer's Markdown in a read-only editor, never as HTML. New text that continues the shown
- * text is added to its end, so a streaming answer grows without rebuilding the editor.
+ * text is added to its end, so a streaming answer grows without rebuilding the editor. Its links
+ * are marked once they are known, and following one goes to `onFollow`.
  */
-function AnswerText({ text }: { text: string }) {
+function AnswerText({
+  text,
+  links,
+  onFollow,
+}: {
+  text: string;
+  links: readonly EditorLink[] | undefined;
+  onFollow: (link: EditorLink) => void;
+}) {
   const view = useRef<EditorView>(null);
   const [state] = useState(() => createPageState(text, "Answer"));
 
@@ -239,7 +261,12 @@ function AnswerText({ text }: { text: string }) {
     });
   }, [text]);
 
-  return <MarkdownEditor state={state} readOnly viewRef={view} />;
+  // After the text's effect, so the links fall on the text they belong to.
+  useEffect(() => {
+    if (links) view.current?.dispatch({ effects: setLinks(links) });
+  }, [links]);
+
+  return <MarkdownEditor state={state} readOnly viewRef={view} onFollow={onFollow} />;
 }
 
 /** "Read N pages", which expands to the pages an answer's request carried. */
@@ -252,7 +279,7 @@ function ContextDisclosure({
 }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
-  const { pages, leftOut } = context;
+  const { pages, leftOut, indexing } = context;
 
   return (
     <div className="ui-small text-text-muted">
@@ -303,6 +330,7 @@ function ContextDisclosure({
             {leftOut} earlier {leftOut === 1 ? "message was" : "messages were"} left out.
           </p>
         )}
+        {indexing && <p>The world was still being indexed, so some pages may be missing.</p>}
       </div>
     </div>
   );

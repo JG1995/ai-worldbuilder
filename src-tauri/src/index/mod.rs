@@ -321,7 +321,57 @@ impl Index {
         if self.state != BuildState::Ready {
             return Ok(None);
         }
+        self.resolve_stored(from, target)
+    }
+
+    /// The page that a link in the page at `from` to `target` resolves to among the pages and
+    /// aliases stored now, in any build state.
+    pub fn resolve_stored(&mut self, from: &str, target: &str) -> rusqlite::Result<Option<String>> {
         self.stored(|index| Ok(index.table()?.resolve(from, target).map(str::to_owned)))
+    }
+
+    /// The pages whose name or an alias occurs in `text` as whole words, with letter case and
+    /// accents ignored, by first occurrence, from the pages stored now, in any build state.
+    pub fn pages_named_in(&mut self, text: &str) -> rusqlite::Result<Vec<String>> {
+        let (pages, aliases) = self.stored(|index| stored_pages(&index.connection))?;
+        Ok(search::named_in(&pages, &aliases, text))
+    }
+
+    /// The pages that the stored links of the page at `path` resolve to, in the order of its links,
+    /// each once and without the page itself, in any build state.
+    pub fn links_from(&mut self, path: &str) -> rusqlite::Result<Vec<String>> {
+        self.stored(|index| {
+            let mut statement = index.connection.prepare(
+                "SELECT resolved FROM links WHERE source = ?1 AND resolved IS NOT NULL
+                 ORDER BY ordinal",
+            )?;
+            let mut seen = HashSet::new();
+            let mut pages = Vec::new();
+            for resolved in statement.query_map([path], |row| row.get::<_, String>(0))? {
+                let resolved = resolved?;
+                if resolved != path && seen.insert(resolved.clone()) {
+                    pages.push(resolved);
+                }
+            }
+            Ok(pages)
+        })
+    }
+
+    /// The pages other than the page at `path` whose stored links resolve to it, in the order the
+    /// backlinks section lists them, in any build state.
+    pub fn linked_from(&mut self, path: &str) -> rusqlite::Result<Vec<String>> {
+        let pages = self.stored(|index| index.backlinks_now(path))?;
+        Ok(pages.into_iter().map(|page| page.path).collect())
+    }
+
+    /// At most `limit` pages whose stored text holds any of the first 32 distinct words of `text`
+    /// as a whole word, most relevant first by bm25 and ties in the tree's order, in any build
+    /// state.
+    pub fn matching_text(&mut self, text: &str, limit: usize) -> rusqlite::Result<Vec<String>> {
+        let Some(expression) = search::any_word_expression(text) else {
+            return Ok(Vec::new());
+        };
+        self.stored(|index| best_text_matches(&index.connection, &expression, limit))
     }
 
     /// The pages to suggest for a link in the page at `from` whose page part so far is `query`,
@@ -779,6 +829,32 @@ fn text_matches(
         .take(search::LIMIT)
         .map(|(_, page)| page)
         .collect())
+}
+
+/// The paths of at most `limit` pages whose stored text the full-text `expression` selects, most
+/// relevant first by bm25 and ties in the tree's order.
+fn best_text_matches(
+    connection: &Connection,
+    expression: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT pages.path, texts.rank FROM texts JOIN pages ON pages.id = texts.rowid
+         WHERE texts MATCH ?1 ORDER BY texts.rank",
+    )?;
+    let mut rows = statement.query([expression])?;
+    let mut kept: Vec<(f64, String)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let rank: f64 = row.get(1)?;
+        // Past the limit, only pages that tie with the last one kept can still be listed.
+        if kept.len() >= limit && kept.last().is_some_and(|(last, _)| rank != *last) {
+            break;
+        }
+        kept.push((rank, row.get(0)?));
+    }
+    kept.sort_by(|(a, first), (b, second)| a.total_cmp(b).then_with(|| path_order(first, second)));
+    kept.truncate(limit);
+    Ok(kept.into_iter().map(|(_, path)| path).collect())
 }
 
 fn load_table(connection: &Connection) -> rusqlite::Result<Table> {
@@ -1414,5 +1490,109 @@ mod tests {
         assert!(!index.is_stored());
         assert!(index.take_rebuild());
         assert_eq!(index.backlinks("Mirela.md").unwrap(), Backlinks::Building);
+    }
+
+    fn named(index: &mut Index, text: &str) -> Vec<String> {
+        index.pages_named_in(text).unwrap()
+    }
+
+    #[test]
+    fn pages_are_named_by_name_or_alias_as_whole_words_ignoring_case_and_accents_by_occurrence() {
+        let mut index = ready(&[
+            page("Places/Saltmere.md", ""),
+            page("People/Mirëla.md", "---\naliases: [Old Captain]\n---\n"),
+            page("Kesh Tor.md", ""),
+            page("Lore/Kesh Tor.md", ""),
+            page("Salt.md", "Saltmere is named after it."),
+        ]);
+
+        let text =
+            "Did the Saltmerer folk or the OLD CAPTAIN sail from saltmere to KESH TOR? Ask Mirela.";
+
+        // Mirëla by its alias, which comes before its name; the two Kesh Tors in the tree's order.
+        // Salt only inside longer words, and Saltmere first inside a longer word, count from their
+        // first whole occurrence or not at all.
+        assert_eq!(
+            named(&mut index, text),
+            [
+                "People/Mirëla.md",
+                "Places/Saltmere.md",
+                "Lore/Kesh Tor.md",
+                "Kesh Tor.md"
+            ]
+        );
+        assert_eq!(named(&mut index, "mire\u{308}la?"), ["People/Mirëla.md"]);
+        assert!(named(&mut index, "Mirelas and salty Kesh").is_empty());
+    }
+
+    #[test]
+    fn links_from_and_to_a_page_list_each_other_page_once_in_order() {
+        let mut index = ready(&[
+            page(
+                "Kesh Tor.md",
+                "[[Saltmere]] [[Mirela]] [[saltmere#Docks]] [[Kesh Tor]] [[Nowhere]] [[Mirela]]",
+            ),
+            page("Saltmere.md", "[[Kesh Tor]]"),
+            page("Mirela.md", "[[Kesh Tor|the tor]] and [[Kesh Tor]]"),
+            page("Ana.md", "[[Kesh Tor]]"),
+        ]);
+
+        assert_eq!(
+            index.links_from("Kesh Tor.md").unwrap(),
+            ["Saltmere.md", "Mirela.md"]
+        );
+        assert_eq!(
+            index.linked_from("Kesh Tor.md").unwrap(),
+            ["Ana.md", "Mirela.md", "Saltmere.md"]
+        );
+        assert!(index.links_from("Unknown.md").unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_matches_take_any_whole_word_rank_by_relevance_and_take_no_syntax() {
+        let mut index = ready(&[
+            page("Atlas.md", "Glass storm over the glass dunes."),
+            page("Brief.md", "Only a storm here."),
+            page("Rain.md", "Rain or shine."),
+            page("Dry.md", "Nothing to see."),
+            page("Dunes.md", "Sand, sand, sand."),
+            page("Long.md", "Stormy dune stories."),
+        ]);
+        let message = "\"GLASS\" storm* OR (dunes) -NEAR";
+
+        let all = index.matching_text(message, 10).unwrap();
+
+        // Atlas holds three of the words, Rain only `or` and Brief only `storm`; Long holds only
+        // words that start with them.
+        assert_eq!(all.first().map(String::as_str), Some("Atlas.md"));
+        let mut found = all.clone();
+        found.sort();
+        assert_eq!(found, ["Atlas.md", "Brief.md", "Rain.md"]);
+        assert_eq!(index.matching_text(message, 1).unwrap(), ["Atlas.md"]);
+        assert!(index.matching_text("\" * ( ) -", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_context_queries_answer_from_what_is_stored_while_the_index_is_built() {
+        let mut index = Index::open(None, WORLD);
+        apply(
+            &mut index,
+            &[
+                page("Kesh Tor.md", "[[Mira]] by the glass"),
+                page("Mirela.md", "---\naliases: [Mira]\n---\n"),
+            ],
+        );
+        full_passes(&mut index);
+        assert_eq!(index.state(), &BuildState::Building);
+
+        assert_eq!(index.resolve("", "mira").unwrap(), None);
+        assert_eq!(
+            index.resolve_stored("", "mira").unwrap().as_deref(),
+            Some("Mirela.md")
+        );
+        assert_eq!(named(&mut index, "Ask Mira."), ["Mirela.md"]);
+        assert_eq!(index.links_from("Kesh Tor.md").unwrap(), ["Mirela.md"]);
+        assert_eq!(index.linked_from("Mirela.md").unwrap(), ["Kesh Tor.md"]);
+        assert_eq!(index.matching_text("glass", 5).unwrap(), ["Kesh Tor.md"]);
     }
 }

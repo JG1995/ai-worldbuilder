@@ -6,6 +6,7 @@ export const glyphs = {
   check_circle: "\u{e86c}",
   chevron_right: "\u{e409}",
   close: "\u{e14c}",
+  content_copy: "\u{e14d}",
   create_new_folder: "\u{e2cc}",
   description: "\u{e873}",
   error: "\u{e000}",
@@ -23,4 +24,4 @@ export const glyphs = {
 } as const;
 
 /** SHA-256 of src/assets/icons/material-symbols-sharp.woff2. */
-export const fontSha256 = "8500a75059df71d50086120da63edcf92426f1eff213a3208c53e00d1f29e81d";
+export const fontSha256 = "3340e377e2cb9b54f9c1308697ff110cc104436525b276d1a13364a5e8f6fb84";
