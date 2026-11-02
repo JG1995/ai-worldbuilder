@@ -107,6 +107,16 @@ function originOf(text: string) {
   }
 }
 
+/**
+ * Scrolls a notice that appears into the dialog's body, which may end above it in a small window;
+ * focus stays where it is.
+ */
+function scrollIntoBody(notice: HTMLElement | null) {
+  // jsdom has no scrollIntoView.
+  if (!notice?.scrollIntoView) return;
+  notice.scrollIntoView({ block: "nearest" });
+}
+
 function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () => void }) {
   const queryClient = useQueryClient();
   const provider = saved.textProvider;
@@ -332,21 +342,23 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
               }
             />
             {askKeyFile && (
-              <Notice
-                status="warning"
-                actions={
-                  <>
-                    <Button variant="secondary" onClick={() => void save(true)}>
-                      Store in a file
-                    </Button>
-                    <Button variant="ghost" onClick={cancelKeyFile}>
-                      Cancel
-                    </Button>
-                  </>
-                }
-              >
-                {keyFileWarning}
-              </Notice>
+              <div ref={scrollIntoBody}>
+                <Notice
+                  status="warning"
+                  actions={
+                    <>
+                      <Button variant="secondary" onClick={() => void save(true)}>
+                        Store in a file
+                      </Button>
+                      <Button variant="ghost" onClick={cancelKeyFile}>
+                        Cancel
+                      </Button>
+                    </>
+                  }
+                >
+                  {keyFileWarning}
+                </Notice>
+              </div>
             )}
             {failure && <Notice status="error">{failure}</Notice>}
             <div className="flex flex-wrap gap-2">
@@ -390,16 +402,21 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
 /** The test's result; a cancelled test shows none. The provider's message is plain text. */
 function TestResult({ outcome, provider }: { outcome: TestOutcome; provider: TextProvider }) {
   if (outcome.state === "cancelled") return null;
-  if (outcome.state === "connected") {
-    return <Notice status="success">The connection works. {provider.model} answered.</Notice>;
-  }
   return (
-    <Notice status={outcome.reason === "rate_limited" ? "warning" : "error"}>
-      <span className="block">{failureText(outcome, provider.host)}</span>
-      {outcome.providerMessage && (
-        <span className="block break-words">The provider's message: {outcome.providerMessage}</span>
+    <div ref={scrollIntoBody}>
+      {outcome.state === "connected" ? (
+        <Notice status="success">The connection works. {provider.model} answered.</Notice>
+      ) : (
+        <Notice status={outcome.reason === "rate_limited" ? "warning" : "error"}>
+          <span className="block">{failureText(outcome, provider.host)}</span>
+          {outcome.providerMessage && (
+            <span className="block break-words">
+              The provider's message: {outcome.providerMessage}
+            </span>
+          )}
+        </Notice>
       )}
-    </Notice>
+    </div>
   );
 }
 

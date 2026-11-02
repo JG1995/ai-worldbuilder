@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   ProviderSaved,
   Settings as SavedSettings,
@@ -71,6 +71,19 @@ const save = () => screen.getByRole("button", { name: "Save" });
 
 function type(name: string, value: string) {
   fireEvent.change(field(name), { target: { value } });
+}
+
+/** Records each element scrolled into view; jsdom has no `scrollIntoView` of its own. */
+function stubScrollIntoView() {
+  const scrolled: Element[] = [];
+  Element.prototype.scrollIntoView = function (this: Element, options) {
+    expect(options).toEqual({ block: "nearest" });
+    scrolled.push(this);
+  };
+  onTestFinished(() => {
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+  return scrolled;
 }
 
 describe("Settings", () => {
@@ -188,6 +201,22 @@ describe("Settings", () => {
     expect(field("API key")).toHaveFocus();
   });
 
+  it("scrolls the key file warning into view and leaves focus in the key field", async () => {
+    const scrolled = stubScrollIntoView();
+    renderSettings(empty, { provider_save: () => ({ state: "no_keychain" }) });
+    await dialog();
+    type("Base URL", BASE_URL);
+    type("Model", MODEL);
+    type("API key", "sk-secret");
+    field("API key").focus();
+
+    fireEvent.submit(field("API key"));
+
+    const warning = await screen.findByRole("alert");
+    expect(scrolled.some((element) => element.contains(warning))).toBe(true);
+    expect(field("API key")).toHaveFocus();
+  });
+
   it("stores nothing when the key file is cancelled, and keeps what was typed", async () => {
     const { calls } = renderSettings(empty, { provider_save: () => ({ state: "no_keychain" }) });
     await dialog();
@@ -294,6 +323,20 @@ describe("Settings", () => {
     );
     expect(test).not.toHaveAttribute("aria-busy");
     expect(calls.filter(({ command }) => command === "provider_test")).toHaveLength(1);
+  });
+
+  it("scrolls a test result into view and leaves focus on Test connection", async () => {
+    const scrolled = stubScrollIntoView();
+    renderSettings(withKey, { provider_test: () => ({ state: "connected" }) });
+    await dialog();
+    const test = screen.getByRole("button", { name: "Test connection" });
+    test.focus();
+
+    fireEvent.click(test);
+
+    const result = await screen.findByRole("status");
+    expect(scrolled.some((element) => element.contains(result))).toBe(true);
+    expect(test).toHaveFocus();
   });
 
   it.each([
