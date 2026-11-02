@@ -23,8 +23,9 @@ const DEFAULT_TREE_WIDTH: u32 = 264;
 /// The assistant pane's default width in pixels, as in `src/ui/Shell.tsx`.
 const DEFAULT_ASSISTANT_WIDTH: u32 = 360;
 
-/// The open tabs in order, the active tab, the expanded folders, the tree width, and whether the
-/// assistant's side pane is open and its width, of a world. Paths are relative to the world.
+/// The open tabs in order, the active tab, the expanded folders, the tree width, whether the
+/// assistant's side pane is open and its width, and the conversation the assistant showed last, of
+/// a world. Paths are relative to the world.
 ///
 /// The assistant's fields came later in format 1; a document written before them loads with their
 /// defaults.
@@ -40,6 +41,9 @@ pub struct Workspace {
     pub assistant_open: bool,
     #[serde(default = "default_assistant_width")]
     pub assistant_width: u32,
+    /// An id in the world's conversation store; none shows an empty conversation.
+    #[serde(default)]
+    pub assistant_conversation: Option<i64>,
 }
 
 fn default_assistant_open() -> bool {
@@ -59,6 +63,7 @@ impl Default for Workspace {
             tree_width: DEFAULT_TREE_WIDTH,
             assistant_open: default_assistant_open(),
             assistant_width: default_assistant_width(),
+            assistant_conversation: None,
         }
     }
 }
@@ -307,6 +312,7 @@ mod tests {
             tree_width: 300,
             assistant_open: false,
             assistant_width: 480,
+            assistant_conversation: Some(7),
         };
         recent.set_workspace(&id, workspace.clone());
 
@@ -333,6 +339,10 @@ mod tests {
         assert_eq!(document["worlds"][0]["workspace"]["treeWidth"], 300);
         assert_eq!(document["worlds"][0]["workspace"]["assistantOpen"], false);
         assert_eq!(document["worlds"][0]["workspace"]["assistantWidth"], 480);
+        assert_eq!(
+            document["worlds"][0]["workspace"]["assistantConversation"],
+            7
+        );
         assert!(document["worlds"][0]["lastOpened"].as_u64().unwrap() > 0);
 
         let loaded = Recent::load(app_data.path());
@@ -342,11 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn a_document_from_before_the_assistant_loads_with_its_worlds_and_the_pane_defaults() {
+    fn documents_from_before_the_assistant_s_fields_load_with_their_worlds_and_the_defaults() {
         let app_data = tempfile::tempdir().unwrap();
         let (_parent, roots) = worlds(2);
         fs::create_dir(app_data.path().join("grimoire-data")).unwrap();
-        // The shape written before the workspace held the assistant pane's state.
+        // World 2 has the shape written before the workspace held the conversation last shown,
+        // and world 1 the shape written before it held the assistant pane's state.
         let document = json!({
             "format": 1,
             "nextId": 3,
@@ -361,7 +372,9 @@ mod tests {
                         "tabs": ["Places/Saltmere.md"],
                         "active": "Places/Saltmere.md",
                         "expanded": ["Places"],
-                        "treeWidth": 300
+                        "treeWidth": 300,
+                        "assistantOpen": false,
+                        "assistantWidth": 480
                     }
                 },
                 {
@@ -386,8 +399,9 @@ mod tests {
                 active: Some("Places/Saltmere.md".into()),
                 expanded: vec!["Places".into()],
                 tree_width: 300,
-                assistant_open: true,
-                assistant_width: 360,
+                assistant_open: false,
+                assistant_width: 480,
+                assistant_conversation: None,
             })
         );
         assert_eq!(recent.workspace("1"), Some(Workspace::default()));

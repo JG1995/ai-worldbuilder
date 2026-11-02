@@ -160,5 +160,76 @@ describe("AssistantPane's answers", () => {
     const [stopped] = screen.getAllByRole("textbox", { name: "Answer" });
     expect(stopped).toHaveTextContent("So far <b>bold</b>");
     expect(stopped.querySelector("b")).toBeNull();
+    expect(screen.queryByText("No answer arrived for this message.")).toBeNull();
+  });
+
+  it("says when no answer arrived for a message, offering Retry only on the last one", () => {
+    const chat = chatWith({
+      messages: [
+        { id: 1, role: "user", text: "First" },
+        { id: 2, role: "user", text: "Second" },
+      ],
+    });
+    renderPane(chat);
+
+    expect(screen.getAllByText("No answer arrived for this message.")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(chat.onRetry).toHaveBeenCalledOnce();
+  });
+});
+
+describe("AssistantPane's conversations", () => {
+  it("has New conversation and Conversations in its header only when given them", () => {
+    const onNewConversation = vi.fn();
+    const onShowConversations = vi.fn();
+    const { unmount } = render(
+      <AssistantPane
+        model="mistral-small"
+        onOpenSettings={() => {}}
+        onNewConversation={onNewConversation}
+        onShowConversations={onShowConversations}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+    expect(onNewConversation).toHaveBeenCalledOnce();
+    expect(onShowConversations).toHaveBeenCalledOnce();
+    unmount();
+
+    renderPane(chatWith());
+    expect(screen.queryByRole("button", { name: "New conversation" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Conversations" })).toBeNull();
+  });
+
+  it("lists each conversation's title and latest time in place of the conversation, and opens one", () => {
+    const onOpen = vi.fn();
+    const updated = 1_700_000_000;
+    render(
+      <AssistantPane
+        model="mistral-small"
+        onOpenSettings={() => {}}
+        chat={chatWith({ messages: [{ id: 1, role: "user", text: "Shown before" }] })}
+        conversations={{
+          items: [{ id: 5, title: "The glass storm", updated }],
+          error: null,
+          onOpen,
+          onDelete: vi.fn(),
+          onBack: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Shown before")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    const time = new Date(updated * 1000).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    const row = screen.getByRole("button", { name: /^The glass storm/ });
+    expect(screen.getByText("The glass storm")).toHaveClass("ui-strong");
+    expect(screen.getByText(time)).toHaveClass("ui-small", "text-text-muted");
+    fireEvent.click(row);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(5);
   });
 });

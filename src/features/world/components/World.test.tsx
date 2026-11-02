@@ -494,6 +494,7 @@ describe("changing worlds", () => {
         treeWidth: 264,
         assistantOpen: true,
         assistantWidth: 360,
+        assistantConversation: null,
       },
     };
     let world = 1;

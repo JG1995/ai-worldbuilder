@@ -17,6 +17,7 @@ function openWorld(tabs: string[] = [], active: string | null = null, session = 
       treeWidth: 264,
       assistantOpen: true,
       assistantWidth: 360,
+      assistantConversation: null,
     },
   });
 }
@@ -426,6 +427,7 @@ describe("the workspace", () => {
           treeWidth: 300,
           assistantOpen: true,
           assistantWidth: 360,
+          assistantConversation: null,
         },
       },
     ]);
@@ -447,12 +449,13 @@ describe("the workspace", () => {
           treeWidth: 301,
           assistantOpen: true,
           assistantWidth: 360,
+          assistantConversation: null,
         },
       },
     ]);
   });
 
-  it("restores the assistant's side pane from an opened world and saves its changes, but not the overlay", async () => {
+  it("restores the assistant's side pane and conversation from an opened world and saves their changes, but not the overlay", async () => {
     const calls = mockWorldIpc();
     store().opened({
       name: "Sample",
@@ -464,9 +467,14 @@ describe("the workspace", () => {
         treeWidth: 264,
         assistantOpen: false,
         assistantWidth: 480,
+        assistantConversation: 7,
       },
     });
-    expect(store()).toMatchObject({ assistantOpen: false, assistantWidth: 480 });
+    expect(store()).toMatchObject({
+      assistantOpen: false,
+      assistantWidth: 480,
+      assistantConversation: 7,
+    });
 
     store().setAssistantOverlayOpen(true);
     await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
@@ -475,22 +483,24 @@ describe("the workspace", () => {
     store().setAssistantOpen(true);
     store().setAssistantWidth(400.6);
     await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+    store().setAssistantConversation(null);
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+    const workspace = {
+      tabs: [],
+      active: null,
+      expanded: [],
+      treeWidth: 264,
+      assistantOpen: true,
+      assistantWidth: 401,
+    };
     expect(saves(calls)).toEqual([
-      {
-        workspace: {
-          tabs: [],
-          active: null,
-          expanded: [],
-          treeWidth: 264,
-          assistantOpen: true,
-          assistantWidth: 401,
-        },
-      },
+      { workspace: { ...workspace, assistantConversation: 7 } },
+      { workspace: { ...workspace, assistantConversation: null } },
     ]);
 
-    // The overlay closes when the world changes.
+    // The overlay closes and the conversation is the next world's when the world changes.
     openWorld([], null, 2);
-    expect(store().assistantOverlayOpen).toBe(false);
+    expect(store()).toMatchObject({ assistantOverlayOpen: false, assistantConversation: null });
   });
 
   it("saves nothing for a world that closed or changed before the delay ended", async () => {

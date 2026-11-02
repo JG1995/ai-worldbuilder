@@ -1,5 +1,5 @@
 import { invokeCommand, invokeStreaming } from "@/lib/ipc";
-import type { AnswerEnd, AnswerEvent, EditorLinks } from "@/types/api";
+import type { AnswerEnd, AnswerEvent, Conversation, Conversations, EditorLinks } from "@/types/api";
 
 type Outgoing = {
   /** The conversation to continue, or null to start one with this message. */
@@ -31,3 +31,19 @@ export const assistantStop = () => invokeCommand<void>("assistant_stop");
  */
 export const assistantLinks = (text: string) =>
   invokeCommand<EditorLinks>("assistant_links", { text });
+
+/**
+ * The open world's conversations, the latest message's newest first, with the notice when they
+ * were set aside or are not being saved. Rejects with `ai_off` and `no_world`.
+ */
+export const assistantConversations = () => invokeCommand<Conversations>("assistant_conversations");
+
+/** One of the open world's conversations with its messages; `not_found` when it is gone. */
+export const assistantConversation = (id: number) =>
+  invokeCommand<Conversation>("assistant_conversation", { id });
+
+/**
+ * Deletes one of the open world's conversations for good, once an answer running in it has
+ * stopped and been saved.
+ */
+export const assistantDelete = (id: number) => invokeCommand<void>("assistant_delete", { id });

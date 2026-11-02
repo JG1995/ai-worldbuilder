@@ -1,6 +1,6 @@
 //! The `assistant` area: answers a message about the open world with a reply streamed from the
 //! saved text provider, with the pages of the world that matter to it as context, and keeps each
-//! world session's conversations.
+//! world's conversations in its store, which each world session opens anew.
 //!
 //! One answer runs at a time. Its entry in `AssistantState` holds its stop mark, the abort of its
 //! request and the text received so far, so stopping it never loses that text. It goes through
@@ -10,8 +10,9 @@
 //! stop was asked for; (5) the end, saved in the store of the session the message was sent in.
 //!
 //! Lock order: settings, then world, then the assistant lock, then a store's lock. The assistant
-//! lock is held only briefly and never while calling into settings or reading a file; calls into
-//! settings, key reads and page reads run on the blocking pool. No lock is held across an `.await`.
+//! lock is held only briefly and never while calling into settings or reading a page; calls into
+//! settings, key reads and page reads run on the blocking pool, and so does the store's own file,
+//! which is opened, read and written under the assistant lock. No lock is held across an `.await`.
 
 mod context;
 mod request;
@@ -29,9 +30,9 @@ use crate::error::{AppError, ErrorKind, guard};
 use crate::index::EditorLinks;
 use crate::providers::{self, ChatMessage, ProviderFailure, StreamEnd};
 use crate::settings::{self, Abort, PreparedRequest, RequestGuard, SettingsState};
-use crate::world::{self, WorldState};
+use crate::world::{self, CurrentWorld, WorldState};
 use request::Request;
-use store::{Answer, AnswerState, Store};
+use store::{Answer, AnswerState, Conversation, Conversations, Store};
 
 /// A page that an answer's request carried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -115,7 +116,7 @@ type Hook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
 struct Inner {
-    /// The conversations of the latest world session that sent a message, by session.
+    /// The conversations of the latest world session that used them, by session.
     store: Option<(u64, SharedStore)>,
     running: Option<Running>,
     next_run: u64,
@@ -131,6 +132,8 @@ struct Running {
     abort: Option<Abort>,
     /// The text received so far, outside the request's task, so that aborting it keeps the text.
     text: String,
+    /// The conversation it answers in, once its message is recorded.
+    conversation: Option<i64>,
     /// The store of the session the message was sent in, where the answer is saved even when a
     /// later session's store has replaced it in `Inner::store`.
     store: Option<SharedStore>,
@@ -199,8 +202,15 @@ struct Started {
     task: JoinHandle<StreamEnd>,
     /// Keeps the request's abort in settings; dropped on the blocking pool once it has ended.
     guard: RequestGuard,
+    carried: Carried,
+}
+
+/// What a request carried, which its answer is saved with.
+struct Carried {
     pages: Vec<ContextPage>,
     left_out: u32,
+    /// The index was still being built as the pages were chosen.
+    indexing: bool,
 }
 
 impl AssistantState {
@@ -226,6 +236,7 @@ impl AssistantState {
                 stop: false,
                 abort: None,
                 text: String::new(),
+                conversation: None,
                 store: None,
             });
             id
@@ -248,24 +259,17 @@ impl AssistantState {
         self.ended.notify_all();
     }
 
-    /// Takes the store of `session`, a new one when the session changed, into the running entry,
-    /// and records the message to answer. Returns the conversation, the message's text and the
+    /// Takes the store of `world`'s session into the running entry and records the message to
+    /// answer, before any request leaves. Returns the conversation, the message's text and the
     /// conversation's earlier messages.
     fn record(
         &self,
         run: u64,
-        session: u64,
+        world: &CurrentWorld,
         outgoing: Outgoing,
     ) -> Result<(i64, String, Vec<store::Message>), AppError> {
         let mut inner = self.lock();
-        let shared = match &inner.store {
-            Some((current, store)) if *current == session => Arc::clone(store),
-            _ => {
-                let store = Arc::new(Mutex::new(Store::in_memory()?));
-                inner.store = Some((session, Arc::clone(&store)));
-                store
-            }
-        };
+        let shared = store_of(&mut inner, world)?;
         if let Some(running) = running(&mut inner, run) {
             running.store = Some(Arc::clone(&shared));
         }
@@ -289,6 +293,9 @@ impl AssistantState {
                 (conversation, outgoing.text)
             }
         };
+        if let Some(running) = running(&mut inner, run) {
+            running.conversation = Some(conversation);
+        }
         let mut earlier = store.messages(conversation)?;
         // The last one is the message being answered.
         earlier.pop();
@@ -309,8 +316,7 @@ impl AssistantState {
         run: u64,
         conversation: i64,
         outcome: tauri::Result<StreamEnd>,
-        pages: &[ContextPage],
-        left_out: u32,
+        carried: &Carried,
     ) -> Result<AnswerEnd, AppError> {
         let mut inner = self.lock();
         let running = running(&mut inner, run).ok_or_else(internal)?;
@@ -346,7 +352,8 @@ impl AssistantState {
             ),
         };
         if let (Some(state), Some(store)) = (state, &running.store) {
-            let pages: Vec<(String, bool)> = pages
+            let pages: Vec<(String, bool)> = carried
+                .pages
                 .iter()
                 .map(|page| (page.path.clone(), page.partial))
                 .collect();
@@ -354,19 +361,25 @@ impl AssistantState {
                 state,
                 text: end.text(),
                 pages: &pages,
-                left_out,
+                left_out: carried.left_out,
+                indexing: carried.indexing,
             };
-            lock_store(store).add_answer(conversation, &answer, now())?;
+            // A write the file refuses is made in memory, and the store's notice says that the
+            // conversations are not being saved; the answer ends either way.
+            let _ = lock_store(store).add_answer(conversation, &answer, now());
         }
         Ok(end)
     }
 
-    /// Asks the running answer, if any, to stop, aborts its request, and waits until it has ended
-    /// and been saved.
-    fn stop_and_wait(&self) {
-        let mut inner = self.lock();
-        let Some(running) = inner.running.as_mut() else {
-            return;
+    /// Asks the running answer, if any and if `which` it is, to stop, aborts its request, waits
+    /// until it has ended and been saved, and returns the lock taken again.
+    fn stop_running<'a>(
+        &'a self,
+        mut inner: MutexGuard<'a, Inner>,
+        which: impl Fn(&Running) -> bool,
+    ) -> MutexGuard<'a, Inner> {
+        let Some(running) = inner.running.as_mut().filter(|running| which(running)) else {
+            return inner;
         };
         let run = running.id;
         running.stop = true;
@@ -383,6 +396,7 @@ impl AssistantState {
                 .wait(inner)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+        inner
     }
 
     #[cfg(test)]
@@ -409,6 +423,21 @@ impl AnswerEnd {
 
 fn running(inner: &mut Inner, run: u64) -> Option<&mut Running> {
     inner.running.as_mut().filter(|running| running.id == run)
+}
+
+/// The store of `world`'s session, opened from the world's file when the session changed, so a
+/// reopened world reads its file again.
+fn store_of(inner: &mut Inner, world: &CurrentWorld) -> Result<SharedStore, AppError> {
+    if let Some((session, store)) = &inner.store
+        && *session == world.session
+    {
+        return Ok(Arc::clone(store));
+    }
+    let now = u64::try_from(now()).unwrap_or_default();
+    let store = Store::open(world.app_data.as_deref(), &world.root, now)?;
+    let store = Arc::new(Mutex::new(store));
+    inner.store = Some((world.session, Arc::clone(&store)));
+    Ok(store)
 }
 
 /// A store's own state is kept consistent by its transactions.
@@ -487,8 +516,7 @@ pub(crate) async fn send<S: Services>(
     let Some(Started {
         task,
         guard,
-        pages,
-        left_out,
+        carried,
     }) = started
     else {
         return Ok(AnswerEnd::Stopped {
@@ -501,7 +529,7 @@ pub(crate) async fn send<S: Services>(
         drop(guard);
         services
             .assistant()
-            .finish(run_id, conversation, outcome, &pages, left_out)
+            .finish(run_id, conversation, outcome, &carried)
     })
     .await;
     drop(run);
@@ -522,10 +550,7 @@ fn begin<S: Services>(services: &S, outgoing: Outgoing) -> Result<Begun<S>, AppE
     }
     let request = services.settings().prepare_request()?;
     let active = outgoing.active.clone();
-    let (conversation, text, earlier) =
-        services
-            .assistant()
-            .record(run.id, world.session, outgoing)?;
+    let (conversation, text, earlier) = services.assistant().record(run.id, &world, outgoing)?;
     Ok(Begun {
         run,
         session: world.session,
@@ -599,8 +624,11 @@ impl Start {
             (Ok(Some(guard)), Some(task)) => Some(Started {
                 task,
                 guard,
-                pages,
-                left_out,
+                carried: Carried {
+                    pages,
+                    left_out,
+                    indexing,
+                },
             }),
             _ => None,
         }
@@ -641,10 +669,51 @@ pub(crate) async fn stop<S: Services>(services: S) -> Result<(), AppError> {
         if !services.settings().ai_on() {
             return Err(settings::ai_off());
         }
-        services.assistant().stop_and_wait();
+        let assistant = services.assistant();
+        drop(assistant.stop_running(assistant.lock(), |_| true));
         Ok(())
     })
     .await
+}
+
+/// Refuses while AI is off; otherwise runs `work` on the open world's store, under the assistant
+/// lock, after stopping the running answer when `stopping` it is.
+async fn with_store<S: Services, T: Send + 'static>(
+    services: &S,
+    stopping: impl Fn(&Running) -> bool + Send + 'static,
+    work: impl FnOnce(&mut Store) -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    blocking(services, move |services| {
+        if !services.settings().ai_on() {
+            return Err(settings::ai_off());
+        }
+        let world = services.world().current()?;
+        let assistant = services.assistant();
+        let mut inner = assistant.stop_running(assistant.lock(), stopping);
+        let store = store_of(&mut inner, &world)?;
+        work(&mut lock_store(&store))
+    })
+    .await
+}
+
+/// The open world's conversations, newest first, and how they are kept.
+pub(crate) async fn conversations<S: Services>(services: S) -> Result<Conversations, AppError> {
+    with_store(&services, |_| false, |store| store.conversations()).await
+}
+
+/// One of the open world's conversations with its messages.
+pub(crate) async fn conversation<S: Services>(
+    services: S,
+    id: i64,
+) -> Result<Conversation, AppError> {
+    with_store(&services, |_| false, move |store| store.conversation(id)).await
+}
+
+/// Deletes one of the open world's conversations for good, once an answer running in it has
+/// stopped and been saved.
+pub(crate) async fn delete<S: Services>(services: S, id: i64) -> Result<(), AppError> {
+    let answering = move |running: &Running| running.conversation == Some(id);
+    with_store(&services, answering, move |store| store.delete(id)).await
 }
 
 /// Refuses while AI is off; otherwise the links of `text`, an answer's text, each with the page it
@@ -716,6 +785,24 @@ pub async fn assistant_links(app: AppHandle, text: String) -> Result<EditorLinks
     links(app, text).await
 }
 
+/// The open world's conversations, the latest message's newest first, and how they are kept.
+#[tauri::command]
+pub async fn assistant_conversations(app: AppHandle) -> Result<Conversations, AppError> {
+    conversations(app).await
+}
+
+/// One of the open world's conversations with its messages.
+#[tauri::command]
+pub async fn assistant_conversation(app: AppHandle, id: i64) -> Result<Conversation, AppError> {
+    conversation(app, id).await
+}
+
+/// Deletes one of the open world's conversations for good, stopping an answer running in it first.
+#[tauri::command]
+pub async fn assistant_delete(app: AppHandle, id: i64) -> Result<(), AppError> {
+    delete(app, id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +813,7 @@ mod tests {
     use std::fs;
     use std::thread;
     use std::time::Instant;
+    use store::{ConversationSummary, SavedMessage};
     use tauri::async_runtime::block_on;
     use tauri::ipc::InvokeResponseBody;
     use tempfile::TempDir;
@@ -759,13 +847,14 @@ mod tests {
 
     type Events = Arc<Mutex<Vec<Value>>>;
 
-    /// A temporary world with one page, open, and settings whose provider is `server`.
+    /// A temporary world with one page, open, and settings whose provider is `server`, all keeping
+    /// their data in a temporary app data folder.
     struct Fixture {
         services: TestServices,
         keychain: MockKeychain,
         server: Server,
         world: TempDir,
-        _data: TempDir,
+        app_data: TempDir,
     }
 
     impl Fixture {
@@ -788,13 +877,14 @@ mod tests {
                 world: WorldState::default(),
                 assistant: AssistantState::default(),
             };
+            states.world.load_recent(data.path());
             states.world.open(world.path().to_path_buf()).unwrap();
             let fixture = Self {
                 services: TestServices(Arc::new(states)),
                 keychain,
                 server,
                 world,
-                _data: data,
+                app_data: data,
             };
             fixture.indexed();
             fixture
@@ -893,6 +983,28 @@ mod tests {
             *self.assistant().hook.lock().unwrap() = Some((step, Arc::new(hook)));
         }
 
+        fn conversation(&self, id: i64) -> Result<Conversation, AppError> {
+            block_on(conversation(self.services.clone(), id))
+        }
+
+        fn conversations(&self) -> Result<Conversations, AppError> {
+            block_on(conversations(self.services.clone()))
+        }
+
+        fn delete(&self, id: i64) -> Result<(), AppError> {
+            block_on(delete(self.services.clone(), id))
+        }
+
+        /// The world's conversation file and its journal, if any, as bytes.
+        fn store_bytes(&self) -> Vec<u8> {
+            let folder = self.app_data.path().join("grimoire-data/conversations");
+            let mut bytes = Vec::new();
+            for entry in fs::read_dir(folder).unwrap() {
+                bytes.extend(fs::read(entry.unwrap().path()).unwrap());
+            }
+            bytes
+        }
+
         /// The current session's conversation.
         fn stored(&self, conversation: i64) -> Vec<store::Message> {
             let store = self.assistant().lock().store.clone().unwrap().1;
@@ -987,9 +1099,17 @@ mod tests {
         fixture.settings().set_ai(false).unwrap();
         assert_eq!(kind(send("Hi", None)), ErrorKind::AiOff);
         assert_eq!(fixture.stop().unwrap_err().kind, ErrorKind::AiOff);
+        assert_eq!(fixture.conversations().unwrap_err().kind, ErrorKind::AiOff);
+        assert_eq!(fixture.conversation(1).unwrap_err().kind, ErrorKind::AiOff);
+        assert_eq!(fixture.delete(1).unwrap_err().kind, ErrorKind::AiOff);
         fixture.settings().set_ai(true).unwrap();
+        assert_eq!(fixture.conversations().unwrap().items, []);
         fixture.services.world().close();
         assert_eq!(kind(send("Hi", None)), ErrorKind::NoWorld);
+        assert_eq!(
+            fixture.conversations().unwrap_err().kind,
+            ErrorKind::NoWorld
+        );
 
         assert!(fixture.server.requests().is_empty());
         assert!(!fixture.running());
@@ -1058,10 +1178,16 @@ mod tests {
                 answered(AnswerState::Complete, "A port.")
             ]
         );
-        let store = fixture.assistant().lock().store.clone().unwrap().1;
+        let saved = fixture.conversation(conversation).unwrap().messages;
+        let Some(SavedMessage::Answer { pages, .. }) = saved.last() else {
+            panic!("expected the answer, got {saved:?}");
+        };
         assert_eq!(
-            lock_store(&store).last_answer_pages(conversation),
-            [(PAGE.to_owned(), true)]
+            pages,
+            &[ContextPage {
+                path: PAGE.to_owned(),
+                partial: true
+            }]
         );
     }
 
@@ -1285,10 +1411,188 @@ mod tests {
             lock_store(&first_store).messages(conversation).unwrap(),
             [user("Hello"), answered(AnswerState::Stopped, "Before")]
         );
-        // The new session starts with an empty store, which does not know the conversation.
-        let (refused, _) = fixture.send(Some(conversation), "Still there?", None);
-        assert_eq!(kind(refused), ErrorKind::NotFound);
+        // The new session opened the world's file again, which holds the answer.
+        assert_eq!(
+            fixture.stored(conversation),
+            [user("Hello"), answered(AnswerState::Stopped, "Before")]
+        );
         assert_eq!(fixture.server.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_user_message_is_in_the_world_s_file_before_the_request_leaves() {
+        let fixture = Arc::new(Fixture::new(answering("Hi")));
+        let saved_before = Arc::new(Mutex::new(None));
+        let (hooked, slot) = (Arc::clone(&fixture), Arc::clone(&saved_before));
+        fixture.at(Step::KeyRead, move || {
+            let requests = hooked.server.requests().len();
+            // Read through a connection of its own, so only what the file holds counts.
+            let file = hooked.app_data.path().join("grimoire-data/conversations");
+            let file = fs::read_dir(file).unwrap().next().unwrap().unwrap().path();
+            let connection = rusqlite::Connection::open(file).unwrap();
+            let texts: Vec<String> = connection
+                .prepare("SELECT text FROM messages")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            *slot.lock().unwrap() = Some((requests, texts));
+        });
+
+        let (end, _) = fixture.send(None, "Who keeps the tor?", Some(PAGE));
+
+        assert!(matches!(end, Ok(AnswerEnd::Complete { .. })), "{end:?}");
+        assert_eq!(
+            saved_before.lock().unwrap().take(),
+            Some((0, vec!["Who keeps the tor?".to_owned()]))
+        );
+        assert_eq!(fixture.server.requests().len(), 1);
+    }
+
+    #[test]
+    fn conversations_are_listed_newest_first_and_hold_no_page_text_and_no_key() {
+        let fixture = Fixture::new(answering("A port town."));
+        let page = "# Saltmere\nOnly the page knows: the harbour bell is cracked.\n";
+        fs::write(fixture.world.path().join(PAGE), page).unwrap();
+        let (first, _) = fixture.send(None, "Where is Saltmere?", Some(PAGE));
+        let first = conversation_of(&first.unwrap());
+        let (second, _) = fixture.send(None, "Second", None);
+        let second = conversation_of(&second.unwrap());
+
+        let listed = fixture.conversations().unwrap();
+
+        let titles: Vec<(i64, String)> = listed
+            .items
+            .iter()
+            .map(|ConversationSummary { id, title, .. }| (*id, title.clone()))
+            .collect();
+        // Both were answered within the same second; the later conversation still comes first.
+        assert_eq!(
+            titles,
+            [
+                (second, "Second".to_owned()),
+                (first, "Where is Saltmere?".to_owned())
+            ]
+        );
+        assert_eq!(listed.notice, None);
+        let bytes = String::from_utf8_lossy(&fixture.store_bytes()).into_owned();
+        assert!(bytes.contains("Where is Saltmere?") && bytes.contains(PAGE));
+        assert!(!bytes.contains("harbour bell"));
+        assert!(!bytes.contains(KEY));
+        // The world folder holds only its own folder of pages.
+        assert_eq!(fs::read_dir(fixture.world.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn an_answer_the_file_refuses_ends_all_the_same_and_the_chat_goes_on_unsaved() {
+        let fixture = Fixture::new(answering("Hi"));
+        assert_eq!(fixture.conversations().unwrap().notice, None);
+        // Fails every later write of an answer to the file.
+        let folder = fixture.app_data.path().join("grimoire-data/conversations");
+        let file = fs::read_dir(folder)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        rusqlite::Connection::open(file)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail BEFORE INSERT ON messages WHEN NEW.role = 'assistant'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        let (end, _) = fixture.send(None, "Hello", None);
+
+        let end = end.unwrap();
+        let conversation = conversation_of(&end);
+        assert_eq!(
+            end,
+            AnswerEnd::Complete {
+                conversation,
+                text: "Hi".to_owned()
+            }
+        );
+        assert_eq!(
+            fixture.conversations().unwrap().notice,
+            Some(store::StoreNotice::NotSaved {
+                reason: "The conversation store reported an error: refused.".to_owned()
+            })
+        );
+        assert_eq!(
+            fixture.stored(conversation),
+            [user("Hello"), answered(AnswerState::Complete, "Hi")]
+        );
+    }
+
+    #[test]
+    fn after_a_crash_the_message_without_an_answer_shows_and_can_be_retried() {
+        let fixture = Fixture::new(answering("Hi"));
+        // A user message saved by an opening that ended before its answer did.
+        let mut store =
+            Store::open(Some(fixture.app_data.path()), fixture.world.path(), 1).unwrap();
+        let conversation = store.add_user_message(None, "Hello", 1).unwrap();
+        drop(store);
+        fixture.reopen_world();
+
+        assert_eq!(
+            fixture.conversation(conversation).unwrap().messages,
+            [SavedMessage::User {
+                text: "Hello".to_owned(),
+                time: 1
+            }]
+        );
+        let retried = fixture.retry(conversation).unwrap();
+
+        assert_eq!(
+            retried,
+            AnswerEnd::Complete {
+                conversation,
+                text: "Hi".to_owned()
+            }
+        );
+        assert_eq!(fixture.server.requests().len(), 1);
+        fixture.reopen_world();
+        assert_eq!(
+            fixture.stored(conversation),
+            [user("Hello"), answered(AnswerState::Complete, "Hi")]
+        );
+    }
+
+    #[test]
+    fn deleting_a_conversation_stops_its_answer_first_and_removes_it_for_good() {
+        let fixture = Fixture::new(stalling("Half"));
+        let mut store =
+            Store::open(Some(fixture.app_data.path()), fixture.world.path(), 1).unwrap();
+        let kept = store.add_user_message(None, "Kept", 1).unwrap();
+        drop(store);
+        let (handle, events) = fixture.start(None, "Gone soon", None, false);
+        wait_until("the text", || events.lock().unwrap().len() == 2);
+        let gone = events.lock().unwrap()[0]["conversation"].as_i64().unwrap();
+
+        fixture.delete(gone).unwrap();
+
+        assert_eq!(
+            handle.join().unwrap().unwrap(),
+            AnswerEnd::Stopped {
+                conversation: gone,
+                text: "Half".to_owned()
+            }
+        );
+        assert!(!fixture.running());
+        assert_eq!(
+            fixture.conversation(gone).unwrap_err().kind,
+            ErrorKind::NotFound
+        );
+        fixture.reopen_world();
+        let listed = fixture.conversations().unwrap().items;
+        assert_eq!(
+            listed.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [kept]
+        );
+        assert_eq!(fixture.delete(gone).unwrap_err().kind, ErrorKind::NotFound);
     }
 
     impl Fixture {

@@ -1,7 +1,14 @@
 import { EditorView } from "@codemirror/view";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { AnswerEnd, AnswerEvent, ContextPage, EditorLinks } from "@/types/api";
+import type {
+  AnswerEnd,
+  AnswerEvent,
+  ContextPage,
+  Conversation,
+  Conversations,
+  EditorLinks,
+} from "@/types/api";
 import { answerChannel, mockAssistantIpc } from "../api/test-ipc";
 import { Assistant, type AssistantPorts } from "./Assistant";
 
@@ -11,25 +18,44 @@ type PendingSend = {
   end: (end: AnswerEnd) => void;
 };
 
+type Handler = (args: Record<string, unknown>) => unknown;
+
+/** The world's conversations as the core reads them: none, saved as usual, unless overridden. */
+const emptyStore: Record<string, Handler> = {
+  assistant_conversations: () => ({ items: [], notice: null }),
+  assistant_conversation: () => {
+    throw { kind: "not_found", message: "The conversation does not exist." };
+  },
+};
+
 /**
- * Mocks the core with sends that wait for the test to stream and end them, and with the links of
- * an answer's text from `links`, none by default.
+ * Mocks the core with sends that wait for the test to stream and end them, with the links of an
+ * answer's text from `links`, none by default, and with an empty conversation store unless
+ * `overrides` replace its commands.
  */
 function mockPendingSends(
   links: (text: string) => EditorLinks = () => ({ state: "ready", links: [] }),
+  overrides: Record<string, Handler> = {},
 ) {
   const sends: PendingSend[] = [];
   const calls = mockAssistantIpc({
+    ...emptyStore,
     assistant_send: (args) =>
       new Promise((resolve) => sends.push({ args, send: answerChannel(args), end: resolve })),
     assistant_links: (args) => links(args.text as string),
+    ...overrides,
   });
   /** The calls that sent a message, in order. */
   const sent = () => calls.filter(({ command }) => command === "assistant_send");
-  return { calls, sends, sent };
+  /** The commands called, in order, without the reads of the conversations and of links. */
+  const commands = () =>
+    calls
+      .map(({ command }) => command)
+      .filter((command) => !["assistant_conversations", "assistant_links"].includes(command));
+  return { calls, sends, sent, commands };
 }
 
-function renderAssistant(ports: Partial<AssistantPorts> = {}) {
+function renderAssistant(ports: Partial<AssistantPorts> = {}, conversation: number | null = null) {
   const all: AssistantPorts = {
     session: 1,
     activePage: "Places/Kesh Tor.md",
@@ -39,9 +65,12 @@ function renderAssistant(ports: Partial<AssistantPorts> = {}) {
     hasPage: () => true,
     ...ports,
   };
+  const onConversationChange = vi.fn();
   const element = (ports: AssistantPorts) => (
     <Assistant
       ports={ports}
+      conversation={conversation}
+      onConversationChange={onConversationChange}
       model="mistral-small"
       host="api.example.com"
       onOpenSettings={() => {}}
@@ -50,7 +79,7 @@ function renderAssistant(ports: Partial<AssistantPorts> = {}) {
   const { rerender } = render(element(all));
   /** Renders the assistant again as after the world's index changed. */
   const indexChanged = () => rerender(element({ ...all, indexRevision: all.indexRevision + 1 }));
-  return { ...all, indexChanged };
+  return { ...all, indexChanged, onConversationChange };
 }
 
 const composer = () => screen.getByRole("textbox", { name: "Message" });
@@ -76,7 +105,7 @@ async function startAnswer(sends: PendingSend[], text: string, pages: ContextPag
 
 describe("sending a message", () => {
   it("shows the message at once and sends it with the active page only after its edits saved", async () => {
-    const { calls, sends } = mockPendingSends();
+    const { sends, sent } = mockPendingSends();
     let saved = () => {};
     renderAssistant({ flushActive: () => new Promise((resolve) => (saved = resolve)) });
 
@@ -85,10 +114,10 @@ describe("sending a message", () => {
     expect(screen.getByText("Who lives at Kesh Tor?")).toBeInTheDocument();
     expect(composer()).toHaveValue("");
     await act(() => Promise.resolve());
-    expect(calls).toEqual([]);
+    expect(sent()).toEqual([]);
     await act(async () => saved());
     await waitFor(() => expect(sends).toHaveLength(1));
-    expect(calls).toEqual([
+    expect(sent()).toEqual([
       {
         command: "assistant_send",
         args: {
@@ -149,6 +178,7 @@ describe("sending a message", () => {
 
   it("puts a refused message back into the composer with the core's reason", async () => {
     mockAssistantIpc({
+      ...emptyStore,
       assistant_send: () => {
         throw { kind: "not_found", message: "No provider is saved." };
       },
@@ -373,9 +403,9 @@ describe("answers as references into the world", () => {
     });
     follow(answer, "[[Nowhere");
     expect(ports.openPage).toHaveBeenCalledOnce();
-    // Nothing is created: the core is asked only to send and for links.
+    // Nothing is created: the core is asked only to send, for links and for the conversations.
     expect(new Set(calls.map(({ command }) => command))).toEqual(
-      new Set(["assistant_send", "assistant_links"]),
+      new Set(["assistant_conversations", "assistant_send", "assistant_links"]),
     );
   });
 
@@ -417,5 +447,263 @@ describe("answers as references into the world", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     await waitFor(() => announced("The answer could not be copied."));
     vi.unstubAllGlobals();
+  });
+});
+
+describe("saved conversations", () => {
+  const saltmere: Conversation = {
+    id: 3,
+    title: "Where is Saltmere?",
+    messages: [
+      { role: "user", text: "Where is Saltmere?", time: 100 },
+      {
+        role: "answer",
+        text: "See [[Kesh Tor#Shrine]].",
+        time: 101,
+        state: "complete",
+        pages: [keshTor],
+        leftOut: 0,
+        indexing: false,
+      },
+    ],
+  };
+  const listed: Conversations = {
+    items: [
+      { id: 5, title: "The glass storm", updated: 1_700_000_200 },
+      { id: 3, title: "Where is Saltmere?", updated: 1_700_000_100 },
+    ],
+    notice: null,
+  };
+  const storm: Conversation = {
+    id: 5,
+    title: "The glass storm",
+    messages: [{ role: "user", text: "The glass storm", time: 200 }],
+  };
+  const byId = (args: Record<string, unknown>) => {
+    const found = [saltmere, storm].find(({ id }) => id === args.id);
+    if (!found) throw { kind: "not_found", message: "The conversation does not exist." };
+    return found;
+  };
+
+  it("shows the conversation shown last, with its answer's links marked and followed", async () => {
+    const { calls } = mockPendingSends(
+      () => ({
+        state: "ready",
+        links: [
+          {
+            from: 4,
+            to: 23,
+            state: "resolved",
+            target: "Kesh Tor",
+            path: "Places/Kesh Tor.md",
+            heading: "Shrine",
+            block: null,
+          },
+        ],
+      }),
+      { assistant_conversation: byId },
+    );
+    const ports = renderAssistant({}, 3);
+
+    expect(await screen.findByText("Where is Saltmere?")).toBeInTheDocument();
+    const answer = answers()[0];
+    await waitFor(() =>
+      expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Read 1 page" }));
+    expect(screen.getByRole("button", { name: "Kesh Tor" })).toBeInTheDocument();
+    const view = EditorView.findFromDOM(answer);
+    act(() => view?.dispatch({ selection: { anchor: 8 } }));
+    fireEvent.keyDown(answer, { key: "Enter", altKey: true });
+    expect(ports.openPage).toHaveBeenCalledWith("Places/Kesh Tor.md", {
+      newTab: true,
+      at: { heading: "Shrine", block: null },
+    });
+    expect(calls.find(({ command }) => command === "assistant_conversation")?.args).toEqual({
+      id: 3,
+    });
+    expect(ports.onConversationChange).toHaveBeenLastCalledWith(3);
+  });
+
+  it("says it is loading, and shows a conversation that cannot be read as an empty one with the reason", async () => {
+    let fail = (_error: unknown) => {};
+    mockPendingSends(undefined, {
+      assistant_conversation: () => new Promise((_resolve, reject) => (fail = reject)),
+    });
+    const ports = renderAssistant({}, 3);
+
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
+    await act(async () => fail({ kind: "io", message: "The disk is busy." }));
+
+    expect(screen.queryByText("Loading…")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The conversation could not be loaded: The disk is busy.",
+    );
+    expect(screen.getByText(/It answers here and changes no pages\./)).toBeVisible();
+    // The world keeps remembering it, for an opening that can read it.
+    expect(ports.onConversationChange).not.toHaveBeenCalled();
+  });
+
+  it("shows a conversation that is gone as a new one", async () => {
+    mockPendingSends();
+    const ports = renderAssistant({}, 3);
+
+    await waitFor(() => expect(ports.onConversationChange).toHaveBeenCalledWith(null));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText(/It answers here and changes no pages\./)).toBeVisible();
+  });
+
+  it("stops a running answer before starting a new conversation or opening another", async () => {
+    const { sends, commands } = mockPendingSends(undefined, {
+      assistant_conversations: () => listed,
+      assistant_conversation: byId,
+      // Ends the running answer as the core does, before it resolves.
+      assistant_stop: () => {
+        sends.at(-1)?.end({ state: "stopped", conversation: 7, text: "" });
+        return null;
+      },
+    });
+    const ports = renderAssistant();
+    await startAnswer(sends, "Who lives at Kesh Tor?");
+
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+
+    await waitFor(() => expect(answers()).toHaveLength(0));
+    expect(commands()).toEqual(["assistant_send", "assistant_stop"]);
+    expect(ports.onConversationChange).toHaveBeenLastCalledWith(null);
+
+    sendMessage("And the storm?");
+    await waitFor(() => expect(sends).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Where is Saltmere\?/ }));
+
+    expect(await screen.findByText("See [[Kesh Tor#Shrine]].")).toBeInTheDocument();
+    expect(commands()).toEqual([
+      "assistant_send",
+      "assistant_stop",
+      "assistant_send",
+      "assistant_stop",
+      "assistant_conversation",
+    ]);
+    expect(screen.queryByText("And the storm?")).toBeNull();
+    expect(ports.onConversationChange).toHaveBeenLastCalledWith(3);
+  });
+
+  it("lists the conversations in the core's order, and Back returns to the one shown", async () => {
+    mockPendingSends(undefined, { assistant_conversations: () => listed });
+    renderAssistant();
+
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+
+    const list = await screen.findByRole("region", { name: "Conversations" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows.map((row) => row.querySelector(".ui-strong")?.textContent)).toEqual([
+      "The glass storm",
+      "Where is Saltmere?",
+    ]);
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    fireEvent.click(within(list).getByRole("button", { name: "Back" }));
+    expect(screen.queryByRole("region", { name: "Conversations" })).toBeNull();
+    expect(composer()).toHaveFocus();
+  });
+
+  it("says when there are no conversations yet", async () => {
+    mockPendingSends();
+    renderAssistant();
+
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+
+    expect(
+      await screen.findByText("There are no conversations in this world yet."),
+    ).toBeInTheDocument();
+  });
+
+  it("deletes a conversation after a confirmation with Cancel focused, and shows an empty one in place of it", async () => {
+    let items = listed.items;
+    const { calls } = mockPendingSends(undefined, {
+      assistant_conversations: () => ({ items, notice: null }),
+      assistant_conversation: byId,
+      assistant_delete: (args) => {
+        items = items.filter(({ id }) => id !== args.id);
+        return null;
+      },
+    });
+    const ports = renderAssistant({}, 3);
+    expect(await screen.findByText("See [[Kesh Tor#Shrine]].")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+    const list = await screen.findByRole("region", { name: "Conversations" });
+    const row = () => within(list).getByText("Where is Saltmere?").closest("li") as HTMLElement;
+
+    fireEvent.click(within(row()).getByRole("button", { name: "Delete conversation" }));
+    const dialog = screen.getByRole("dialog", { name: 'Delete "Where is Saltmere?"?' });
+    expect(dialog).toHaveTextContent("cannot be undone");
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls.some(({ command }) => command === "assistant_delete")).toBe(false);
+
+    fireEvent.click(within(row()).getByRole("button", { name: "Delete conversation" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete conversation" }),
+    );
+
+    await waitFor(() => expect(within(list).queryByText("Where is Saltmere?")).toBeNull());
+    expect(calls.find(({ command }) => command === "assistant_delete")?.args).toEqual({ id: 3 });
+    expect(within(list).getByRole("button", { name: "Back" })).toHaveFocus();
+    expect(ports.onConversationChange).toHaveBeenLastCalledWith(null);
+    fireEvent.click(within(list).getByRole("button", { name: "Back" }));
+    expect(answers()).toHaveLength(0);
+    expect(screen.getByText(/It answers here and changes no pages\./)).toBeVisible();
+  });
+
+  it("says no answer arrived for a message, with Retry only on the last one", async () => {
+    const crashed: Conversation = {
+      id: 4,
+      title: "First",
+      messages: [
+        { role: "user", text: "First", time: 1 },
+        { role: "user", text: "Second", time: 2 },
+      ],
+    };
+    const { sends, sent } = mockPendingSends(undefined, {
+      assistant_conversation: () => crashed,
+    });
+    renderAssistant({}, 4);
+
+    expect(await screen.findByText("Second")).toBeInTheDocument();
+    expect(screen.getAllByText("No answer arrived for this message.")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(sends).toHaveLength(1));
+    expect(sent()[0].args).toEqual({
+      conversation: 4,
+      text: "",
+      active: "Places/Kesh Tor.md",
+      retry: true,
+    });
+    expect(screen.getAllByText("No answer arrived for this message.")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+  });
+
+  it("shows that earlier conversations were set aside, and that they are not saved once an answer ends unsaved", async () => {
+    let notice: Conversations["notice"] = { kind: "set_aside" };
+    const { sends } = mockPendingSends(undefined, {
+      assistant_conversations: () => ({ items: [], notice }),
+    });
+    renderAssistant();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This world's earlier conversations could not be read and were set aside.",
+    );
+    const pending = await startAnswer(sends, "Who lives at Kesh Tor?");
+    notice = { kind: "not_saved", reason: "The conversation store cannot be written." };
+    await act(async () => pending.end({ state: "complete", conversation: 7, text: "A monk." }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "This world's conversations are not being saved: The conversation store cannot be written. Messages from now on are lost when the world closes.",
+      ),
+    );
+    expect(screen.getByRole("alert")).toHaveClass("border-warning");
   });
 });

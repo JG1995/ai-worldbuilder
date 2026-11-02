@@ -1,6 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import type { IpcError } from "@/lib/ipc";
-import type { AnswerEnd, AnswerEvent, ContextPage, EditorLink } from "@/types/api";
+import type {
+  AnswerEnd,
+  AnswerEvent,
+  ContextPage,
+  ConversationSummary,
+  EditorLink,
+  SavedMessage,
+  StoreNotice,
+} from "@/types/api";
 import {
   type AnswerFailure,
   type AnswerState,
@@ -8,7 +16,14 @@ import {
   type ChatMessage,
 } from "@/ui/AssistantPane";
 import type { LinkAnchor } from "@/ui/editor-links";
-import { assistantLinks, assistantSend, assistantStop } from "../api/commands";
+import {
+  assistantConversation,
+  assistantConversations,
+  assistantDelete,
+  assistantLinks,
+  assistantSend,
+  assistantStop,
+} from "../api/commands";
 
 /** What the assistant gets from the open world. */
 export type AssistantPorts = {
@@ -31,6 +46,10 @@ export type AssistantPorts = {
 
 type AssistantProps = {
   ports: AssistantPorts;
+  /** The conversation to show on mount, the one shown last in this world, or null for a new one. */
+  conversation: number | null;
+  /** Called with the conversation shown, or null for a new one, whenever it changes. */
+  onConversationChange: (conversation: number | null) => void;
   /** The saved text provider's model. Without it, no provider is saved. */
   model?: string;
   /** The saved text provider's host. */
@@ -71,25 +90,68 @@ const announcements: Record<AnswerEnd["state"], string> = {
   failed: "The answer failed.",
 };
 
+/** The conversations list while it shows: its rows, null while they load, and its error. */
+type ListView = { items: ConversationSummary[] | null; error: string | null };
+
 /**
- * The assistant's conversation in this world: it sends a message, or the last one again, with the
- * active page's path, shows the answer as it arrives, and stops it on Stop. The core keeps the
- * conversation; only the new message and the active page's path go to it.
+ * The assistant's conversations in this world: it shows the one shown last, sends a message, or
+ * the last one again, with the active page's path, shows the answer as it arrives, and stops it
+ * on Stop; it lists the world's conversations, opens and deletes them, and starts new ones. The
+ * core keeps the conversations; only the new message and the active page's path go to it.
  */
-export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps) {
+export function Assistant({
+  ports,
+  conversation: lastShown,
+  onConversationChange,
+  model,
+  host,
+  onOpenSettings,
+}: AssistantProps) {
   const [conversation, setConversation] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [refusal, setRefusal] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [loading, setLoading] = useState(lastShown !== null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<StoreNotice | null>(null);
+  const [list, setList] = useState<ListView | null>(null);
   const nextId = useRef(0);
+  /**
+   * Counts the conversations shown: what a request or a load started for an earlier one is
+   * ignored once another shows.
+   */
+  const shownCount = useRef(0);
   /** For each answer, the index revision and text its links were last asked for. */
   const linksAsked = useRef(new Map<number, string>());
   const { indexRevision } = ports;
 
+  const last = messages.at(-1);
+  const running = last?.role === "answer" && last.state === "streaming";
+
   function updateAnswer(id: number, change: (answer: AnswerMessage) => AnswerMessage) {
     setMessages((current) => withAnswer(current, id, change));
   }
+
+  function show(id: number | null) {
+    setConversation(id);
+    onConversationChange(id);
+  }
+
+  /** Reads how the world's conversations are kept again; a failure leaves the notice shown. */
+  function readNotice() {
+    assistantConversations().then(
+      (read) => setNotice(read.notice),
+      () => {},
+    );
+  }
+
+  // The conversation shown last, and how the world's conversations are kept, once on mount.
+  const mounted = useEffectEvent(() => {
+    readNotice();
+    if (lastShown !== null) void load(lastShown);
+  });
+  useEffect(() => mounted(), []);
 
   // Each answer's links, once its text is final, and again for every answer when the index
   // changes. An answer asked while the index is built stays plain until then.
@@ -129,6 +191,61 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
     };
   }
 
+  /** A saved message as the conversation holds it. */
+  function fromSaved(saved: SavedMessage): Message {
+    const id = nextId.current++;
+    if (saved.role === "user") return { id, role: "user", text: saved.text };
+    const { pages, leftOut, indexing } = saved;
+    return {
+      id,
+      role: "answer",
+      text: saved.text,
+      state: saved.state,
+      context: { pages, leftOut, indexing },
+      failure: null,
+      linked: null,
+    };
+  }
+
+  /** Clears the conversation shown, so that nothing still arriving for it is shown. */
+  function clear() {
+    shownCount.current++;
+    setMessages([]);
+    setRefusal(null);
+    setLoadError(null);
+    setLoading(false);
+  }
+
+  /**
+   * Shows the conversation `id`, or an empty one when it is gone or cannot be read; one that cannot
+   * be read stays the one the world remembers.
+   */
+  async function load(id: number) {
+    clear();
+    const count = shownCount.current;
+    setLoading(true);
+    setConversation(null);
+    try {
+      const loaded = await assistantConversation(id);
+      if (shownCount.current !== count) return;
+      setMessages(loaded.messages.map(fromSaved));
+      show(id);
+    } catch (error) {
+      if (shownCount.current !== count) return;
+      const { kind, message } = error as IpcError;
+      if (kind === "not_found") show(null);
+      else setLoadError(message);
+    } finally {
+      if (shownCount.current === count) setLoading(false);
+    }
+  }
+
+  /** Stops the running answer, if any, and resolves once the core has saved it. */
+  async function stopRunning() {
+    // A refusal, such as with AI just switched off, leaves nothing to stop.
+    if (running) await assistantStop().catch(() => {});
+  }
+
   /**
    * Saves the active page, then asks the core to answer into `answer`. A refusal, which comes
    * before the core has saved anything, goes to `refused` with the core's message.
@@ -138,17 +255,22 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
     outgoing: { text: string; retry: boolean },
     refused: (message: string) => void,
   ) {
+    const count = shownCount.current;
     setRefusal(null);
     setAnnouncement("");
     await ports.flushActive();
+    if (shownCount.current !== count) return;
     // Text that arrives after the answer has ended is dropped: the end carries the final text.
     const onEvent = (event: AnswerEvent) => {
+      if (shownCount.current !== count) return;
       if (event.kind === "context") {
         const context = {
           pages: event.pages,
           leftOut: event.leftOut,
           indexing: event.indexing,
         };
+        // A new conversation is known from here on, so it can be found in the list.
+        show(event.conversation);
         updateAnswer(answer.id, (shown) => ({ ...shown, context }));
       } else {
         updateAnswer(answer.id, (shown) =>
@@ -163,10 +285,15 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
         onEvent,
       );
     } catch (error) {
+      if (shownCount.current !== count) return;
       refused((error as IpcError).message);
+      readNotice();
       return;
     }
-    setConversation(end.conversation);
+    // A failed save in the core moves the conversations to memory, which the notice says.
+    readNotice();
+    if (shownCount.current !== count) return;
+    show(end.conversation);
     const failure =
       end.state === "failed"
         ? { reason: end.reason, detail: end.detail, providerMessage: end.providerMessage }
@@ -189,15 +316,65 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
     });
   }
 
+  /** Answers the last message again, in place of its failed answer, or where none arrived. */
   function retry() {
-    const failed = messages.at(-1);
-    if (failed?.role !== "answer") return;
+    if (!last) return;
+    const replaced = last.role === "answer" ? last : null;
     const answer = newAnswer();
-    setMessages((current) => [...current.slice(0, -1), answer]);
+    setMessages((current) => [...(replaced ? current.slice(0, -1) : current), answer]);
     void request(answer, { text: "", retry: true }, (message) => {
-      setMessages((current) => current.map((shown) => (shown.id === answer.id ? failed : shown)));
+      setMessages((current) =>
+        replaced
+          ? current.map((shown) => (shown.id === answer.id ? replaced : shown))
+          : current.filter((shown) => shown.id !== answer.id),
+      );
       setRefusal(`The message could not be sent again: ${message}`);
     });
+  }
+
+  async function startNew() {
+    setList(null);
+    if (conversation === null && messages.length === 0 && !loading) return;
+    await stopRunning();
+    clear();
+    show(null);
+  }
+
+  async function readList() {
+    try {
+      const read = await assistantConversations();
+      setNotice(read.notice);
+      setList((shown) => shown && { ...shown, items: read.items });
+    } catch (error) {
+      const failed = `The conversations could not be read: ${(error as IpcError).message}`;
+      setList((shown) => shown && { items: [], error: failed });
+    }
+  }
+
+  function showList() {
+    setList({ items: null, error: null });
+    void readList();
+  }
+
+  async function open(id: number) {
+    await stopRunning();
+    setList(null);
+    await load(id);
+  }
+
+  async function remove(id: number) {
+    try {
+      await assistantDelete(id);
+    } catch (error) {
+      const failed = `The conversation could not be deleted: ${(error as IpcError).message}`;
+      setList((shown) => shown && { ...shown, error: failed });
+      return;
+    }
+    if (id === conversation) {
+      clear();
+      show(null);
+    }
+    await readList();
   }
 
   /**
@@ -238,6 +415,19 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
       model={model}
       host={host}
       onOpenSettings={onOpenSettings}
+      onNewConversation={() => void startNew()}
+      onShowConversations={showList}
+      storeNotice={notice}
+      conversations={
+        list
+          ? {
+              ...list,
+              onOpen: (id) => void open(id),
+              onDelete: remove,
+              onBack: () => setList(null),
+            }
+          : undefined
+      }
       chat={{
         messages: messages.map(shown),
         draft,
@@ -252,6 +442,8 @@ export function Assistant({ ports, model, host, onOpenSettings }: AssistantProps
         onCopy: copy,
         refusal,
         announcement,
+        loading,
+        loadError,
       }}
     />
   );

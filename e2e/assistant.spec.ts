@@ -61,7 +61,8 @@ test("the pane's edge resizes it by keyboard within 300px to 560px", async ({ pa
 
 test("F6 cycles the tree, the page column and the pane", async ({ page }) => {
   await openSampleWorld(page);
-  const settings = pane(page).getByRole("button", { name: "Settings" });
+  // The pane's first control, in its header.
+  const firstControl = pane(page).getByRole("button", { name: "New conversation" });
 
   await page.getByRole("treeitem").first().focus();
   await page.keyboard.press("F6");
@@ -69,11 +70,11 @@ test("F6 cycles the tree, the page column and the pane", async ({ page }) => {
   await expect(page.locator(":focus")).toHaveCount(1);
   await expect(page.locator("aside :focus")).toHaveCount(0);
   await page.keyboard.press("F6");
-  await expect(settings).toBeFocused();
+  await expect(firstControl).toBeFocused();
   await page.keyboard.press("F6");
   await expect(page.getByRole("treeitem").first()).toBeFocused();
   await page.keyboard.press("Shift+F6");
-  await expect(settings).toBeFocused();
+  await expect(firstControl).toBeFocused();
 });
 
 test("at 1024px the pane opens as an overlay over the page, which Escape closes", async ({
@@ -238,5 +239,67 @@ test("Copy puts the answer's Markdown on the clipboard", async ({ page, context 
   expect(copied).toMatch(/^The pages I read say this about \[\[Campaign overview\]\]:\n\n- /);
   expect(copied).toMatch(
     /\[\[Kesh Tor\]\], the only shade for a day's ride\.\n\nAsk about another page to compare them\.$/,
+  );
+});
+
+// The preview keeps each world's conversations, and the conversation it showed last, in memory
+// for as long as the page stays loaded.
+
+test("conversations are kept: a new one starts, the list opens one, the world reopens with it, and Delete asks first", async ({
+  page,
+}) => {
+  await openWithProvider(page);
+  const sendButton = pane(page).getByRole("button", { name: "Send" });
+  const list = pane(page).getByRole("region", { name: "Conversations" });
+  const first = "What is the steppe like?";
+
+  await send(page, first);
+  await expect(sendButton).toBeVisible();
+  await pane(page).getByRole("button", { name: "New conversation" }).click();
+  await expect(pane(page).getByText(first)).toHaveCount(0);
+  await send(page, "Who keeps the shrine?");
+  await expect(sendButton).toBeVisible();
+
+  await pane(page).getByRole("button", { name: "Conversations" }).click();
+  await expect(list.getByRole("listitem")).toHaveCount(2);
+  await expect(list.getByRole("listitem").first()).toContainText("Who keeps the shrine?");
+  await list.getByRole("button", { name: new RegExp(`^${first.replace("?", "\\?")}`) }).click();
+  await expect(pane(page).getByText(first)).toBeVisible();
+  await expect(answer(page)).toContainText("Ask about another page to compare them.");
+
+  await page.getByRole("button", { name: "World menu" }).click();
+  await page.getByRole("menuitem", { name: "Close world" }).click();
+  await page
+    .getByRole("region", { name: "Recent worlds" })
+    .getByRole("button", { name: /The Glass Steppe/ })
+    .click();
+  await expect(pane(page).getByText(first)).toBeVisible();
+  await expect(pane(page).getByText("Who keeps the shrine?")).toHaveCount(0);
+
+  await pane(page).getByRole("button", { name: "Conversations" }).click();
+  await list
+    .getByRole("listitem")
+    .filter({ hasText: first })
+    .getByRole("button", { name: "Delete conversation" })
+    .click();
+  const confirmation = page.getByRole("dialog", { name: `Delete "${first}"?` });
+  await expect(confirmation.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await confirmation.getByRole("button", { name: "Delete conversation" }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(list.getByRole("listitem")).toHaveCount(1);
+  await expect(list.getByRole("listitem")).toContainText("Who keeps the shrine?");
+  await list.getByRole("button", { name: "Back" }).click();
+  await expect(pane(page).getByText(/It answers here and changes no pages\./)).toBeVisible();
+});
+
+test("a message `store:not_saved` shows that the world's conversations are not being saved", async ({
+  page,
+}) => {
+  await openWithProvider(page);
+
+  await send(page, "store:not_saved");
+
+  await expect(pane(page).getByRole("alert")).toContainText(
+    "This world's conversations are not being saved: The conversation store cannot be written.",
   );
 });

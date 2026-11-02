@@ -19,6 +19,7 @@ function renderPage({ onDiscard = vi.fn() } = {}) {
       treeWidth: 264,
       assistantOpen: true,
       assistantWidth: 360,
+      assistantConversation: null,
     },
   });
   render(

@@ -83,6 +83,7 @@ describe("launching", () => {
         treeWidth: 320,
         assistantOpen: true,
         assistantWidth: 360,
+        assistantConversation: null,
       },
     };
     const calls = mockWorldIpc({ world_restore: () => restored });
@@ -130,6 +131,40 @@ describe("launching", () => {
     await waitFor(() =>
       expect(argsOf(calls, "workspace_save").at(-1)).toEqual({
         workspace: { ...restored.workspace, assistantOpen: true, assistantWidth: 496 },
+      }),
+    );
+  });
+
+  it("hands the layout the conversation the assistant showed last, and saves the one it shows next", async () => {
+    const restored: WorldOpened = {
+      ...testWorld,
+      workspace: { ...testWorld.workspace, assistantConversation: 7 },
+    };
+    const calls = mockWorldIpc({ world_restore: () => restored });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <World
+          layout={(parts) => (
+            <>
+              <Shell {...parts} />
+              <output aria-label="Conversation shown">{parts.assistantConversation}</output>
+              <button type="button" onClick={() => parts.onAssistantConversationChange(9)}>
+                Show conversation 9
+              </button>
+            </>
+          )}
+        />
+      </QueryClientProvider>,
+    );
+
+    const shown = await screen.findByRole("status", { name: "Conversation shown" });
+    await waitFor(() => expect(shown).toHaveTextContent("7"));
+    fireEvent.click(screen.getByRole("button", { name: "Show conversation 9" }));
+
+    expect(shown).toHaveTextContent("9");
+    await waitFor(() =>
+      expect(argsOf(calls, "workspace_save").at(-1)).toEqual({
+        workspace: { ...restored.workspace, assistantConversation: 9 },
       }),
     );
   });
@@ -248,6 +283,7 @@ describe("switching from the world menu", () => {
         treeWidth: 264,
         assistantOpen: true,
         assistantWidth: 360,
+        assistantConversation: null,
       },
     });
   });

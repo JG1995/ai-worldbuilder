@@ -21,11 +21,15 @@
 //! survives a crash or a power loss.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, ErrorCode};
 
 use super::Failure;
+use crate::data_file;
+#[cfg(test)]
+use crate::data_file::with_suffix;
 
 /// The format this version writes. A database in a newer format is never written.
 const FORMAT: i64 = 1;
@@ -181,31 +185,18 @@ fn check_world(connection: &Connection, world: &str) -> Result<(), Refusal> {
     }
 }
 
-/// Renames a damaged database, and its journal first, so the new database cannot take the old
-/// journal for its own, to their names with `.damaged-<now>` appended. An earlier set-aside file of
-/// the same name is never replaced.
+/// Sets a damaged database aside with `data_file::set_aside`, which never replaces an earlier
+/// set-aside file, and gives a failure in history's words.
 fn set_aside(file: &Path, now: u64) -> Result<(), Failure> {
-    let suffix = format!(".damaged-{now}");
-    let journal = with_suffix(file, "-journal");
-    if journal.exists() {
-        rename_new(&journal, &with_suffix(&journal, &suffix))?;
-    }
-    rename_new(file, &with_suffix(file, &suffix))
-}
-
-fn rename_new(from: &Path, to: &Path) -> Result<(), Failure> {
-    if to.exists() {
-        return Err(Failure::new(
-            "A damaged history database could not be set aside, because its new name is taken.",
-        ));
-    }
-    fs::rename(from, to).map_err(Failure::io)
-}
-
-fn with_suffix(file: &Path, suffix: &str) -> PathBuf {
-    let mut name = file.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
+    data_file::set_aside(file, now).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            Failure::new(
+                "A damaged history database could not be set aside, because its new name is taken.",
+            )
+        } else {
+            Failure::io(error)
+        }
+    })
 }
 
 #[cfg(test)]

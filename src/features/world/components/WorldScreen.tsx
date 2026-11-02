@@ -77,7 +77,8 @@ export type AssistantPorts = {
 /**
  * What the world's screen hands to its layout: the tree, the tab strip, the page region and the
  * toasts, with the tree pane's width and overlay state, the assistant pane's open state, width
- * and overlay state, the assistant's ports, and whether a world change runs.
+ * and overlay state, the assistant's ports, the conversation it shows, and whether a world change
+ * runs.
  */
 export type WorldScreenParts = {
   tree: ReactNode;
@@ -99,6 +100,9 @@ export type WorldScreenParts = {
   assistantOverlayOpen: boolean;
   onAssistantOverlayOpenChange: (open: boolean) => void;
   assistantPorts: AssistantPorts;
+  /** The conversation the assistant showed last in this world, or null for a new one. */
+  assistantConversation: number | null;
+  onAssistantConversationChange: (conversation: number | null) => void;
   changingWorld: boolean;
 };
 
@@ -149,6 +153,7 @@ export function WorldScreen({
   const assistantOpen = useWorldStore((store) => store.assistantOpen);
   const assistantWidth = useWorldStore((store) => store.assistantWidth);
   const assistantOverlayOpen = useWorldStore((store) => store.assistantOverlayOpen);
+  const assistantConversation = useWorldStore((store) => store.assistantConversation);
   const worldNotices = useWorldStore((store) => store.worldNotices);
   const historyNotRecording = useWorldStore((store) => store.historyNotRecording);
   const toasts = useWorldStore((store) => store.toasts);
@@ -167,6 +172,7 @@ export function WorldScreen({
     setAssistantOpen,
     setAssistantWidth,
     setAssistantOverlayOpen,
+    setAssistantConversation,
     flush,
     newEntryFolder,
     startNaming,
@@ -423,6 +429,8 @@ export function WorldScreen({
         assistantOverlayOpen,
         onAssistantOverlayOpenChange: setAssistantOverlayOpen,
         assistantPorts,
+        assistantConversation,
+        onAssistantConversationChange: setAssistantConversation,
         changingWorld,
         tree:
           // Until the first listing arrives, an empty pane, not the empty-world message.

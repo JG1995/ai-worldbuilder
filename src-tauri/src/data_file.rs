@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 /// Writes `bytes` to a temporary file next to `file` and then renames it over `file`, so the file
@@ -44,6 +44,32 @@ pub fn write_atomically(file: &Path, bytes: &[u8], private: bool) -> io::Result<
     result
 }
 
+/// Renames a damaged SQLite database, and its journal first, so a new database cannot take the old
+/// journal for its own, to their names with `.damaged-<now>` appended. An earlier set-aside file of
+/// the same name is never replaced: the rename fails with `AlreadyExists` instead.
+pub fn set_aside(file: &Path, now: u64) -> io::Result<()> {
+    let suffix = format!(".damaged-{now}");
+    let journal = with_suffix(file, "-journal");
+    if journal.exists() {
+        rename_new(&journal, &with_suffix(&journal, &suffix))?;
+    }
+    rename_new(file, &with_suffix(file, &suffix))
+}
+
+fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    if to.exists() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    fs::rename(from, to)
+}
+
+/// `file` with `suffix` appended to its name.
+pub fn with_suffix(file: &Path, suffix: &str) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -68,5 +94,41 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"secret");
         assert_eq!(mode(&file), 0o600);
         assert!(!leftover.exists());
+    }
+}
+
+#[cfg(test)]
+mod set_aside_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_and_its_journal_are_set_aside_and_an_earlier_set_aside_file_is_never_replaced() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("store.sqlite");
+        let journal = with_suffix(&file, "-journal");
+        fs::write(&file, "damaged").unwrap();
+        fs::write(&journal, "journal").unwrap();
+
+        set_aside(&file, 7).unwrap();
+
+        assert!(!file.exists() && !journal.exists());
+        assert_eq!(
+            fs::read(with_suffix(&file, ".damaged-7")).unwrap(),
+            b"damaged"
+        );
+        assert_eq!(
+            fs::read(with_suffix(&journal, ".damaged-7")).unwrap(),
+            b"journal"
+        );
+
+        fs::write(&file, "damaged again").unwrap();
+        let taken = set_aside(&file, 7).unwrap_err();
+
+        assert_eq!(taken.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&file).unwrap(), b"damaged again");
+        assert_eq!(
+            fs::read(with_suffix(&file, ".damaged-7")).unwrap(),
+            b"damaged"
+        );
     }
 }

@@ -70,6 +70,8 @@ type WorldStore = {
   assistantWidth: number;
   /** Whether the assistant's overlay is open below 1280px; not saved. */
   assistantOverlayOpen: boolean;
+  /** The conversation the assistant shows, or null for a new one; saved with the workspace. */
+  assistantConversation: number | null;
   pages: Readonly<Record<string, PageStatus>>;
   worldNotices: ReadonlySet<WorldNotice>;
   /** Why the world's changes are not being recorded in its history, while they are not. */
@@ -137,6 +139,7 @@ type WorldStore = {
   setAssistantOpen: (open: boolean) => void;
   setAssistantWidth: (width: number) => void;
   setAssistantOverlayOpen: (open: boolean) => void;
+  setAssistantConversation: (conversation: number | null) => void;
   /**
    * The setters below take the world session the page was opened in, and are ignored once that
    * world or the page is no longer open, so nothing from one world reaches another.
@@ -177,6 +180,7 @@ const closedWorld = {
   assistantOpen: true,
   assistantWidth: defaultAssistantWidth,
   assistantOverlayOpen: false,
+  assistantConversation: null,
   pages: {},
   worldNotices: new Set<WorldNotice>(),
   historyNotRecording: null,
@@ -190,8 +194,8 @@ const closedWorld = {
 let toastCount = 0;
 
 /**
- * How long after the tabs, the expanded folders, the tree width or the assistant's side pane
- * change the workspace saves.
+ * How long after the tabs, the expanded folders, the tree width, the assistant's side pane or the
+ * conversation it shows change the workspace saves.
  */
 export const workspaceSaveDelay = 500;
 
@@ -285,6 +289,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       treeWidth: workspace.treeWidth,
       assistantOpen: workspace.assistantOpen,
       assistantWidth: workspace.assistantWidth,
+      assistantConversation: workspace.assistantConversation,
       pages: Object.fromEntries(workspace.tabs.map((path) => [path, loading])),
     });
   },
@@ -404,6 +409,8 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
 
   setAssistantOverlayOpen: (assistantOverlayOpen) => set({ assistantOverlayOpen }),
 
+  setAssistantConversation: (assistantConversation) => set({ assistantConversation }),
+
   setPage: (session, path, status) =>
     set(({ world, tabs, pages }) =>
       world?.session === session && tabs.includes(path)
@@ -481,8 +488,16 @@ function cancelWorkspaceSave() {
  */
 export function saveWorkspace(): Promise<void> {
   cancelWorkspaceSave();
-  const { world, tabs, active, expanded, treeWidth, assistantOpen, assistantWidth } =
-    useWorldStore.getState();
+  const {
+    world,
+    tabs,
+    active,
+    expanded,
+    treeWidth,
+    assistantOpen,
+    assistantWidth,
+    assistantConversation,
+  } = useWorldStore.getState();
   if (world) {
     const workspace: Workspace = {
       tabs,
@@ -491,6 +506,7 @@ export function saveWorkspace(): Promise<void> {
       treeWidth,
       assistantOpen,
       assistantWidth,
+      assistantConversation,
     };
     workspaceSaving = workspaceSaving.then(() =>
       workspaceSave(workspace).then(
@@ -516,7 +532,8 @@ useWorldStore.subscribe((state, previous) => {
     state.expanded !== previous.expanded ||
     state.treeWidth !== previous.treeWidth ||
     state.assistantOpen !== previous.assistantOpen ||
-    state.assistantWidth !== previous.assistantWidth;
+    state.assistantWidth !== previous.assistantWidth ||
+    state.assistantConversation !== previous.assistantConversation;
   if (!changed || state.changingWorld) return;
   cancelWorkspaceSave();
   workspaceTimer = setTimeout(() => void saveWorkspace(), workspaceSaveDelay);

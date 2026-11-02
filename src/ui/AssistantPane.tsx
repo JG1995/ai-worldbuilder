@@ -1,7 +1,8 @@
 import type { EditorView } from "@codemirror/view";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { EditorLink, ProviderFailure } from "@/types/api";
+import type { ConversationSummary, EditorLink, ProviderFailure, StoreNotice } from "@/types/api";
 import { Button, IconButton } from "./Button";
+import { Dialog } from "./Dialog";
 import { setLinks } from "./editor-links";
 import { Icon } from "./Icon";
 import { createPageState, MarkdownEditor } from "./MarkdownEditor";
@@ -62,6 +63,22 @@ export type AssistantChat = {
   refusal: string | null;
   /** What the polite live region announces, such as an answer's end. */
   announcement: string;
+  /** The conversation is loading; the message area says so. */
+  loading?: boolean;
+  /** Why the conversation could not be loaded, shown above an empty one. */
+  loadError?: string | null;
+};
+
+/** The world's conversations, shown in place of the conversation and the composer. */
+export type ConversationList = {
+  /** Null while the list loads. */
+  items: ConversationSummary[] | null;
+  /** Why the list could not be read, or a conversation not deleted. */
+  error: string | null;
+  onOpen: (id: number) => void;
+  /** Deletes a conversation once the user confirmed it, and resolves when the list shows it gone. */
+  onDelete: (id: number) => Promise<void>;
+  onBack: () => void;
 };
 
 type AssistantPaneProps = {
@@ -72,6 +89,14 @@ type AssistantPaneProps = {
   onOpenSettings: () => void;
   /** The conversation and the composer. Without it, the pane shows neither. */
   chat?: AssistantChat;
+  /** The header's New conversation button. Without it, the header has none. */
+  onNewConversation?: () => void;
+  /** The header's Conversations button. Without it, the header has none. */
+  onShowConversations?: () => void;
+  /** While given, the conversations list replaces the conversation and the composer. */
+  conversations?: ConversationList;
+  /** That earlier conversations were set aside, or that conversations are not being saved. */
+  storeNotice?: StoreNotice | null;
 };
 
 /** The composer grows with its text up to this many lines, then scrolls. */
@@ -81,26 +106,51 @@ export const maxComposerLines = 8;
 const followSlack = 16;
 
 /**
- * The assistant pane's content: its header, with the model's name when a provider is saved; the
- * notice that asks for a provider; the conversation, or the explanation of an empty one; and the
- * composer, where Enter sends and Send becomes Stop while an answer arrives.
+ * The assistant pane's content: its header, with the model's name when a provider is saved and the
+ * conversation buttons; the notice that asks for a provider and the storage notices; the
+ * conversation, or the explanation of an empty one, or the conversations list; and the composer,
+ * where Enter sends and Send becomes Stop while an answer arrives.
  */
-export function AssistantPane({ model, host, onOpenSettings, chat }: AssistantPaneProps) {
+export function AssistantPane({
+  model,
+  host,
+  onOpenSettings,
+  chat,
+  onNewConversation,
+  onShowConversations,
+  conversations,
+  storeNotice,
+}: AssistantPaneProps) {
   const messages = chat?.messages ?? [];
+  const listShown = conversations !== undefined;
+  const root = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  const shownMessages = useRef(messages.length);
+  const shownMessages = useRef({ count: messages.length, first: messages[0]?.id });
+  const wasListShown = useRef(listShown);
 
   // While an answer arrives, the area follows its newest text unless the user scrolled up; a new
-  // message follows again. The answers' editors have taken their text by now: child effects run
-  // first.
+  // message, another conversation and the return from the list follow again. The answers'
+  // editors have taken their text by now: child effects run first.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: returning from the list follows again.
   useEffect(() => {
     const area = scroller.current;
     if (!area) return;
-    if (messages.length > shownMessages.current) following.current = true;
-    shownMessages.current = messages.length;
+    const shown = shownMessages.current;
+    if (messages.length > shown.count || messages[0]?.id !== shown.first) following.current = true;
+    if (wasListShown.current) following.current = true;
+    shownMessages.current = { count: messages.length, first: messages[0]?.id };
     if (following.current) area.scrollTop = area.scrollHeight;
-  }, [messages]);
+  }, [messages, listShown]);
+
+  // Leaving the list removes the control that had focus, so focus goes to the composer.
+  useEffect(() => {
+    const focused = document.activeElement;
+    if (wasListShown.current && !listShown && (focused === null || focused === document.body)) {
+      root.current?.querySelector<HTMLElement>("[data-initial-focus]")?.focus();
+    }
+    wasListShown.current = listShown;
+  }, [listShown]);
 
   function rememberPosition() {
     const area = scroller.current;
@@ -113,69 +163,219 @@ export function AssistantPane({ model, host, onOpenSettings, chat }: AssistantPa
   const running = last?.role === "answer" && last.state === "streaming";
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={root} className="flex min-h-0 flex-1 flex-col">
       <header className="flex h-tab-strip shrink-0 items-center gap-2 border-divider border-b bg-window px-3">
         <h2 className="label-caps shrink-0 text-text">Assistant</h2>
         {model && <span className="ui-small min-w-0 truncate text-text-muted">{model}</span>}
-      </header>
-      <div
-        ref={scroller}
-        onScroll={rememberPosition}
-        className="min-h-0 flex-1 overflow-y-auto bg-page"
-      >
-        {!model && (
-          <Notice
-            status="info"
-            actions={
-              <Button variant="secondary" onClick={onOpenSettings}>
-                Settings
-              </Button>
-            }
-          >
-            Add a provider in Settings to use the assistant.
-          </Notice>
-        )}
-        {model && messages.length === 0 && (
-          <p className="ui p-4 text-text-muted">
-            For each message, the assistant reads the pages of this world that matter to it and
-            sends them, with your message, to {host}. It answers here and changes no pages.
-          </p>
-        )}
-        {chat && messages.length > 0 && (
-          <ol aria-label="Conversation" className="flex flex-col gap-4 p-4">
-            {messages.map((message) =>
-              message.role === "user" ? (
-                <li
-                  key={message.id}
-                  // The border shows the block in light mode, where raised is as white as page.
-                  className="assistant ml-8 self-end whitespace-pre-wrap break-words rounded-md border border-divider bg-raised px-3 py-2 text-text"
-                >
-                  {message.text}
-                </li>
-              ) : (
-                <Answer
-                  key={message.id}
-                  answer={message}
-                  host={host}
-                  canRetry={message === last && !running}
-                  chat={chat}
-                />
-              ),
+        {(onNewConversation || onShowConversations) && (
+          <div className="ml-auto flex shrink-0 gap-1">
+            {onNewConversation && (
+              <IconButton icon="add" label="New conversation" onClick={onNewConversation} />
             )}
-          </ol>
-        )}
-      </div>
-      {chat && (
-        <>
-          {chat.refusal && <Notice status="error">{chat.refusal}</Notice>}
-          {/* Without a provider, nothing can be sent: the notice above asks for one. */}
-          {model && <Composer chat={chat} running={running} />}
-          <div aria-live="polite" className="sr-only">
-            {chat.announcement}
+            {onShowConversations && (
+              <IconButton icon="forum" label="Conversations" onClick={onShowConversations} />
+            )}
           </div>
+        )}
+      </header>
+      {!model && (
+        <Notice
+          status="info"
+          actions={
+            // Without a composer, opening the pane goes to the one action that enables it.
+            <Button variant="secondary" data-initial-focus onClick={onOpenSettings}>
+              Settings
+            </Button>
+          }
+        >
+          Add a provider in Settings to use the assistant.
+        </Notice>
+      )}
+      {storeNotice?.kind === "set_aside" && (
+        <Notice status="warning">
+          This world's earlier conversations could not be read and were set aside. New ones are
+          saved.
+        </Notice>
+      )}
+      {storeNotice?.kind === "not_saved" && (
+        <Notice status="warning">
+          {withReason("This world's conversations are not being saved", storeNotice.reason)}{" "}
+          Messages from now on are lost when the world closes.
+        </Notice>
+      )}
+      {conversations ? (
+        <ConversationsList list={conversations} />
+      ) : (
+        <>
+          <div
+            ref={scroller}
+            onScroll={rememberPosition}
+            className="min-h-0 flex-1 overflow-y-auto bg-page"
+          >
+            {chat?.loadError && (
+              <Notice status="error">
+                {withReason("The conversation could not be loaded", chat.loadError)}
+              </Notice>
+            )}
+            {chat?.loading && <p className="ui p-4 text-text-muted">Loading…</p>}
+            {model && !chat?.loading && messages.length === 0 && (
+              <p className="ui p-4 text-text-muted">
+                For each message, the assistant reads the pages of this world that matter to it and
+                sends them, with your message, to {host}. It answers here and changes no pages.
+              </p>
+            )}
+            {chat && messages.length > 0 && (
+              <ol aria-label="Conversation" className="flex flex-col gap-4 p-4">
+                {messages.map((message, index) =>
+                  message.role === "user" ? (
+                    <UserMessage
+                      key={message.id}
+                      text={message.text}
+                      // A message the next one does not answer, such as after a crash.
+                      unanswered={messages[index + 1]?.role !== "answer"}
+                      onRetry={model && message === last && !running ? chat.onRetry : undefined}
+                    />
+                  ) : (
+                    <Answer
+                      key={message.id}
+                      answer={message}
+                      host={host}
+                      canRetry={message === last && !running}
+                      chat={chat}
+                    />
+                  ),
+                )}
+              </ol>
+            )}
+          </div>
+          {chat && (
+            <>
+              {chat.refusal && <Notice status="error">{chat.refusal}</Notice>}
+              {/* Without a provider, nothing can be sent: the notice above asks for one. */}
+              {model && <Composer chat={chat} running={running} />}
+            </>
+          )}
         </>
       )}
+      {chat && (
+        <div aria-live="polite" className="sr-only">
+          {chat.announcement}
+        </div>
+      )}
     </div>
+  );
+}
+
+function UserMessage({
+  text,
+  unanswered,
+  onRetry,
+}: {
+  text: string;
+  unanswered: boolean;
+  /** Offered only on the conversation's last message. */
+  onRetry: (() => void) | undefined;
+}) {
+  return (
+    <>
+      <li
+        // The border shows the block in light mode, where raised is as white as page.
+        className="assistant ml-8 self-end whitespace-pre-wrap break-words rounded-md border border-divider bg-raised px-3 py-2 text-text"
+      >
+        {text}
+      </li>
+      {unanswered && (
+        <li className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <p className="ui-small text-text-muted">No answer arrived for this message.</p>
+          {onRetry && (
+            <Button variant="secondary" onClick={onRetry}>
+              Retry
+            </Button>
+          )}
+        </li>
+      )}
+    </>
+  );
+}
+
+/** When a conversation's latest message was sent, in local date and time. */
+function sentAt(updated: number) {
+  return new Date(updated * 1000).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+/**
+ * The world's conversations, newest first, with Back; each opens on a press and has Delete, which
+ * asks first in a confirmation dialog with Cancel focused.
+ */
+function ConversationsList({ list }: { list: ConversationList }) {
+  const [deleting, setDeleting] = useState<ConversationSummary | null>(null);
+  const back = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+
+  async function confirmDelete(id: number) {
+    setDeleting(null);
+    await list.onDelete(id);
+    // The deleted row's button had focus.
+    back.current?.focus();
+  }
+
+  return (
+    <section aria-label="Conversations" className="flex min-h-0 flex-1 flex-col bg-page">
+      <div className="flex shrink-0 items-center gap-2 border-divider border-b px-3 py-1">
+        <IconButton ref={back} icon="arrow_back" label="Back" onClick={list.onBack} />
+        <h3 className="ui-strong text-text">Conversations</h3>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {list.error && <Notice status="error">{list.error}</Notice>}
+        {list.items === null && <p className="ui p-4 text-text-muted">Loading…</p>}
+        {list.items?.length === 0 && (
+          <p className="ui p-4 text-text-muted">There are no conversations in this world yet.</p>
+        )}
+        {list.items && list.items.length > 0 && (
+          <ul className="flex flex-col py-1">
+            {list.items.map((item) => (
+              <li key={item.id} className="flex items-center gap-1 pr-3 hover:bg-raised">
+                <button
+                  type="button"
+                  onClick={() => list.onOpen(item.id)}
+                  className="flex min-w-0 flex-1 flex-col items-start py-2 pl-4 text-left focus-visible:-outline-offset-2"
+                >
+                  <span className="ui-strong w-full truncate text-text">{item.title}</span>
+                  <span className="ui-small text-text-muted">{sentAt(item.updated)}</span>
+                </button>
+                <IconButton
+                  icon="delete"
+                  label="Delete conversation"
+                  onClick={() => setDeleting(item)}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {deleting && (
+        <Dialog
+          title={`Delete "${deleting.title}"?`}
+          initialFocus={cancel}
+          onCancel={() => setDeleting(null)}
+          actions={
+            <>
+              <Button variant="destructive" onClick={() => void confirmDelete(deleting.id)}>
+                Delete conversation
+              </Button>
+              <Button ref={cancel} variant="secondary" onClick={() => setDeleting(null)}>
+                Cancel
+              </Button>
+            </>
+          }
+        >
+          Deleting the conversation and its messages cannot be undone.
+        </Dialog>
+      )}
+    </section>
   );
 }
 
