@@ -6,7 +6,7 @@ import type { IpcError } from "@/lib/ipc";
 import type { Workspace, WorldOpened } from "@/types/api";
 import { findAnchor, type LinkAnchor } from "@/ui/editor-links";
 import type { TreeNameInput } from "@/ui/FileTree";
-import { defaultTreeWidth } from "@/ui/Shell";
+import { defaultAssistantWidth, defaultTreeWidth } from "@/ui/Shell";
 import type { Toast } from "@/ui/Toast";
 import { workspaceSave } from "../api/commands";
 import type { PageSaver, SaveNotice, SaveResult } from "../logic/saving";
@@ -65,6 +65,11 @@ type WorldStore = {
   expanded: ReadonlySet<string>;
   treeWidth: number;
   treeOverlayOpen: boolean;
+  /** Whether the assistant's side pane is open at 1280px and wider; saved with the workspace. */
+  assistantOpen: boolean;
+  assistantWidth: number;
+  /** Whether the assistant's overlay is open below 1280px; not saved. */
+  assistantOverlayOpen: boolean;
   pages: Readonly<Record<string, PageStatus>>;
   worldNotices: ReadonlySet<WorldNotice>;
   /** Why the world's changes are not being recorded in its history, while they are not. */
@@ -129,6 +134,9 @@ type WorldStore = {
   createdPageShown: () => void;
   setTreeWidth: (width: number) => void;
   setTreeOverlayOpen: (open: boolean) => void;
+  setAssistantOpen: (open: boolean) => void;
+  setAssistantWidth: (width: number) => void;
+  setAssistantOverlayOpen: (open: boolean) => void;
   /**
    * The setters below take the world session the page was opened in, and are ignored once that
    * world or the page is no longer open, so nothing from one world reaches another.
@@ -166,6 +174,9 @@ const closedWorld = {
   expanded: new Set<string>(),
   treeWidth: defaultTreeWidth,
   treeOverlayOpen: false,
+  assistantOpen: true,
+  assistantWidth: defaultAssistantWidth,
+  assistantOverlayOpen: false,
   pages: {},
   worldNotices: new Set<WorldNotice>(),
   historyNotRecording: null,
@@ -178,7 +189,10 @@ const closedWorld = {
 /** Numbers toasts, so each has its own id. */
 let toastCount = 0;
 
-/** How long after the tabs, the expanded folders or the tree width change the workspace saves. */
+/**
+ * How long after the tabs, the expanded folders, the tree width or the assistant's side pane
+ * change the workspace saves.
+ */
 export const workspaceSaveDelay = 500;
 
 /** `expanded` with every folder above `path` added. */
@@ -269,6 +283,8 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       active: workspace.active,
       expanded: withAncestors(new Set(workspace.expanded), workspace.active),
       treeWidth: workspace.treeWidth,
+      assistantOpen: workspace.assistantOpen,
+      assistantWidth: workspace.assistantWidth,
       pages: Object.fromEntries(workspace.tabs.map((path) => [path, loading])),
     });
   },
@@ -382,6 +398,12 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
 
   setTreeOverlayOpen: (treeOverlayOpen) => set({ treeOverlayOpen }),
 
+  setAssistantOpen: (assistantOpen) => set({ assistantOpen }),
+
+  setAssistantWidth: (assistantWidth) => set({ assistantWidth: Math.round(assistantWidth) }),
+
+  setAssistantOverlayOpen: (assistantOverlayOpen) => set({ assistantOverlayOpen }),
+
   setPage: (session, path, status) =>
     set(({ world, tabs, pages }) =>
       world?.session === session && tabs.includes(path)
@@ -459,9 +481,17 @@ function cancelWorkspaceSave() {
  */
 export function saveWorkspace(): Promise<void> {
   cancelWorkspaceSave();
-  const { world, tabs, active, expanded, treeWidth } = useWorldStore.getState();
+  const { world, tabs, active, expanded, treeWidth, assistantOpen, assistantWidth } =
+    useWorldStore.getState();
   if (world) {
-    const workspace: Workspace = { tabs, active, expanded: [...expanded], treeWidth };
+    const workspace: Workspace = {
+      tabs,
+      active,
+      expanded: [...expanded],
+      treeWidth,
+      assistantOpen,
+      assistantWidth,
+    };
     workspaceSaving = workspaceSaving.then(() =>
       workspaceSave(workspace).then(
         () => {},
@@ -484,7 +514,9 @@ useWorldStore.subscribe((state, previous) => {
     state.tabs !== previous.tabs ||
     state.active !== previous.active ||
     state.expanded !== previous.expanded ||
-    state.treeWidth !== previous.treeWidth;
+    state.treeWidth !== previous.treeWidth ||
+    state.assistantOpen !== previous.assistantOpen ||
+    state.assistantWidth !== previous.assistantWidth;
   if (!changed || state.changingWorld) return;
   cancelWorkspaceSave();
   workspaceTimer = setTimeout(() => void saveWorkspace(), workspaceSaveDelay);

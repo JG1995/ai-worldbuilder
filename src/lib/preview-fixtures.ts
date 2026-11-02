@@ -251,7 +251,14 @@ function opened(next: PreviewWorld): WorldOpened {
   return {
     name: next.name,
     session,
-    workspace: { tabs: [], active: null, expanded: [], treeWidth: 264 },
+    workspace: {
+      tabs: [],
+      active: null,
+      expanded: [],
+      treeWidth: 264,
+      assistantOpen: true,
+      assistantWidth: 360,
+    },
   };
 }
 

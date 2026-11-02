@@ -20,9 +20,14 @@ const FORMAT: u32 = 1;
 const MAX_WORLDS: usize = 10;
 /// The file tree's default width in pixels, as in `src/ui/Shell.tsx`.
 const DEFAULT_TREE_WIDTH: u32 = 264;
+/// The assistant pane's default width in pixels, as in `src/ui/Shell.tsx`.
+const DEFAULT_ASSISTANT_WIDTH: u32 = 360;
 
-/// The open tabs in order, the active tab, the expanded folders and the tree width of a world.
-/// Paths are relative to the world.
+/// The open tabs in order, the active tab, the expanded folders, the tree width, and whether the
+/// assistant's side pane is open and its width, of a world. Paths are relative to the world.
+///
+/// The assistant's fields came later in format 1; a document written before them loads with their
+/// defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +36,18 @@ pub struct Workspace {
     pub active: Option<String>,
     pub expanded: Vec<String>,
     pub tree_width: u32,
+    #[serde(default = "default_assistant_open")]
+    pub assistant_open: bool,
+    #[serde(default = "default_assistant_width")]
+    pub assistant_width: u32,
+}
+
+fn default_assistant_open() -> bool {
+    true
+}
+
+fn default_assistant_width() -> u32 {
+    DEFAULT_ASSISTANT_WIDTH
 }
 
 impl Default for Workspace {
@@ -40,6 +57,8 @@ impl Default for Workspace {
             active: None,
             expanded: Vec::new(),
             tree_width: DEFAULT_TREE_WIDTH,
+            assistant_open: default_assistant_open(),
+            assistant_width: default_assistant_width(),
         }
     }
 }
@@ -286,6 +305,8 @@ mod tests {
             active: Some("Places/Kesh Tor.md".into()),
             expanded: vec!["Places".into()],
             tree_width: 300,
+            assistant_open: false,
+            assistant_width: 480,
         };
         recent.set_workspace(&id, workspace.clone());
 
@@ -310,12 +331,66 @@ mod tests {
             json!(roots[0].to_str().unwrap())
         );
         assert_eq!(document["worlds"][0]["workspace"]["treeWidth"], 300);
+        assert_eq!(document["worlds"][0]["workspace"]["assistantOpen"], false);
+        assert_eq!(document["worlds"][0]["workspace"]["assistantWidth"], 480);
         assert!(document["worlds"][0]["lastOpened"].as_u64().unwrap() > 0);
 
         let loaded = Recent::load(app_data.path());
         assert_eq!(loaded.document, recent.document);
         assert_eq!(loaded.workspace(&id), Some(workspace));
         assert_eq!(loaded.last_open(), Some(roots[0].clone()));
+    }
+
+    #[test]
+    fn a_document_from_before_the_assistant_loads_with_its_worlds_and_the_pane_defaults() {
+        let app_data = tempfile::tempdir().unwrap();
+        let (_parent, roots) = worlds(2);
+        fs::create_dir(app_data.path().join("grimoire-data")).unwrap();
+        // The shape written before the workspace held the assistant pane's state.
+        let document = json!({
+            "format": 1,
+            "nextId": 3,
+            "lastOpen": "2",
+            "worlds": [
+                {
+                    "id": "2",
+                    "path": roots[1].to_str().unwrap(),
+                    "name": "World 2",
+                    "lastOpened": 1_700_000_100,
+                    "workspace": {
+                        "tabs": ["Places/Saltmere.md"],
+                        "active": "Places/Saltmere.md",
+                        "expanded": ["Places"],
+                        "treeWidth": 300
+                    }
+                },
+                {
+                    "id": "1",
+                    "path": roots[0].to_str().unwrap(),
+                    "name": "World 1",
+                    "lastOpened": 1_700_000_000,
+                    "workspace": { "tabs": [], "active": null, "expanded": [], "treeWidth": 264 }
+                }
+            ]
+        });
+        fs::write(data_file(&app_data), document.to_string()).unwrap();
+
+        let recent = Recent::load(app_data.path());
+
+        assert_eq!(names(&recent), ["World 2", "World 1"]);
+        assert_eq!(recent.last_open(), Some(roots[1].clone()));
+        assert_eq!(
+            recent.workspace("2"),
+            Some(Workspace {
+                tabs: vec!["Places/Saltmere.md".into()],
+                active: Some("Places/Saltmere.md".into()),
+                expanded: vec!["Places".into()],
+                tree_width: 300,
+                assistant_open: true,
+                assistant_width: 360,
+            })
+        );
+        assert_eq!(recent.workspace("1"), Some(Workspace::default()));
     }
 
     #[test]

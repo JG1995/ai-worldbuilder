@@ -3,40 +3,62 @@ import { type ReactNode, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Shell } from "./Shell";
 
-/** Stubs the window width rule; `setWide` crosses 960px and notifies the shell. */
-function stubWidth(wide: boolean) {
+/**
+ * Stubs the window's width for the shell's `(min-width: …)` rules; the returned function changes
+ * it and notifies the shell.
+ */
+function stubWidth(width: number) {
   const listeners = new Set<() => void>();
-  const query = {
+  vi.stubGlobal("matchMedia", (query: string) => ({
     get matches() {
-      return wide;
+      return width >= Number(/min-width: (\d+)px/.exec(query)?.[1]);
     },
     addEventListener: (_: string, listener: () => void) => listeners.add(listener),
     removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
-  };
-  vi.stubGlobal("matchMedia", () => query);
-  return (next: boolean) => {
-    wide = next;
+  }));
+  return (next: number) => {
+    width = next;
     act(() => {
       for (const listener of listeners) listener();
     });
   };
 }
 
+/** Content with state of its own, which survives only while it stays mounted. */
+function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <button type="button" onClick={() => setCount(count + 1)}>
+      Count {count}
+    </button>
+  );
+}
+
 function TestShell({
   initialWidth = 264,
   onTreeWidthChange = () => {},
   initialOpen = false,
+  assistant,
+  initialAssistantOpen = false,
+  onAssistantWidthChange = () => {},
 }: {
   initialWidth?: number;
   onTreeWidthChange?: (width: number) => void;
   initialOpen?: boolean;
+  assistant?: ReactNode;
+  initialAssistantOpen?: boolean;
+  onAssistantWidthChange?: (width: number) => void;
 }) {
   const [width, setWidth] = useState(initialWidth);
   const [open, setOpen] = useState(initialOpen);
-  const strip = (toggle: ReactNode) => (
+  const [assistantOpen, setAssistantOpen] = useState(initialAssistantOpen);
+  const [assistantWidth, setAssistantWidth] = useState(360);
+  const [assistantOverlayOpen, setAssistantOverlayOpen] = useState(false);
+  const strip = (toggle: ReactNode, assistantToggle: ReactNode) => (
     <div>
       {toggle}
       <button type="button">Saltmere tab</button>
+      {assistantToggle}
     </div>
   );
   return (
@@ -51,6 +73,16 @@ function TestShell({
       }}
       treeOverlayOpen={open}
       onTreeOverlayOpenChange={setOpen}
+      assistant={assistant}
+      assistantOpen={assistantOpen}
+      onAssistantOpenChange={setAssistantOpen}
+      assistantWidth={assistantWidth}
+      onAssistantWidthChange={(next) => {
+        setAssistantWidth(next);
+        onAssistantWidthChange(next);
+      }}
+      assistantOverlayOpen={assistantOverlayOpen}
+      onAssistantOverlayOpenChange={setAssistantOverlayOpen}
     />
   );
 }
@@ -58,9 +90,17 @@ function TestShell({
 const key = (name: string, options: { shiftKey?: boolean } = {}) =>
   fireEvent.keyDown(document.activeElement ?? document.body, { key: name, ...options });
 
+const assistantButton = () => screen.getByRole("button", { name: "Assistant" });
+/** The pane the Assistant button controls; a hidden pane has no accessible name to query by. */
+const assistantPane = () => {
+  const pane = document.getElementById(assistantButton().getAttribute("aria-controls") ?? "");
+  expect(pane).toHaveAttribute("aria-label", "Assistant");
+  return pane as HTMLElement;
+};
+
 describe("Shell", () => {
   it("changes the tree width with the arrow keys within 200px to 420px", () => {
-    stubWidth(true);
+    stubWidth(1024);
     const onTreeWidthChange = vi.fn();
     render(<TestShell initialWidth={408} onTreeWidthChange={onTreeWidthChange} />);
     const separator = screen.getByRole("separator", { name: "File tree width" });
@@ -77,7 +117,7 @@ describe("Shell", () => {
   });
 
   it("moves focus between the panes with F6 and Shift+F6, back to the last focused element", () => {
-    stubWidth(true);
+    stubWidth(1024);
     render(<TestShell />);
     const row = screen.getByRole("button", { name: "Tree row" });
     const link = screen.getByRole("button", { name: "Page link" });
@@ -93,7 +133,7 @@ describe("Shell", () => {
   });
 
   it("skips the closed overlay with F6", () => {
-    stubWidth(false);
+    stubWidth(800);
     render(<TestShell />);
     const link = screen.getByRole("button", { name: "Page link" });
 
@@ -105,7 +145,7 @@ describe("Shell", () => {
   });
 
   it("closes the overlay on Escape and returns focus to the toggle", () => {
-    stubWidth(false);
+    stubWidth(800);
     render(<TestShell />);
     const toggle = screen.getByRole("button", { name: "File tree" });
 
@@ -121,7 +161,7 @@ describe("Shell", () => {
   });
 
   it("keeps the overlay open when Escape was already handled inside it", () => {
-    stubWidth(false);
+    stubWidth(800);
     render(<TestShell initialOpen />);
     const row = screen.getByRole("button", { name: "Tree row" });
 
@@ -136,19 +176,175 @@ describe("Shell", () => {
   });
 
   it("shows an open overlay as the side pane when widened, and leaves it closed when narrowed", () => {
-    const setWide = stubWidth(false);
+    const setWidth = stubWidth(800);
     render(<TestShell initialOpen />);
     const row = screen.getByRole("button", { name: "Tree row" });
 
     act(() => row.focus());
-    setWide(true);
+    setWidth(1024);
     expect(screen.queryByRole("button", { name: "File tree" })).not.toBeInTheDocument();
     expect(row).toBeVisible();
     expect(row).toHaveFocus();
 
-    setWide(false);
+    setWidth(800);
     const toggle = screen.getByRole("button", { name: "File tree" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveFocus();
+  });
+
+  describe("with an assistant", () => {
+    it("has no pane and no button without one", () => {
+      stubWidth(1280);
+      render(<TestShell initialAssistantOpen />);
+
+      expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+      expect(screen.getAllByRole("complementary", { hidden: true })).toHaveLength(1);
+    });
+
+    it("opens and closes the side pane from its button at 1280px, and reports it", () => {
+      stubWidth(1280);
+      render(<TestShell assistant={<p>Ask about the world</p>} />);
+
+      expect(assistantButton()).toHaveAttribute("aria-expanded", "false");
+      expect(assistantPane()).not.toBeVisible();
+      fireEvent.click(assistantButton());
+      expect(assistantButton()).toHaveAttribute("aria-expanded", "true");
+      expect(assistantPane()).toBeVisible();
+      expect(assistantPane()).toHaveStyle({ width: "360px" });
+
+      fireEvent.click(assistantButton());
+      expect(assistantButton()).toHaveAttribute("aria-expanded", "false");
+      expect(assistantPane()).not.toBeVisible();
+    });
+
+    it("moves focus on opening to the element marked for it, else the first control, else the pane", () => {
+      stubWidth(1280);
+      const { unmount } = render(
+        <TestShell
+          assistant={
+            <>
+              <button type="button">New conversation</button>
+              <textarea aria-label="Message" data-initial-focus />
+            </>
+          }
+        />,
+      );
+      fireEvent.click(assistantButton());
+      expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus();
+      unmount();
+
+      const second = render(<TestShell assistant={<button type="button">Settings</button>} />);
+      fireEvent.click(assistantButton());
+      expect(screen.getByRole("button", { name: "Settings" })).toHaveFocus();
+      second.unmount();
+
+      render(<TestShell assistant={<p>Ask about the world</p>} />);
+      fireEvent.click(assistantButton());
+      expect(assistantPane()).toHaveFocus();
+    });
+
+    it("leaves focus where it is when the pane shows without being opened", () => {
+      const setWidth = stubWidth(1024);
+      render(
+        <TestShell assistant={<button type="button">Settings</button>} initialAssistantOpen />,
+      );
+      const link = screen.getByRole("button", { name: "Page link" });
+      act(() => link.focus());
+
+      setWidth(1280);
+
+      expect(assistantPane()).toBeVisible();
+      expect(link).toHaveFocus();
+    });
+
+    it("changes the width from its left edge with the arrow keys within 300px to 560px", () => {
+      stubWidth(1280);
+      const onAssistantWidthChange = vi.fn();
+      render(
+        <TestShell
+          assistant={<p>Ask about the world</p>}
+          initialAssistantOpen
+          onAssistantWidthChange={onAssistantWidthChange}
+        />,
+      );
+      const separator = screen.getByRole("separator", { name: "Assistant width" });
+      expect(separator).toHaveAttribute("aria-valuemin", "300");
+      expect(separator).toHaveAttribute("aria-valuemax", "560");
+
+      act(() => separator.focus());
+      key("ArrowLeft");
+      expect(onAssistantWidthChange).toHaveBeenLastCalledWith(376);
+      for (let i = 0; i < 20; i++) key("ArrowLeft");
+      expect(separator).toHaveAttribute("aria-valuenow", "560");
+      for (let i = 0; i < 20; i++) key("ArrowRight");
+      expect(separator).toHaveAttribute("aria-valuenow", "300");
+      expect(assistantPane()).toHaveStyle({ width: "300px" });
+    });
+
+    it("opens as an overlay below 1280px, which Escape and a press outside close", () => {
+      stubWidth(1024);
+      render(
+        <TestShell assistant={<button type="button">Settings</button>} initialAssistantOpen />,
+      );
+
+      // The side pane's saved state does not open the overlay.
+      expect(assistantPane()).not.toBeVisible();
+      fireEvent.click(assistantButton());
+      expect(assistantPane()).toBeVisible();
+      expect(screen.getByRole("button", { name: "Settings" })).toHaveFocus();
+      key("Escape");
+      expect(assistantPane()).not.toBeVisible();
+      expect(assistantButton()).toHaveFocus();
+
+      fireEvent.click(assistantButton());
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Page link" }));
+      expect(assistantPane()).not.toBeVisible();
+    });
+
+    it("keeps its content's state across closing, reopening and crossing 1280px", () => {
+      const setWidth = stubWidth(1280);
+      render(<TestShell assistant={<Counter />} initialAssistantOpen />);
+      fireEvent.click(screen.getByRole("button", { name: "Count 0" }));
+
+      fireEvent.click(assistantButton());
+      fireEvent.click(assistantButton());
+      setWidth(1024);
+      fireEvent.click(assistantButton());
+      expect(screen.getByRole("button", { name: "Count 1" })).toBeVisible();
+
+      setWidth(1280);
+      expect(screen.getByRole("button", { name: "Count 1" })).toBeVisible();
+    });
+
+    it("is reached by F6 after the page column, and Shift+F6 goes back", () => {
+      stubWidth(1280);
+      render(
+        <TestShell assistant={<button type="button">Settings</button>} initialAssistantOpen />,
+      );
+      const link = screen.getByRole("button", { name: "Page link" });
+
+      act(() => link.focus());
+      key("F6");
+      expect(screen.getByRole("button", { name: "Settings" })).toHaveFocus();
+      key("F6");
+      expect(screen.getByRole("button", { name: "Tree row" })).toHaveFocus();
+      key("F6", { shiftKey: true });
+      expect(screen.getByRole("button", { name: "Settings" })).toHaveFocus();
+      key("F6", { shiftKey: true });
+      expect(link).toHaveFocus();
+    });
+
+    it("moves focus to its button when the pane hides with focus inside", () => {
+      stubWidth(1280);
+      render(
+        <TestShell assistant={<button type="button">Settings</button>} initialAssistantOpen />,
+      );
+      act(() => screen.getByRole("button", { name: "Settings" }).focus());
+
+      fireEvent.click(assistantButton());
+
+      expect(assistantPane()).not.toBeVisible();
+      expect(assistantButton()).toHaveFocus();
+    });
   });
 });

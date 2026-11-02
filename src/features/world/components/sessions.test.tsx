@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecentWorld, WorldOpened } from "@/types/api";
+import { Shell } from "@/ui/Shell";
 import { closeRequestedEvent } from "../api/commands";
 import { mockWorldIpc, shellLayout, testWorld } from "../api/test-ipc";
 import { useWorldStore } from "../stores/world-store";
@@ -80,6 +81,8 @@ describe("launching", () => {
         active: "Places/Kesh Tor.md",
         expanded: ["Places"],
         treeWidth: 320,
+        assistantOpen: true,
+        assistantWidth: 360,
       },
     };
     const calls = mockWorldIpc({ world_restore: () => restored });
@@ -103,6 +106,32 @@ describe("launching", () => {
     );
     expect(argsOf(calls, "page_read")).toEqual([{ path: "Places/Kesh Tor.md" }]);
     expect(screen.queryByRole("button", { name: "Open world…" })).not.toBeInTheDocument();
+  });
+
+  it("reopens the assistant's side pane as it was, and saves its state and width after a change", async () => {
+    const restored: WorldOpened = {
+      ...testWorld,
+      workspace: { ...testWorld.workspace, assistantOpen: false, assistantWidth: 480 },
+    };
+    const calls = mockWorldIpc({ world_restore: () => restored });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <World layout={(parts) => <Shell {...parts} assistant={<p>Assistant content</p>} />} />
+      </QueryClientProvider>,
+    );
+
+    const button = await screen.findByRole("button", { name: "Assistant" });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(button);
+    const separator = screen.getByRole("separator", { name: "Assistant width" });
+    expect(separator).toHaveAttribute("aria-valuenow", "480");
+    fireEvent.keyDown(separator, { key: "ArrowLeft" });
+
+    await waitFor(() =>
+      expect(argsOf(calls, "workspace_save").at(-1)).toEqual({
+        workspace: { ...restored.workspace, assistantOpen: true, assistantWidth: 496 },
+      }),
+    );
   });
 
   it("restores once per page load though StrictMode runs the launch twice, so the world's events count", async () => {
@@ -212,7 +241,14 @@ describe("switching from the world menu", () => {
       commands.slice(commands.indexOf("page_write"), commands.indexOf("world_open_recent") + 1),
     ).toEqual(["page_write", "workspace_save", "world_open_recent"]);
     expect(argsOf(calls, "workspace_save").at(-1)).toEqual({
-      workspace: { tabs: ["Overview.md"], active: "Overview.md", expanded: [], treeWidth: 264 },
+      workspace: {
+        tabs: ["Overview.md"],
+        active: "Overview.md",
+        expanded: [],
+        treeWidth: 264,
+        assistantOpen: true,
+        assistantWidth: 360,
+      },
     });
   });
 });

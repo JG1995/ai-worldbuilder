@@ -423,7 +423,14 @@ describe("changing worlds", () => {
     const second: WorldOpened = {
       ...testWorld,
       session: 2,
-      workspace: { tabs: ["Overview.md"], active: "Overview.md", expanded: [], treeWidth: 264 },
+      workspace: {
+        tabs: ["Overview.md"],
+        active: "Overview.md",
+        expanded: [],
+        treeWidth: 264,
+        assistantOpen: true,
+        assistantWidth: 360,
+      },
     };
     let world = 1;
     const dialog = { pick: () => {}, cancel: () => {} };

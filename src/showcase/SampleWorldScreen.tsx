@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TreeEntry } from "@/types/api";
+import { AssistantPane } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
 import { Dialog } from "@/ui/Dialog";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
 import { NoPageOpen, PageView } from "@/ui/PageView";
-import { defaultTreeWidth, Shell } from "@/ui/Shell";
+import { defaultAssistantWidth, defaultTreeWidth, Shell } from "@/ui/Shell";
 import { type Tab, TabStrip } from "@/ui/TabStrip";
 import { type Toast, ToastRegion } from "@/ui/Toast";
 import { WelcomeScreen } from "@/ui/WelcomeScreen";
@@ -48,7 +49,7 @@ let largeWorld: ReturnType<typeof largeSampleWorld> | undefined;
 
 /**
  * The composed sample screen at /showcase.html#sample-world: the shell with the file tree, tab
- * strip, page view and toasts, or the welcome screen. All of its state is local.
+ * strip, page view, assistant pane and toasts, or the welcome screen. All of its state is local.
  */
 export function SampleWorldScreen() {
   const [large, setLarge] = useState(false);
@@ -58,6 +59,10 @@ export function SampleWorldScreen() {
   const [activeId, setActiveId] = useState<string | undefined>(sampleSelectedPath);
   const [treeWidth, setTreeWidth] = useState(defaultTreeWidth);
   const [overlayOpen, setOverlayOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(true);
+  const [assistantWidth, setAssistantWidth] = useState(defaultAssistantWidth);
+  const [assistantOverlayOpen, setAssistantOverlayOpen] = useState(false);
+  const [provider, setProvider] = useState(true);
   const [nameInput, setNameInput] = useState<TreeNameInput>();
   const [toDelete, setToDelete] = useState<TreeEntry>();
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -176,6 +181,15 @@ export function SampleWorldScreen() {
           />
           Welcome screen
         </label>
+        <label className="ui flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={provider}
+            onChange={(change) => setProvider(change.currentTarget.checked)}
+            className="accent-accent"
+          />
+          Provider saved
+        </label>
         <Button
           variant="secondary"
           disabled={large}
@@ -222,6 +236,19 @@ export function SampleWorldScreen() {
             onTreeWidthChange={setTreeWidth}
             treeOverlayOpen={overlayOpen}
             onTreeOverlayOpenChange={setOverlayOpen}
+            assistant={
+              <AssistantPane
+                model={provider ? "mistral-small-latest" : undefined}
+                host={provider ? "api.mistral.ai" : undefined}
+                onOpenSettings={() => pushToast("Sample only: Settings opens in the application")}
+              />
+            }
+            assistantOpen={assistantOpen}
+            onAssistantOpenChange={setAssistantOpen}
+            assistantWidth={assistantWidth}
+            onAssistantWidthChange={setAssistantWidth}
+            assistantOverlayOpen={assistantOverlayOpen}
+            onAssistantOverlayOpenChange={setAssistantOverlayOpen}
             tree={
               <FileTree
                 worldName={large ? "Large sample world" : sampleWorldName}
@@ -246,13 +273,14 @@ export function SampleWorldScreen() {
                 onNameCancel={() => setNameInput(undefined)}
               />
             }
-            tabStrip={(treeToggle) => (
+            tabStrip={(treeToggle, assistantToggle) => (
               <TabStrip
                 tabs={tabs}
                 activeId={activeId}
                 onActivate={setActiveId}
                 onClose={closePage}
                 leading={treeToggle}
+                trailing={assistantToggle}
               />
             )}
             page={
