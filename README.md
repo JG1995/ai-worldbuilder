@@ -49,7 +49,7 @@ The application keeps its own data in the `grimoire-data` folder, in the app dat
 - Windows: `%APPDATA%\io.github.jg1995.grimoire\grimoire-data\`
 - macOS: `~/Library/Application Support/io.github.jg1995.grimoire/grimoire-data/`
 
-`worlds.json` holds the recent worlds, the world that was open when the application last closed, and each recent world's open tabs, expanded folders and file tree width. It never holds page text. If the file is deleted or cannot be read, the application starts with an empty recent list and replaces the file the next time it saves.
+`worlds.json` holds the recent worlds, the world that was open when the application last closed, and each recent world's open tabs, expanded folders, file tree width, and whether the assistant's pane is open and its width. It never holds page text. If the file is deleted or cannot be read, the application starts with an empty recent list and replaces the file the next time it saves.
 
 `settings.json` holds the application's settings: whether AI features are on, and the AI text provider's base URL and model, with where its API key is stored. It never holds the key. If the file is deleted or cannot be read, the application starts with AI on and no provider, and replaces the file the next time it saves.
 

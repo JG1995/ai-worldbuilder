@@ -17,7 +17,14 @@ export const shellLayout = (parts: WorldScreenParts) => createElement(Shell, par
 export const testWorld: WorldOpened = {
   name: "Kesh",
   session: 1,
-  workspace: { tabs: [], active: null, expanded: [], treeWidth: 264 },
+  workspace: {
+    tabs: [],
+    active: null,
+    expanded: [],
+    treeWidth: 264,
+    assistantOpen: true,
+    assistantWidth: 360,
+  },
 };
 
 export const testTree: TreeEntry[] = [

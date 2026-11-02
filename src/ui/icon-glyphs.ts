@@ -2,6 +2,7 @@
 // Run `pnpm icons` after changing src/ui/icon-names.json.
 
 export const glyphs = {
+  chat: "\u{e0b7}",
   check_circle: "\u{e86c}",
   chevron_right: "\u{e409}",
   close: "\u{e14c}",
@@ -20,4 +21,4 @@ export const glyphs = {
 } as const;
 
 /** SHA-256 of src/assets/icons/material-symbols-sharp.woff2. */
-export const fontSha256 = "05da1b147c6fee297bcad83e6c70e3b4b5634eb6572d515b170ce22d7b9e44ee";
+export const fontSha256 = "960b4dbf34d32d8a50e5d8a9581e1a66750a35bcd4fb1f25f18046c177e913a6";

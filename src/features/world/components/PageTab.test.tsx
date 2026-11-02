@@ -12,7 +12,14 @@ const path = "Overview.md";
 function renderPage({ onDiscard = vi.fn() } = {}) {
   useWorldStore.getState().opened({
     ...testWorld,
-    workspace: { tabs: [path], active: path, expanded: [], treeWidth: 264 },
+    workspace: {
+      tabs: [path],
+      active: path,
+      expanded: [],
+      treeWidth: 264,
+      assistantOpen: true,
+      assistantWidth: 360,
+    },
   });
   render(
     <QueryClientProvider client={new QueryClient()}>

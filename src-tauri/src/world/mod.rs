@@ -37,9 +37,10 @@ use write::{LinkedPage, NewEntry, OwnWrites, PageVersion, Recorder, Recording, R
 const APP_TITLE: &str = "Grimoire.md";
 /// Why an opening has no history when the application has no data folder to keep it in.
 const NO_APP_DATA: &str = "The application has no data folder to keep history in.";
-/// The limits on a workspace from the interface: the tree width range of `src/ui/Shell.tsx`, and
-/// more tabs and expanded folders than anyone opens.
+/// The limits on a workspace from the interface: the tree and assistant width ranges of
+/// `src/ui/Shell.tsx`, and more tabs and expanded folders than anyone opens.
 const TREE_WIDTHS: (u32, u32) = (200, 420);
+const ASSISTANT_WIDTHS: (u32, u32) = (300, 560);
 const MAX_TABS: usize = 100;
 const MAX_EXPANDED: usize = 5_000;
 
@@ -1428,6 +1429,10 @@ fn existing_in(root: &Path, stored: Workspace) -> Workspace {
         active,
         expanded,
         tree_width: stored.tree_width.clamp(TREE_WIDTHS.0, TREE_WIDTHS.1),
+        assistant_open: stored.assistant_open,
+        assistant_width: stored
+            .assistant_width
+            .clamp(ASSISTANT_WIDTHS.0, ASSISTANT_WIDTHS.1),
     }
 }
 
@@ -1448,6 +1453,9 @@ fn limited(mut workspace: Workspace) -> Result<Workspace, AppError> {
     workspace.tabs.truncate(MAX_TABS);
     workspace.expanded.truncate(MAX_EXPANDED);
     workspace.tree_width = workspace.tree_width.clamp(TREE_WIDTHS.0, TREE_WIDTHS.1);
+    workspace.assistant_width = workspace
+        .assistant_width
+        .clamp(ASSISTANT_WIDTHS.0, ASSISTANT_WIDTHS.1);
     Ok(workspace)
 }
 
@@ -1548,7 +1556,14 @@ mod tests {
             json!({
                 "name": world.path().file_name().unwrap().to_str().unwrap(),
                 "session": first.session,
-                "workspace": { "tabs": [], "active": null, "expanded": [], "treeWidth": 264 },
+                "workspace": {
+                    "tabs": [],
+                    "active": null,
+                    "expanded": [],
+                    "treeWidth": 264,
+                    "assistantOpen": true,
+                    "assistantWidth": 360,
+                },
             })
         );
     }
@@ -1875,6 +1890,8 @@ mod tests {
             active: active.map(str::to_owned),
             expanded: expanded.iter().map(|folder| folder.to_string()).collect(),
             tree_width: 300,
+            assistant_open: false,
+            assistant_width: 420,
         }
     }
 
@@ -2020,11 +2037,14 @@ mod tests {
             active: None,
             expanded: folders.clone(),
             tree_width: 9_000,
+            assistant_open: true,
+            assistant_width: 9_000,
         };
 
         let kept = limited(wide).unwrap();
         let narrow = limited(Workspace {
             tree_width: 10,
+            assistant_width: 10,
             ..Workspace::default()
         })
         .unwrap();
@@ -2032,7 +2052,9 @@ mod tests {
         assert_eq!(kept.tabs, pages[..100]);
         assert_eq!(kept.expanded, folders[..5_000]);
         assert_eq!(kept.tree_width, 420);
+        assert_eq!(kept.assistant_width, 560);
         assert_eq!(narrow.tree_width, 200);
+        assert_eq!(narrow.assistant_width, 300);
     }
 
     mod links {

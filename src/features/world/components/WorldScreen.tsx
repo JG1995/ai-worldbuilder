@@ -54,18 +54,29 @@ export type QuickOpenPorts = {
 
 /**
  * What the world's screen hands to its layout: the tree, the tab strip, the page region and the
- * toasts, with the tree pane's width and overlay state.
+ * toasts, with the tree pane's width and overlay state, the assistant pane's open state, width
+ * and overlay state, and whether a world change runs.
  */
 export type WorldScreenParts = {
   tree: ReactNode;
-  /** Renders the tab strip; `treeToggle` is the button that opens the tree overlay. */
-  tabStrip: (treeToggle: ReactNode) => ReactNode;
+  /**
+   * Renders the tab strip; `treeToggle` is the button that opens the tree overlay, and
+   * `assistantToggle` the Assistant button at the strip's right end.
+   */
+  tabStrip: (treeToggle: ReactNode, assistantToggle: ReactNode) => ReactNode;
   page: ReactNode;
   toasts: ReactNode;
   treeWidth: number;
   onTreeWidthChange: (width: number) => void;
   treeOverlayOpen: boolean;
   onTreeOverlayOpenChange: (open: boolean) => void;
+  assistantOpen: boolean;
+  onAssistantOpenChange: (open: boolean) => void;
+  assistantWidth: number;
+  onAssistantWidthChange: (width: number) => void;
+  assistantOverlayOpen: boolean;
+  onAssistantOverlayOpenChange: (open: boolean) => void;
+  changingWorld: boolean;
 };
 
 type WorldScreenProps = {
@@ -112,6 +123,9 @@ export function WorldScreen({
   const expanded = useWorldStore((store) => store.expanded);
   const treeWidth = useWorldStore((store) => store.treeWidth);
   const treeOverlayOpen = useWorldStore((store) => store.treeOverlayOpen);
+  const assistantOpen = useWorldStore((store) => store.assistantOpen);
+  const assistantWidth = useWorldStore((store) => store.assistantWidth);
+  const assistantOverlayOpen = useWorldStore((store) => store.assistantOverlayOpen);
   const worldNotices = useWorldStore((store) => store.worldNotices);
   const historyNotRecording = useWorldStore((store) => store.historyNotRecording);
   const toasts = useWorldStore((store) => store.toasts);
@@ -127,6 +141,9 @@ export function WorldScreen({
     toggleFolder,
     setTreeWidth,
     setTreeOverlayOpen,
+    setAssistantOpen,
+    setAssistantWidth,
+    setAssistantOverlayOpen,
     flush,
     newEntryFolder,
     startNaming,
@@ -363,6 +380,13 @@ export function WorldScreen({
         onTreeWidthChange: setTreeWidth,
         treeOverlayOpen,
         onTreeOverlayOpenChange: setTreeOverlayOpen,
+        assistantOpen,
+        onAssistantOpenChange: setAssistantOpen,
+        assistantWidth,
+        onAssistantWidthChange: setAssistantWidth,
+        assistantOverlayOpen,
+        onAssistantOverlayOpenChange: setAssistantOverlayOpen,
+        changingWorld,
         tree:
           // Until the first listing arrives, an empty pane, not the empty-world message.
           tree.isPending ? (
@@ -393,13 +417,14 @@ export function WorldScreen({
               onNameCancel={cancelNew}
             />
           ),
-        tabStrip: (treeToggle) => (
+        tabStrip: (treeToggle, assistantToggle) => (
           <TabStrip
             tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
             activeId={active ?? undefined}
             onActivate={activateTab}
             onClose={closePage}
             leading={treeToggle}
+            trailing={assistantToggle}
           />
         ),
         toasts: <ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />,

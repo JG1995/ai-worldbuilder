@@ -21,7 +21,14 @@ let disk: Map<string, PageText | "not_utf8">;
 function mockDisk(active: string) {
   const opened: WorldOpened = {
     ...testWorld,
-    workspace: { tabs: [overview, keshTor], active, expanded: [], treeWidth: 264 },
+    workspace: {
+      tabs: [overview, keshTor],
+      active,
+      expanded: [],
+      treeWidth: 264,
+      assistantOpen: true,
+      assistantWidth: 360,
+    },
   };
   return mockWorldIpc({
     world_open: () => opened,

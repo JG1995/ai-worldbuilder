@@ -39,6 +39,22 @@ describe("TabStrip", () => {
     expect(onClose).toHaveBeenCalledWith("archive");
   });
 
+  it("shows trailing controls at the strip's end, after the tabs", () => {
+    render(
+      <TabStrip
+        tabs={tabs}
+        onActivate={() => {}}
+        onClose={() => {}}
+        trailing={<button type="button">Assistant</button>}
+      />,
+    );
+
+    const trailing = screen.getByRole("button", { name: "Assistant" });
+    expect(screen.getByRole("tablist").compareDocumentPosition(trailing)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
   it("reports a close request on middle-click", () => {
     const { onActivate, onClose } = renderStrip();
 

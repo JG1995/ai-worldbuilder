@@ -21,6 +21,8 @@ type TabStripProps = {
   onClose: (id: string) => void;
   /** Controls at the strip's left, such as the shell's tree toggle. */
   leading?: ReactNode;
+  /** Controls at the strip's right end, such as the shell's Assistant button. */
+  trailing?: ReactNode;
 };
 
 const tooltipDelay = 500;
@@ -55,7 +57,14 @@ function LabelTooltip({ anchor }: { anchor: Element }) {
  * the next and previous tab while the strip is mounted. It holds only focus, overflow and the
  * label tooltip.
  */
-export function TabStrip({ tabs, activeId, onActivate, onClose, leading }: TabStripProps) {
+export function TabStrip({
+  tabs,
+  activeId,
+  onActivate,
+  onClose,
+  leading,
+  trailing,
+}: TabStripProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const tooltipTimer = useRef<number>(undefined);
@@ -231,6 +240,7 @@ export function TabStrip({ tabs, activeId, onActivate, onClose, leading }: TabSt
           />
         </div>
       )}
+      {trailing && <div className="flex shrink-0 items-center px-1">{trailing}</div>}
       {tooltipAnchor && <LabelTooltip anchor={tooltipAnchor} />}
     </div>
   );

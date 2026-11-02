@@ -1,5 +1,7 @@
 import { type ReactNode, useState } from "react";
+import { AssistantPane } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
+import { defaultAssistantWidth } from "@/ui/Shell";
 import { type Tab, TabStrip } from "@/ui/TabStrip";
 import { sampleLongTabs, sampleManyTabs, sampleTabs } from "./sample-data";
 
@@ -75,7 +77,22 @@ function TabStripDemo({
   );
 }
 
-/** The tab strip's demos, and where the shell is composed. Their demos keep local state. */
+/** The assistant pane's content at its default width, as the shell shows it. */
+function AssistantPaneFrame({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="ui-small text-text-muted">{title}</h3>
+      <div
+        style={{ width: defaultAssistantWidth }}
+        className="flex h-60 flex-col border border-divider bg-page"
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** The tab strip's and the assistant pane's demos, and where the shell is composed. */
 export function ShellSections() {
   const [event, setEvent] = useState("none yet");
 
@@ -100,15 +117,33 @@ export function ShellSections() {
       </Section>
       <Section
         title="Shell"
-        use="The tree pane and the page region side by side from 960px, and the tree as an overlay below. F6 moves between the panes."
+        use="The tree pane and the page region side by side from 960px, and the tree as an overlay below. With AI on, the assistant pane sits beside the page from 1280px and is an overlay below; the Assistant button at the tab strip's right end and Ctrl+Shift+A open and close it. F6 moves between the panes."
       >
         <p className="ui text-text">
-          The shell composes the other surfaces in the{" "}
+          The shell composes the other surfaces, the assistant pane included, in the{" "}
           <a href="#sample-world" className="text-accent underline">
             sample world screen
           </a>
           .
         </p>
+      </Section>
+      <Section
+        title="Assistant pane"
+        use="The pane's content: its header, then the notice that asks for a provider, or the explanation of an empty conversation, which names where messages go."
+      >
+        <div className="flex flex-wrap gap-4">
+          <AssistantPaneFrame title="No provider saved">
+            <AssistantPane onOpenSettings={() => setEvent("Open Settings")} />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="A provider saved">
+            <AssistantPane
+              model="mistral-small-latest"
+              host="api.mistral.ai"
+              onOpenSettings={() => setEvent("Open Settings")}
+            />
+          </AssistantPaneFrame>
+        </div>
+        <p className="ui text-text-muted">Last event: {event}</p>
       </Section>
     </>
   );

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { expect, it, vi } from "vitest";
-import { mockWorldIpc } from "@/features/world/api/test-ipc";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mockWorldIpc, testWorld } from "@/features/world/api/test-ipc";
+import { useWorldStore } from "@/features/world/stores/world-store";
 import { App } from "./App";
 
 it("launches on the welcome screen when the core has no world to reopen", async () => {
@@ -67,4 +68,67 @@ it("opens a page from quick open: Ctrl+O, typing part of its name and Enter", as
   await waitFor(() => expect(editor).toHaveFocus());
   expect(screen.queryByRole("dialog", { name: "Search pages" })).not.toBeInTheDocument();
   expect(calls).toContainEqual({ command: "search_pages", args: { query: "kesh" } });
+});
+
+describe("the assistant", () => {
+  beforeEach(() => {
+    useWorldStore.getState().closed();
+    // jsdom has no layout: the shell lays out as at 1280px and wider.
+    const wide = { matches: true, addEventListener() {}, removeEventListener() {} };
+    vi.stubGlobal("matchMedia", () => wide);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  /** Opens the test world, with its assistant's side pane closed, under these settings. */
+  async function openWorld(settings: () => unknown) {
+    const calls = mockWorldIpc({
+      settings_get: settings,
+      world_open: () => ({
+        ...testWorld,
+        workspace: { ...testWorld.workspace, assistantOpen: false },
+      }),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));
+    await screen.findByRole("tree");
+    await waitFor(() => expect(calls.map(({ command }) => command)).toContain("settings_get"));
+  }
+
+  const pressShortcut = () =>
+    fireEvent.keyDown(document.body, { key: "A", ctrlKey: true, shiftKey: true });
+
+  it("has a button with AI on, and Ctrl+Shift+A opens its pane with focus inside", async () => {
+    await openWorld(() => ({ ai: true, textProvider: null }));
+
+    const button = await screen.findByRole("button", { name: "Assistant" });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    pressShortcut();
+
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("complementary", { name: "Assistant" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Settings" })).toHaveFocus();
+  });
+
+  it("has no button, no pane and no shortcut with AI off", async () => {
+    await openWorld(() => ({ ai: false, textProvider: null }));
+    await act(() => Promise.resolve());
+
+    // An uncancelled shortcut is left to the webview.
+    expect(pressShortcut()).toBe(true);
+    expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+    // Only the file tree's pane.
+    expect(screen.getAllByRole("complementary", { hidden: true })).toHaveLength(1);
+  });
+
+  it("has no button while the settings load", async () => {
+    await openWorld(() => new Promise(() => {}));
+
+    expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+  });
 });

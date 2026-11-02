@@ -14,13 +14,14 @@ const queryDefaults = {
 export function App() {
   const [queryClient] = useState(() => new QueryClient({ defaultOptions: queryDefaults }));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = () => setSettingsOpen(true);
 
   return (
     <QueryClientProvider client={queryClient}>
       <World
         quickOpen={(ports) => <QuickOpen {...ports} />}
-        onOpenSettings={() => setSettingsOpen(true)}
-        layout={(parts) => <WorldLayout {...parts} />}
+        onOpenSettings={openSettings}
+        layout={(parts) => <WorldLayout {...parts} onOpenSettings={openSettings} />}
       />
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
     </QueryClientProvider>
