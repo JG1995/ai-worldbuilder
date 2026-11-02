@@ -363,6 +363,9 @@ impl AssistantState {
                 pages: &pages,
                 left_out: carried.left_out,
                 indexing: carried.indexing,
+                proposals: &[],
+                unreadable: 0,
+                unfinished: false,
             };
             // A write the file refuses is made in memory, and the store's notice says that the
             // conversations are not being saved; the answer ends either way.
