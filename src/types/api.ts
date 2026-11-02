@@ -1,9 +1,12 @@
 // The shapes the Rust core sends and takes. ts-rs generates them from the Rust types into
 // ./generated/ when the Rust tests run (`pnpm bindings`); never edit those files by hand.
 
+export type { AnswerEnd } from "./generated/AnswerEnd";
+export type { AnswerEvent } from "./generated/AnswerEvent";
 export type { Backlink } from "./generated/Backlink";
 export type { Backlinks } from "./generated/Backlinks";
 export type { Comparison } from "./generated/Comparison";
+export type { ContextPage } from "./generated/ContextPage";
 export type { DiffLine } from "./generated/DiffLine";
 export type { EditorLink } from "./generated/EditorLink";
 export type { EditorLinks } from "./generated/EditorLinks";
@@ -24,12 +27,12 @@ export type { PageMatch } from "./generated/PageMatch";
 export type { PageMatches } from "./generated/PageMatches";
 export type { PageText } from "./generated/PageText";
 export type { PageVersion } from "./generated/PageVersion";
+export type { ProviderFailure } from "./generated/ProviderFailure";
 export type { ProviderField } from "./generated/ProviderField";
 export type { ProviderSaved } from "./generated/ProviderSaved";
 export type { RecentWorld } from "./generated/RecentWorld";
 export type { RestoredPage } from "./generated/RestoredPage";
 export type { Settings } from "./generated/Settings";
-export type { TestFailure } from "./generated/TestFailure";
 export type { TestOutcome } from "./generated/TestOutcome";
 export type { TextLine } from "./generated/TextLine";
 export type { TextMatch } from "./generated/TextMatch";

@@ -1,4 +1,5 @@
-//! The only code that sends a request to an AI provider: the connection test's chat request.
+//! The connection test's chat request, and the rules it shares with the streamed answer in
+//! `stream`: how a failed request, an error answer and a redirect are reported.
 //!
 //! The request goes to the saved base URL followed by `/chat/completions`, through no proxy and
 //! without following a redirect. The certificate is checked by the platform's verifier, at most
@@ -44,7 +45,7 @@ pub enum TestOutcome {
     Cancelled,
     /// The test failed for `reason`.
     Failed {
-        reason: TestFailure,
+        reason: ProviderFailure,
         /// The system's or the secure connection's reason, the redirect's host, or why the key
         /// cannot be read.
         detail: Option<String>,
@@ -54,11 +55,11 @@ pub enum TestOutcome {
     },
 }
 
-/// Why a connection test failed.
+/// Why a request to the provider failed: the connection test or a streamed answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
-pub enum TestFailure {
+pub enum ProviderFailure {
     /// The host could not be reached.
     Unreachable,
     /// The secure connection to the host failed.
@@ -83,10 +84,12 @@ pub enum TestFailure {
     InvalidReply,
     /// The key cannot be read from its storage, so nothing was sent.
     KeyUnreadable,
+    /// The connection ended before the answer was complete.
+    Interrupted,
 }
 
 impl TestOutcome {
-    pub fn failed(reason: TestFailure, detail: Option<String>) -> Self {
+    pub fn failed(reason: ProviderFailure, detail: Option<String>) -> Self {
         Self::Failed {
             reason,
             detail,
@@ -112,7 +115,7 @@ pub async fn test(
         .build();
     let client = match client {
         Ok(client) => client,
-        Err(error) => return send_failure(&error, key),
+        Err(error) => return failed(send_failure(&error, key)),
     };
     let body = json!({
         "model": model,
@@ -127,46 +130,57 @@ pub async fn test(
     }
     let mut response = match request.send().await {
         Ok(response) => response,
-        Err(error) => return send_failure(&error, key),
+        Err(error) => return failed(send_failure(&error, key)),
     };
 
     let status = response.status();
     if status.is_redirection() {
         let host = redirect_host(&response).map(|host| hide_key(&host, key));
-        return TestOutcome::failed(TestFailure::Redirected, host);
+        return TestOutcome::failed(ProviderFailure::Redirected, host);
     }
-    let answer = match read_bounded(&mut response).await {
+    let answer = match read_bounded(&mut response, ANSWER_BOUND).await {
         Ok(answer) => answer,
-        Err(error) => return send_failure(&error, key),
+        Err(error) => return failed(send_failure(&error, key)),
     };
     if status.is_success() {
         return match answer.as_deref().is_some_and(is_chat_reply) {
             true => TestOutcome::Connected,
-            false => TestOutcome::failed(TestFailure::InvalidReply, None),
+            false => TestOutcome::failed(ProviderFailure::InvalidReply, None),
         };
     }
-    let reason = match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if key.is_some() => {
-            TestFailure::KeyRefused
-        }
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => TestFailure::KeyNeeded,
-        StatusCode::NOT_FOUND => TestFailure::NotFound,
-        StatusCode::TOO_MANY_REQUESTS => TestFailure::RateLimited,
-        status if status.is_client_error() => TestFailure::Refused,
-        _ => TestFailure::ProviderError,
-    };
     TestOutcome::Failed {
-        reason,
+        reason: status_failure(status, key),
         detail: None,
         provider_message: answer.and_then(|answer| provider_message(&answer, key)),
     }
 }
 
-/// The answer's body, or `None` when it is larger than `ANSWER_BOUND`.
-async fn read_bounded(response: &mut Response) -> reqwest::Result<Option<Vec<u8>>> {
+fn failed((reason, detail): (ProviderFailure, Option<String>)) -> TestOutcome {
+    TestOutcome::failed(reason, detail)
+}
+
+/// Why an answer whose status is neither a success nor a redirect failed.
+pub(super) fn status_failure(status: StatusCode, key: Option<&str>) -> ProviderFailure {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if key.is_some() => {
+            ProviderFailure::KeyRefused
+        }
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ProviderFailure::KeyNeeded,
+        StatusCode::NOT_FOUND => ProviderFailure::NotFound,
+        StatusCode::TOO_MANY_REQUESTS => ProviderFailure::RateLimited,
+        status if status.is_client_error() => ProviderFailure::Refused,
+        _ => ProviderFailure::ProviderError,
+    }
+}
+
+/// The answer's body, or `None` when it is larger than `bound` bytes.
+pub(super) async fn read_bounded(
+    response: &mut Response,
+    bound: usize,
+) -> reqwest::Result<Option<Vec<u8>>> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if body.len() + chunk.len() > ANSWER_BOUND {
+        if body.len() + chunk.len() > bound {
             return Ok(None);
         }
         body.extend_from_slice(&chunk);
@@ -184,7 +198,7 @@ fn is_chat_reply(answer: &[u8]) -> bool {
 }
 
 /// The host, with its port when it names one, that a redirect points to.
-fn redirect_host(response: &Response) -> Option<String> {
+pub(super) fn redirect_host(response: &Response) -> Option<String> {
     let location = response.headers().get(LOCATION)?.to_str().ok()?;
     let target = response.url().join(location).ok()?;
     Some(target[Position::BeforeHost..Position::AfterPort].to_owned())
@@ -192,19 +206,27 @@ fn redirect_host(response: &Response) -> Option<String> {
 
 /// A request that got no answer: a timeout, a failed secure connection, or an unreachable host,
 /// with the innermost reason.
-fn send_failure(error: &reqwest::Error, key: Option<&str>) -> TestOutcome {
+pub(super) fn send_failure(
+    error: &reqwest::Error,
+    key: Option<&str>,
+) -> (ProviderFailure, Option<String>) {
     if error.is_timeout() {
-        return TestOutcome::failed(TestFailure::Timeout, None);
+        return (ProviderFailure::Timeout, None);
     }
     let reason = match is_tls_failure(error) {
-        true => TestFailure::Insecure,
-        false => TestFailure::Unreachable,
+        true => ProviderFailure::Insecure,
+        false => ProviderFailure::Unreachable,
     };
+    (reason, Some(innermost_reason(error, key)))
+}
+
+/// The innermost cause of `error`, with the key replaced.
+pub(super) fn innermost_reason(error: &reqwest::Error, key: Option<&str>) -> String {
     let mut innermost: &dyn Error = error;
     while let Some(source) = innermost.source() {
         innermost = source;
     }
-    TestOutcome::failed(reason, Some(hide_key(&innermost.to_string(), key)))
+    hide_key(&innermost.to_string(), key)
 }
 
 /// Whether a `rustls` error is among the causes. An `io::Error`'s `source` skips the error it
@@ -228,7 +250,7 @@ fn is_tls_failure(error: &reqwest::Error) -> bool {
 
 /// The provider's `error.message`, or the answer itself when it is not JSON, with the key
 /// replaced and cut to `MESSAGE_LIMIT` characters.
-fn provider_message(answer: &[u8], key: Option<&str>) -> Option<String> {
+pub(super) fn provider_message(answer: &[u8], key: Option<&str>) -> Option<String> {
     let text = match serde_json::from_slice::<Value>(answer) {
         Ok(json) => json.pointer("/error/message")?.as_str()?.to_owned(),
         Err(_) => String::from_utf8_lossy(answer).into_owned(),
@@ -244,7 +266,7 @@ fn provider_message(answer: &[u8], key: Option<&str>) -> Option<String> {
     })
 }
 
-fn hide_key(text: &str, key: Option<&str>) -> String {
+pub(super) fn hide_key(text: &str, key: Option<&str>) -> String {
     match key.filter(|key| !key.is_empty()) {
         Some(key) => text.replace(key, KEY_MARK),
         None => text.to_owned(),
@@ -282,8 +304,14 @@ pub mod test_support {
         }
     }
 
-    /// The bytes to answer a request with, or `None` to never answer.
-    type Script = dyn Fn(&Recorded) -> Option<Vec<u8>> + Send + Sync;
+    /// How the server answers a request: `parts` written one after another with a short pause
+    /// between them, and then the connection closed, or held until the client gives up.
+    struct Reply {
+        parts: Vec<Vec<u8>>,
+        hold: bool,
+    }
+
+    type Script = dyn Fn(&Recorded) -> Reply + Send + Sync;
 
     pub struct Server {
         address: SocketAddr,
@@ -291,9 +319,32 @@ pub mod test_support {
     }
 
     impl Server {
+        /// A server that answers each request with the bytes `script` gives, or never.
         pub fn start(
             script: impl Fn(&Recorded) -> Option<Vec<u8>> + Send + Sync + 'static,
         ) -> Self {
+            Self::serving(move |request| match script(request) {
+                Some(answer) => Reply {
+                    parts: vec![answer],
+                    hold: false,
+                },
+                None => Reply {
+                    parts: Vec::new(),
+                    hold: true,
+                },
+            })
+        }
+
+        /// A server that answers every request with `parts`, pausing between them, and then
+        /// closes the connection, or holds it open with `hold`.
+        pub fn streaming(parts: Vec<Vec<u8>>, hold: bool) -> Self {
+            Self::serving(move |_| Reply {
+                parts: parts.clone(),
+                hold,
+            })
+        }
+
+        fn serving(script: impl Fn(&Recorded) -> Reply + Send + Sync + 'static) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -345,6 +396,11 @@ pub mod test_support {
         }
         head.push_str("\r\n");
         [head.as_bytes(), body].concat()
+    }
+
+    /// The head of a `200` event stream without a length, so its body ends when the server closes.
+    pub fn stream_head() -> Vec<u8> {
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".to_vec()
     }
 
     pub fn json_answer(status: &str, body: &str) -> Vec<u8> {
@@ -400,13 +456,23 @@ pub mod test_support {
             body,
         };
         requests.lock().unwrap().push(request.clone());
-        match script(&request) {
-            // The client may stop reading early, as for an answer over the bound.
-            Some(answer) => {
-                let _ = stream.write_all(&answer);
+        let reply = script(&request);
+        for (index, part) in reply.parts.iter().enumerate() {
+            if index > 0 {
+                thread::sleep(Duration::from_millis(20));
             }
+            // The client may stop reading early, as for an answer over the bound.
+            if stream
+                .write_all(part)
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                return;
+            }
+        }
+        if reply.hold {
             // Holds the connection until the client gives up.
-            None => while matches!(stream.read(&mut buffer), Ok(read) if read > 0) {},
+            while matches!(stream.read(&mut buffer), Ok(read) if read > 0) {}
         }
     }
 
@@ -433,7 +499,7 @@ mod tests {
         block_on(test(base_url, MODEL, key, Duration::from_secs(10)))
     }
 
-    fn reason(outcome: &TestOutcome) -> TestFailure {
+    fn reason(outcome: &TestOutcome) -> ProviderFailure {
         match outcome {
             TestOutcome::Failed { reason, .. } => *reason,
             other => panic!("expected a failure, got {other:?}"),
@@ -480,22 +546,30 @@ mod tests {
     #[test]
     fn each_http_status_has_its_reason() {
         let cases = [
-            ("401 Unauthorized", Some(KEY), TestFailure::KeyRefused),
-            ("403 Forbidden", Some(KEY), TestFailure::KeyRefused),
-            ("401 Unauthorized", None, TestFailure::KeyNeeded),
-            ("404 Not Found", Some(KEY), TestFailure::NotFound),
-            ("429 Too Many Requests", Some(KEY), TestFailure::RateLimited),
-            ("400 Bad Request", Some(KEY), TestFailure::Refused),
-            ("422 Unprocessable Entity", Some(KEY), TestFailure::Refused),
+            ("401 Unauthorized", Some(KEY), ProviderFailure::KeyRefused),
+            ("403 Forbidden", Some(KEY), ProviderFailure::KeyRefused),
+            ("401 Unauthorized", None, ProviderFailure::KeyNeeded),
+            ("404 Not Found", Some(KEY), ProviderFailure::NotFound),
+            (
+                "429 Too Many Requests",
+                Some(KEY),
+                ProviderFailure::RateLimited,
+            ),
+            ("400 Bad Request", Some(KEY), ProviderFailure::Refused),
+            (
+                "422 Unprocessable Entity",
+                Some(KEY),
+                ProviderFailure::Refused,
+            ),
             (
                 "500 Internal Server Error",
                 Some(KEY),
-                TestFailure::ProviderError,
+                ProviderFailure::ProviderError,
             ),
             (
                 "503 Service Unavailable",
                 Some(KEY),
-                TestFailure::ProviderError,
+                ProviderFailure::ProviderError,
             ),
         ];
         for (status, key, expected) in cases {
@@ -534,7 +608,7 @@ mod tests {
         assert_eq!(
             outcome,
             TestOutcome::failed(
-                TestFailure::Redirected,
+                ProviderFailure::Redirected,
                 Some("elsewhere.example:8443".to_owned())
             )
         );
@@ -554,7 +628,7 @@ mod tests {
         assert_eq!(
             outcome,
             TestOutcome::failed(
-                TestFailure::Redirected,
+                ProviderFailure::Redirected,
                 Some("[key].elsewhere.example".to_owned())
             )
         );
@@ -584,7 +658,7 @@ mod tests {
 
             assert_eq!(
                 outcome,
-                TestOutcome::failed(TestFailure::InvalidReply, None)
+                TestOutcome::failed(ProviderFailure::InvalidReply, None)
             );
         }
     }
@@ -600,7 +674,7 @@ mod tests {
 
         let outcome = run(&base_url, Some(KEY));
 
-        assert_eq!(reason(&outcome), TestFailure::Unreachable);
+        assert_eq!(reason(&outcome), ProviderFailure::Unreachable);
         let TestOutcome::Failed { detail, .. } = outcome else {
             unreachable!()
         };
@@ -614,7 +688,7 @@ mod tests {
 
         let outcome = run(&base_url, Some(KEY));
 
-        assert_eq!(reason(&outcome), TestFailure::Insecure, "{outcome:?}");
+        assert_eq!(reason(&outcome), ProviderFailure::Insecure, "{outcome:?}");
         assert!(server.requests().is_empty());
     }
 
@@ -629,7 +703,7 @@ mod tests {
             Duration::from_millis(200),
         ));
 
-        assert_eq!(outcome, TestOutcome::failed(TestFailure::Timeout, None));
+        assert_eq!(outcome, TestOutcome::failed(ProviderFailure::Timeout, None));
     }
 
     #[test]
@@ -671,7 +745,7 @@ mod tests {
         assert_eq!(
             outcome,
             TestOutcome::Failed {
-                reason: TestFailure::ProviderError,
+                reason: ProviderFailure::ProviderError,
                 detail: None,
                 provider_message: Some("upstream <b>down</b>".to_owned()),
             }

@@ -4,12 +4,19 @@
 //!
 //! The commands run one at a time under the settings lock, held for the whole operation, keychain
 //! calls included. Each runs on Tauri's blocking pool, because a keychain may wait for the user to
-//! answer an unlock prompt. The connection test is the exception: it reads the key without the
-//! lock, and its request runs on the async runtime with no lock held. Switching AI off, saving the
-//! provider, removing the key and `provider_test_cancel` abandon a running test.
+//! answer an unlock prompt.
+//!
+//! Settings also authorize every request to the provider: the connection test's and the
+//! assistant's answer. A request takes a snapshot of the provider with the provider generation
+//! (`prepare_request`), reads the key without the lock (`read_key`), and starts only inside
+//! `start_request`, under the lock, while the generation is unchanged and AI is on; its abort is
+//! stored there before the lock is released. Switching AI off, saving the provider and removing
+//! the key move the generation and call every stored abort, so no request leaves after them and
+//! none keeps running. `provider_test_cancel` abandons only the test, through its own mark.
 
 mod store;
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -19,7 +26,7 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager};
 
 use crate::error::{AppError, ErrorKind, guard};
-use crate::providers::{self, BaseUrl, TestFailure, TestOutcome};
+use crate::providers::{self, BaseUrl, ProviderFailure, TestOutcome};
 use crate::secrets::{KeyStorage, Secrets, SecretsError};
 use store::{Saved, SavedProvider};
 
@@ -77,7 +84,8 @@ pub enum ProviderSaved {
 
 /// The settings, managed by Tauri and loaded at launch.
 pub struct SettingsState {
-    inner: Mutex<Inner>,
+    /// Shared with each `RequestGuard`, which removes its request's abort when dropped.
+    inner: Arc<Mutex<Inner>>,
     /// Beside the settings lock, so that reading a key never needs it.
     secrets: Arc<Secrets>,
 }
@@ -86,8 +94,17 @@ struct Inner {
     saved: Saved,
     /// `grimoire-data/settings.json`; `None` without an app data folder, and then nothing saves.
     file: Option<PathBuf>,
+    /// Moves on when AI is switched off, the provider is saved or its key removed. A request
+    /// prepared before it moved never starts.
+    provider_generation: u64,
+    /// The abort of each running provider request, by request id.
+    requests: Vec<(u64, Abort)>,
+    next_request: u64,
     test: TestRun,
 }
+
+/// Aborts a running provider request. It takes no lock.
+pub type Abort = Box<dyn Fn() + Send>;
 
 /// The connection test, which runs one at a time.
 #[derive(Default)]
@@ -95,14 +112,50 @@ struct TestRun {
     /// Moves on whenever a running test must be abandoned, so its result is discarded.
     generation: u64,
     running: bool,
-    /// Aborts the running test's request.
-    abort: Option<Box<dyn Fn() + Send>>,
+    /// The running test's request id in `Inner::requests`.
+    request: Option<u64>,
+}
+
+/// A request that passed its first step: the provider generation it was prepared in, and a copy of
+/// the provider it goes to.
+#[derive(Clone)]
+pub struct PreparedRequest {
+    generation: u64,
+    provider: SavedProvider,
+}
+
+impl PreparedRequest {
+    pub fn base_url(&self) -> &BaseUrl {
+        &self.provider.base_url
+    }
+
+    pub fn model(&self) -> &str {
+        &self.provider.model
+    }
+}
+
+/// The request was not started: AI was switched off, or the provider saved again or its key
+/// removed, since it was prepared.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Superseded;
+
+/// A started request's place in the registry; dropping it removes the request's abort. It takes
+/// the settings lock, so it is dropped on the blocking pool.
+pub struct RequestGuard {
+    inner: Arc<Mutex<Inner>>,
+    id: u64,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        lock(&self.inner).requests.retain(|(id, _)| *id != self.id);
+    }
 }
 
 /// A test that passed its first step, with a copy of the provider it tests.
 struct PendingTest {
     generation: u64,
-    provider: SavedProvider,
+    request: PreparedRequest,
 }
 
 impl SettingsState {
@@ -112,15 +165,18 @@ impl SettingsState {
         Self::with_secrets(folder.as_deref(), Secrets::new(folder.as_deref()))
     }
 
-    fn with_secrets(data_folder: Option<&Path>, secrets: Secrets) -> Self {
+    pub(crate) fn with_secrets(data_folder: Option<&Path>, secrets: Secrets) -> Self {
         let file = data_folder.map(|folder| folder.join("settings.json"));
         let saved = file.as_deref().map(store::load).unwrap_or_default();
         Self {
-            inner: Mutex::new(Inner {
+            inner: Arc::new(Mutex::new(Inner {
                 saved,
                 file,
+                provider_generation: 0,
+                requests: Vec::new(),
+                next_request: 0,
                 test: TestRun::default(),
-            }),
+            })),
             secrets: Arc::new(secrets),
         }
     }
@@ -129,10 +185,15 @@ impl SettingsState {
         to_settings(&self.lock().saved)
     }
 
-    fn set_ai(&self, on: bool) -> Result<Settings, AppError> {
+    /// Whether AI features are on.
+    pub fn ai_on(&self) -> bool {
+        self.lock().saved.ai
+    }
+
+    pub(crate) fn set_ai(&self, on: bool) -> Result<Settings, AppError> {
         let mut inner = self.lock();
         if !on {
-            inner.cancel_test();
+            inner.supersede_requests();
         }
         let next = Saved {
             ai: on,
@@ -143,7 +204,7 @@ impl SettingsState {
 
     /// Checks the fields, stores a typed key, or removes the stored key when the origin changes
     /// without one, and only then writes the settings file.
-    fn save_provider(
+    pub(crate) fn save_provider(
         &self,
         base_url: &str,
         model: &str,
@@ -154,8 +215,8 @@ impl SettingsState {
         if !inner.saved.ai {
             return Err(ai_off());
         }
-        // A test result belongs to the provider it tested.
-        inner.cancel_test();
+        // A request belongs to the provider it was prepared for.
+        inner.supersede_requests();
         let base_url = match BaseUrl::parse(base_url) {
             Ok(url) => url,
             Err(message) => return Ok(invalid(ProviderField::BaseUrl, message)),
@@ -201,12 +262,12 @@ impl SettingsState {
     }
 
     /// Deletes the stored key, then records that none is stored.
-    fn remove_key(&self) -> Result<Settings, AppError> {
+    pub(crate) fn remove_key(&self) -> Result<Settings, AppError> {
         let mut inner = self.lock();
         if !inner.saved.ai {
             return Err(ai_off());
         }
-        inner.cancel_test();
+        inner.supersede_requests();
         let Some(provider) = inner.saved.provider.clone() else {
             return Ok(to_settings(&inner.saved));
         };
@@ -221,10 +282,10 @@ impl SettingsState {
         inner.save(next)
     }
 
-    /// The test's first step, under the lock: AI is on, a provider is saved and no test runs.
-    /// Marks the test as running; `end_test` clears the mark.
-    fn begin_test(&self) -> Result<PendingTest, AppError> {
-        let mut inner = self.lock();
+    /// A request's first step, under the lock: AI is on and a provider is saved. It holds the
+    /// provider generation and a copy of the provider.
+    pub fn prepare_request(&self) -> Result<PreparedRequest, AppError> {
+        let inner = self.lock();
         if !inner.saved.ai {
             return Err(ai_off());
         }
@@ -233,6 +294,59 @@ impl SettingsState {
             .provider
             .clone()
             .ok_or_else(|| AppError::new(ErrorKind::NotFound, "No provider is saved."))?;
+        Ok(PreparedRequest {
+            generation: inner.provider_generation,
+            provider,
+        })
+    }
+
+    /// The second step, without the lock, because a keychain may wait for an unlock prompt.
+    pub fn read_key(&self, request: &PreparedRequest) -> Result<Option<String>, AppError> {
+        self.secrets
+            .read(request.provider.key)
+            .map_err(secrets_error)
+    }
+
+    /// The third step: under the lock, unless the provider generation moved or AI is off since
+    /// `request` was prepared, calls `start`, which starts the request and returns its abort, and
+    /// stores that abort before anything else can take the lock. `start` may take the world and
+    /// assistant locks; it returns `None` when it started nothing.
+    pub fn start_request(
+        &self,
+        request: &PreparedRequest,
+        start: impl FnOnce() -> Option<Abort>,
+    ) -> Result<Option<RequestGuard>, Superseded> {
+        let id = self.start_request_with(request, |_, _| start())?;
+        Ok(id.map(|id| RequestGuard {
+            inner: Arc::clone(&self.inner),
+            id,
+        }))
+    }
+
+    /// `start_request` with the state under the lock, and the stored request's id.
+    fn start_request_with(
+        &self,
+        request: &PreparedRequest,
+        start: impl FnOnce(&mut Inner, u64) -> Option<Abort>,
+    ) -> Result<Option<u64>, Superseded> {
+        let mut inner = self.lock();
+        if inner.provider_generation != request.generation || !inner.saved.ai {
+            return Err(Superseded);
+        }
+        let id = inner.next_request;
+        inner.next_request += 1;
+        let Some(abort) = start(&mut inner, id) else {
+            return Ok(None);
+        };
+        inner.requests.push((id, abort));
+        Ok(Some(id))
+    }
+
+    /// The test's first step, under the lock: AI is on, a provider is saved and no test runs.
+    /// Marks the test as running; `end_test` clears the mark.
+    fn begin_test(&self) -> Result<PendingTest, AppError> {
+        let request = self.prepare_request()?;
+        let mut inner = self.lock();
         if inner.test.running {
             return Err(AppError::new(
                 ErrorKind::Conflict,
@@ -242,21 +356,18 @@ impl SettingsState {
         inner.test.running = true;
         Ok(PendingTest {
             generation: inner.test.generation,
-            provider,
+            request,
         })
     }
 
-    /// The second step, without the lock, because a keychain may wait for an unlock prompt.
+    /// The test's second step, `read_key`.
     fn read_test_key(&self, test: &PendingTest) -> Result<Option<String>, TestOutcome> {
-        self.secrets.read(test.provider.key).map_err(|error| {
-            TestOutcome::failed(
-                TestFailure::KeyUnreadable,
-                Some(secrets_error(error).message),
-            )
+        self.read_key(&test.request).map_err(|error| {
+            TestOutcome::failed(ProviderFailure::KeyUnreadable, Some(error.message))
         })
     }
 
-    /// The third step, under the lock: unless the test was abandoned meanwhile, starts the request
+    /// The third step, `start_request`: unless the test was abandoned meanwhile, starts the request
     /// and keeps the means to abort it before anything else can take the lock.
     fn start_test_request(
         &self,
@@ -264,19 +375,26 @@ impl SettingsState {
         key: Option<String>,
         timeout: Duration,
     ) -> Result<JoinHandle<TestOutcome>, TestOutcome> {
-        let mut inner = self.lock();
-        if inner.test.generation != test.generation || !inner.saved.ai {
-            return Err(TestOutcome::Cancelled);
-        }
-        let SavedProvider {
-            base_url, model, ..
-        } = test.provider.clone();
-        let task = tauri::async_runtime::spawn(async move {
-            providers::test(&base_url, &model, key.as_deref(), timeout).await
+        let mut task = None;
+        let started = self.start_request_with(&test.request, |inner, id| {
+            if inner.test.generation != test.generation {
+                return None;
+            }
+            inner.test.request = Some(id);
+            let SavedProvider {
+                base_url, model, ..
+            } = test.request.provider.clone();
+            let spawned = tauri::async_runtime::spawn(async move {
+                providers::test(&base_url, &model, key.as_deref(), timeout).await
+            });
+            let abort = spawned.inner().abort_handle();
+            task = Some(spawned);
+            Some(Box::new(move || abort.abort()))
         });
-        let abort = task.inner().abort_handle();
-        inner.test.abort = Some(Box::new(move || abort.abort()));
-        Ok(task)
+        match (started, task) {
+            (Ok(Some(_)), Some(task)) => Ok(task),
+            _ => Err(TestOutcome::Cancelled),
+        }
     }
 
     /// The second and third steps.
@@ -298,7 +416,9 @@ impl SettingsState {
     ) -> Result<TestOutcome, AppError> {
         let mut inner = self.lock();
         inner.test.running = false;
-        inner.test.abort = None;
+        if let Some(request) = inner.test.request.take() {
+            inner.requests.retain(|(id, _)| *id != request);
+        }
         if inner.test.generation != generation {
             return Ok(TestOutcome::Cancelled);
         }
@@ -310,16 +430,35 @@ impl SettingsState {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        // Every change to the state is a whole value, so it stays consistent after a panic.
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.inner)
     }
 }
 
+/// Every change to the state is a whole value, so it stays consistent after a panic.
+fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
+    inner.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Inner {
-    /// Abandons a running test: its request is aborted, and its result will be discarded.
+    /// Abandons a running test, and only the test: its request is aborted, and its result will be
+    /// discarded.
     fn cancel_test(&mut self) {
         self.test.generation += 1;
-        if let Some(abort) = self.test.abort.take() {
+        if let Some(request) = self.test.request.take()
+            && let Some(at) = self.requests.iter().position(|(id, _)| *id == request)
+        {
+            let (_, abort) = self.requests.remove(at);
+            abort();
+        }
+    }
+
+    /// Abandons every provider request: none prepared so far starts, and each running one is
+    /// aborted. A running test's result is discarded.
+    fn supersede_requests(&mut self) {
+        self.provider_generation += 1;
+        self.test.generation += 1;
+        self.test.request = None;
+        for (_, abort) in mem::take(&mut self.requests) {
             abort();
         }
     }
@@ -355,7 +494,7 @@ fn invalid(field: ProviderField, message: impl Into<String>) -> ProviderSaved {
     }
 }
 
-fn ai_off() -> AppError {
+pub(crate) fn ai_off() -> AppError {
     AppError::new(ErrorKind::AiOff, "AI features are off.")
 }
 
@@ -451,6 +590,7 @@ mod tests {
     use crate::secrets::test_support::{KEY, MockKeychain};
     use serde_json::json;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Instant;
     use tauri::async_runtime::block_on;
@@ -895,7 +1035,7 @@ mod tests {
         let outcome = run_test(&fixture.state).unwrap();
 
         let TestOutcome::Failed {
-            reason: TestFailure::KeyUnreadable,
+            reason: ProviderFailure::KeyUnreadable,
             detail: Some(detail),
             ..
         } = outcome
@@ -905,5 +1045,79 @@ mod tests {
         assert!(detail.contains("locked or refused"), "{detail}");
         assert!(server.requests().is_empty());
         assert!(!fixture.state.lock().test.running);
+    }
+
+    /// Starts a request whose abort counts its calls in `aborted`.
+    fn start_counted(
+        state: &SettingsState,
+        request: &PreparedRequest,
+        aborted: &Arc<AtomicUsize>,
+    ) -> Result<Option<RequestGuard>, Superseded> {
+        let aborted = Arc::clone(aborted);
+        state.start_request(request, || {
+            Some(Box::new(move || {
+                aborted.fetch_add(1, Ordering::SeqCst);
+            }))
+        })
+    }
+
+    #[test]
+    fn ai_off_a_provider_save_and_a_key_removal_abort_a_running_request() {
+        for name in ["AI off", "save", "key removal"] {
+            let fixture = Fixture::new();
+            fixture.save(BASE_URL, Some(KEY)).unwrap();
+            let request = fixture.state.prepare_request().unwrap();
+            let aborted = Arc::new(AtomicUsize::new(0));
+            let guard = start_counted(&fixture.state, &request, &aborted).unwrap();
+            assert!(guard.is_some(), "{name}");
+
+            match name {
+                "AI off" => drop(fixture.state.set_ai(false).unwrap()),
+                "save" => drop(fixture.save(BASE_URL, None).unwrap()),
+                _ => drop(fixture.state.remove_key().unwrap()),
+            }
+
+            assert_eq!(aborted.load(Ordering::SeqCst), 1, "{name}");
+            // The request was prepared before the change, so it can no longer start.
+            let mut started = false;
+            let result = fixture.state.start_request(&request, || {
+                started = true;
+                None
+            });
+            assert_eq!(result.err(), Some(Superseded), "{name}");
+            assert!(!started, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_finished_request_is_no_longer_aborted() {
+        let fixture = Fixture::new();
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+        let request = fixture.state.prepare_request().unwrap();
+        let aborted = Arc::new(AtomicUsize::new(0));
+
+        drop(start_counted(&fixture.state, &request, &aborted).unwrap());
+        fixture.state.set_ai(false).unwrap();
+
+        assert_eq!(aborted.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cancelling_the_test_leaves_an_answer_s_request_alone() {
+        let server = Server::silent();
+        let fixture = saved_at(&server);
+        let answer = fixture.state.prepare_request().unwrap();
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let _guard = start_counted(&fixture.state, &answer, &aborted).unwrap();
+        let test = fixture.state.begin_test().unwrap();
+        let task = fixture.state.launch_test(&test, TEST_TIMEOUT).ok().unwrap();
+
+        fixture.state.cancel_test();
+
+        assert!(block_on(task).is_err());
+        assert_eq!(aborted.load(Ordering::SeqCst), 0);
+        // The provider generation did not move, so an answer prepared before still starts.
+        let started = start_counted(&fixture.state, &answer, &aborted).unwrap();
+        assert!(started.is_some());
     }
 }
