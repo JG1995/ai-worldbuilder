@@ -6,7 +6,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageText, WorldEvents, WorldOpened } from "@/types/api";
-import { mockWorldIpc, testWorld } from "../api/test-ipc";
+import { mockWorldIpc, shellLayout, testWorld } from "../api/test-ipc";
 import { World } from "../components/World";
 import { useWorldStore } from "../stores/world-store";
 import { reloadToast } from "./outside-changes";
@@ -37,7 +37,9 @@ function mockDisk(active: string) {
 /** Renders the world screens; this file is plain TypeScript, so without JSX. */
 function renderWorld() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(createElement(QueryClientProvider, { client }, createElement(World)));
+  render(
+    createElement(QueryClientProvider, { client }, createElement(World, { layout: shellLayout })),
+  );
 }
 
 async function openWorld() {

@@ -8,7 +8,6 @@ import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
 import { Notice } from "@/ui/Notice";
 import { NoPageOpen } from "@/ui/PageView";
-import { Shell } from "@/ui/Shell";
 import { TabStrip } from "@/ui/TabStrip";
 import { ToastRegion } from "@/ui/Toast";
 import { folderCreate, pageCreate, worldTree, worldTreeKey } from "../api/commands";
@@ -53,6 +52,22 @@ export type QuickOpenPorts = {
   close: () => void;
 };
 
+/**
+ * What the world's screen hands to its layout: the tree, the tab strip, the page region and the
+ * toasts, with the tree pane's width and overlay state.
+ */
+export type WorldScreenParts = {
+  tree: ReactNode;
+  /** Renders the tab strip; `treeToggle` is the button that opens the tree overlay. */
+  tabStrip: (treeToggle: ReactNode) => ReactNode;
+  page: ReactNode;
+  toasts: ReactNode;
+  treeWidth: number;
+  onTreeWidthChange: (width: number) => void;
+  treeOverlayOpen: boolean;
+  onTreeOverlayOpenChange: (open: boolean) => void;
+};
+
 type WorldScreenProps = {
   /** The open world's session, which keys its tree and its pages' results. */
   session: number;
@@ -69,6 +84,8 @@ type WorldScreenProps = {
   quickOpen?: (ports: QuickOpenPorts) => ReactNode;
   /** Opens Settings; without it, the world menu has no Settings… item. */
   onOpenSettings?: () => void;
+  /** Lays out the screen's parts. */
+  layout: (parts: WorldScreenParts) => ReactNode;
 };
 
 /**
@@ -86,6 +103,7 @@ export function WorldScreen({
   confirmSaved,
   quickOpen,
   onOpenSettings,
+  layout,
 }: WorldScreenProps) {
   const tabs = useWorldStore((store) => store.tabs);
   const active = useWorldStore((store) => store.active);
@@ -340,12 +358,12 @@ export function WorldScreen({
 
   return (
     <>
-      <Shell
-        treeWidth={treeWidth}
-        onTreeWidthChange={setTreeWidth}
-        treeOverlayOpen={treeOverlayOpen}
-        onTreeOverlayOpenChange={setTreeOverlayOpen}
-        tree={
+      {layout({
+        treeWidth,
+        onTreeWidthChange: setTreeWidth,
+        treeOverlayOpen,
+        onTreeOverlayOpenChange: setTreeOverlayOpen,
+        tree:
           // Until the first listing arrives, an empty pane, not the empty-world message.
           tree.isPending ? (
             <div className="h-full bg-window" />
@@ -374,9 +392,8 @@ export function WorldScreen({
               onNameSubmit={(name) => void submitName(name)}
               onNameCancel={cancelNew}
             />
-          )
-        }
-        tabStrip={(treeToggle) => (
+          ),
+        tabStrip: (treeToggle) => (
           <TabStrip
             tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
             activeId={active ?? undefined}
@@ -384,9 +401,9 @@ export function WorldScreen({
             onClose={closePage}
             leading={treeToggle}
           />
-        )}
-        toasts={<ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />}
-        page={
+        ),
+        toasts: <ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />,
+        page: (
           <div className="flex h-full flex-col">
             {worldNotices.has("missing") && (
               <Notice
@@ -443,8 +460,8 @@ export function WorldScreen({
               )}
             </div>
           </div>
-        }
-      />
+        ),
+      })}
       {searching && quickOpen?.(quickOpenPorts)}
     </>
   );

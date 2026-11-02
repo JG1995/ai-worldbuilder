@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeEntry } from "@/types/api";
-import { mockWorldIpc, testTree, testWorld } from "../api/test-ipc";
+import { mockWorldIpc, shellLayout, testTree, testWorld } from "../api/test-ipc";
 import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
@@ -10,7 +10,7 @@ function renderWorld() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <World />
+      <World layout={shellLayout} />
     </QueryClientProvider>,
   );
 }

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { QuickOpen } from "@/features/search/components/QuickOpen";
 import { Settings } from "@/features/settings/components/Settings";
 import { World } from "@/features/world/components/World";
+import { WorldLayout } from "./WorldLayout";
 
 // Commands answer from the local core: a failure is reported at once rather than retried, and
 // results change only when the application asks again, not when the window regains focus.
@@ -19,6 +20,7 @@ export function App() {
       <World
         quickOpen={(ports) => <QuickOpen {...ports} />}
         onOpenSettings={() => setSettingsOpen(true)}
+        layout={(parts) => <WorldLayout {...parts} />}
       />
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
     </QueryClientProvider>
