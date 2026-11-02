@@ -17,11 +17,11 @@ import type {
   PageMatches,
   PageText,
   PageVersion,
+  ProviderFailure,
   ProviderSaved,
   RecentWorld,
   RestoredPage,
   Settings,
-  TestFailure,
   TestOutcome,
   TextLine,
   TextMatch,
@@ -688,7 +688,7 @@ function saveProvider(args: InvokeArgs | undefined): ProviderSaved {
   return { state: "saved", settings: previewSettings };
 }
 
-const testFailures: TestFailure[] = [
+const testFailures: ProviderFailure[] = [
   "unreachable",
   "insecure",
   "timeout",
@@ -705,7 +705,7 @@ const testFailures: TestFailure[] = [
 
 /**
  * Tests the saved provider without a network. An approximation for the preview: it answers after
- * a short delay, and a saved model `fail:<reason>`, with a `TestFailure` as the reason, fails for
+ * a short delay, and a saved model `fail:<reason>`, with a `ProviderFailure` as the reason, fails for
  * that reason with a sample detail and provider message; any other model connects.
  */
 async function testProvider(): Promise<TestOutcome> {

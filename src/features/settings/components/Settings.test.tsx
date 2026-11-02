@@ -3,9 +3,9 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
+  ProviderFailure,
   ProviderSaved,
   Settings as SavedSettings,
-  TestFailure,
   TestOutcome,
   TextProvider,
 } from "@/types/api";
@@ -358,7 +358,7 @@ describe("Settings", () => {
       "key_unreadable",
       "The key cannot be read from its storage: Connection refused (os error 111).",
     ],
-  ] satisfies [TestFailure, string][])("explains a failed test: %s", async (reason, text) => {
+  ] satisfies [ProviderFailure, string][])("explains a failed test: %s", async (reason, text) => {
     renderSettings(withKey, {
       provider_test: () => ({
         state: "failed",

@@ -137,6 +137,28 @@ impl OpenWorld {
     }
 }
 
+/// The open world as other areas of the core see it.
+pub(crate) struct CurrentWorld {
+    pub session: u64,
+    pub root: PathBuf,
+}
+
+impl CurrentWorld {
+    /// The world's name: its folder's name.
+    pub fn name(&self) -> String {
+        world_name(&self.root)
+    }
+}
+
+/// Refuses a page path that confinement refuses in the world at `root`. A page that is missing or
+/// cannot be read passes.
+pub(crate) fn check_page_path(root: &Path, path: &str) -> Result<(), AppError> {
+    match paths::existing_page(root, path) {
+        Err(error) if error.kind == ErrorKind::InvalidPath => Err(error),
+        _ => Ok(()),
+    }
+}
+
 /// A page on disk compared with the editor's text.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -183,12 +205,9 @@ impl WorldState {
     /// Opens the folder at `root`, replacing the open world, unless the folder cannot be read. The
     /// world moves to the top of the recent list and opens with its stored workspace and its
     /// history, and a new watcher starts for it.
-    fn open(&self, root: PathBuf) -> Result<WorldOpened, AppError> {
+    pub(crate) fn open(&self, root: PathBuf) -> Result<WorldOpened, AppError> {
         fs::read_dir(&root)?;
-        let name = root.file_name().map_or_else(
-            || root.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let name = world_name(&root);
         let (session, stored) = {
             let mut inner = self.lock();
             // The old world's watcher and index worker stop, and its history and index close,
@@ -317,7 +336,7 @@ impl WorldState {
     }
 
     /// Closes the world, which stops its watcher. The next launch then starts on the welcome screen.
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         let mut inner = self.lock();
         inner.world = None;
         inner.recent.closed();
@@ -384,6 +403,35 @@ impl WorldState {
 
     fn read_page(&self, path: &str) -> Result<PageText, AppError> {
         page::read(&paths::existing_page(&self.root()?, path)?)
+    }
+
+    /// The open world's session and folder, for another area of the core.
+    pub(crate) fn current(&self) -> Result<CurrentWorld, AppError> {
+        let inner = self.lock();
+        let world = inner.world.as_ref().ok_or_else(no_world)?;
+        Ok(CurrentWorld {
+            session: inner.session,
+            root: world.root.clone(),
+        })
+    }
+
+    /// Runs `work` with the world's folder under the world lock while the opening `session` is
+    /// still the open world, and returns `None` otherwise. `work` may take only locks that may be
+    /// taken while the world lock is held.
+    pub(crate) fn while_open<T>(&self, session: u64, work: impl FnOnce(&Path) -> T) -> Option<T> {
+        let inner = self.lock();
+        let world = inner.world.as_ref().filter(|_| inner.session == session)?;
+        Some(work(&world.root))
+    }
+
+    /// The text of the page at `path`, as `page_read` reads it, but only while the opening
+    /// `session` is still the open world, and `no_world` otherwise. The world lock is held for the
+    /// read, so the text never comes from a world that has closed meanwhile.
+    pub(crate) fn read_page_in(&self, session: u64, path: &str) -> Result<String, AppError> {
+        self.while_open(session, |root| {
+            page::read(&paths::existing_page(root, path)?).map(|page| page.text)
+        })
+        .unwrap_or_else(|| Err(no_world()))
     }
 
     /// The page on disk, line by line, against the editor's `text`, with the version on disk.
@@ -1471,6 +1519,14 @@ fn display(location: &Path) -> NewLocation {
     }
 }
 
+/// A world's name: its folder's name, or the whole path for a root that has none.
+fn world_name(root: &Path) -> String {
+    root.file_name().map_or_else(
+        || root.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 fn index_error(error: rusqlite::Error) -> AppError {
     AppError::new(
         ErrorKind::Io,
@@ -1848,6 +1904,29 @@ mod tests {
             saved.version,
             state.read_page("Places/Saltmere.md").unwrap().version
         );
+    }
+
+    #[test]
+    fn a_page_is_read_in_a_session_only_while_that_session_is_open() {
+        let state = WorldState::default();
+        let world = world();
+        let first = state.open(world.path().to_path_buf()).unwrap().session;
+
+        assert_eq!(
+            state.read_page_in(first, "Places/Saltmere.md").unwrap(),
+            "# Saltmere\n"
+        );
+
+        let second = state.open(world.path().to_path_buf()).unwrap().session;
+        let stale = state.read_page_in(first, "Places/Saltmere.md").unwrap_err();
+        assert_eq!(stale.kind, ErrorKind::NoWorld);
+        assert!(state.read_page_in(second, "Places/Saltmere.md").is_ok());
+
+        state.close();
+        let closed = state
+            .read_page_in(second, "Places/Saltmere.md")
+            .unwrap_err();
+        assert_eq!(closed.kind, ErrorKind::NoWorld);
     }
 
     #[test]

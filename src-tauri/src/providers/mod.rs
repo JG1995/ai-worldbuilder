@@ -1,13 +1,16 @@
 //! The `providers` area: where requests to an AI provider go. It holds the rules a text provider's
-//! base URL must follow, and in `chat` the only code that sends a request.
+//! base URL must follow, and the only code that sends a request: the connection test in `chat` and
+//! the streamed answer in `stream`.
 
 mod chat;
+mod stream;
 
 use std::net::IpAddr;
 
 #[cfg(test)]
 pub use chat::test_support;
-pub use chat::{TIMEOUT, TestFailure, TestOutcome, test};
+pub use chat::{ProviderFailure, TIMEOUT, TestOutcome, test};
+pub use stream::{ChatMessage, READ_TIMEOUT, Role, StreamEnd, chat_stream};
 
 use url::{Host, Origin, Url};
 

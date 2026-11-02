@@ -1,3 +1,4 @@
+mod assistant;
 mod data_file;
 mod error;
 mod history;
@@ -28,6 +29,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .manage(world::WorldState::default())
+        .manage(assistant::AssistantState::default())
         .setup(|app| {
             #[cfg(target_os = "linux")]
             if let Some(theme) = theme::fallback() {
@@ -95,6 +97,8 @@ pub fn run() {
             settings::provider_key_remove,
             settings::provider_test,
             settings::provider_test_cancel,
+            assistant::assistant_send,
+            assistant::assistant_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
