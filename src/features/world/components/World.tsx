@@ -29,7 +29,7 @@ import { followOutsideChanges } from "../logic/outside-changes";
 import { saveWorkspace, useWorldStore } from "../stores/world-store";
 import { useSaveConfirmation } from "./FailedSaveDialog";
 import { NewWorldDialog } from "./NewWorldDialog";
-import { type QuickOpenPorts, WorldScreen } from "./WorldScreen";
+import { type QuickOpenPorts, WorldScreen, type WorldScreenParts } from "./WorldScreen";
 
 type Failure = { title: string; message: string };
 
@@ -47,6 +47,8 @@ type WorldProps = {
    * Settings… item do. Without it, none of them exists.
    */
   onOpenSettings?: () => void;
+  /** Lays out the open world's screen from the parts it supplies. */
+  layout: (parts: WorldScreenParts) => ReactNode;
 };
 
 /**
@@ -55,7 +57,7 @@ type WorldProps = {
  * closes, every open page saves, with the failed-save dialog for each one that cannot, and then
  * the workspace saves.
  */
-export function World({ quickOpen, onOpenSettings }: WorldProps) {
+export function World({ quickOpen, onOpenSettings, layout }: WorldProps) {
   const world = useWorldStore((store) => store.world);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
@@ -271,6 +273,7 @@ export function World({ quickOpen, onOpenSettings }: WorldProps) {
           confirmSaved={confirmSaved}
           quickOpen={quickOpen}
           onOpenSettings={onOpenSettings}
+          layout={layout}
         />
       );
     }

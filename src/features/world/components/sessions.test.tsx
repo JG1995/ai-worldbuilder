@@ -6,7 +6,7 @@ import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecentWorld, WorldOpened } from "@/types/api";
 import { closeRequestedEvent } from "../api/commands";
-import { mockWorldIpc, testWorld } from "../api/test-ipc";
+import { mockWorldIpc, shellLayout, testWorld } from "../api/test-ipc";
 import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
@@ -14,7 +14,7 @@ function renderWorld() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <World />
+      <World layout={shellLayout} />
     </QueryClientProvider>,
   );
 }
@@ -114,7 +114,7 @@ describe("launching", () => {
     render(
       <StrictMode>
         <QueryClientProvider client={new QueryClient()}>
-          <World />
+          <World layout={shellLayout} />
         </QueryClientProvider>
       </StrictMode>,
     );

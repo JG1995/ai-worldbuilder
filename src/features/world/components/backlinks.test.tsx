@@ -4,7 +4,7 @@ import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Backlinks } from "@/types/api";
-import { mockWorldIpc } from "../api/test-ipc";
+import { mockWorldIpc, shellLayout } from "../api/test-ipc";
 import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
@@ -39,7 +39,7 @@ async function openOverview(answer: () => Backlinks, overrides: Handler = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <World />
+      <World layout={shellLayout} />
     </QueryClientProvider>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));

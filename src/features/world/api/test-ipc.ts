@@ -2,11 +2,17 @@
 // a default, so a test overrides only the commands it is about.
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { createElement } from "react";
 import { vi } from "vitest";
 import type { PageText, TreeEntry, WorldOpened } from "@/types/api";
+import { Shell } from "@/ui/Shell";
+import type { WorldScreenParts } from "../components/WorldScreen";
 import { pageNameOf, parentOf } from "../utils/paths";
 
 type Handler = (args: Record<string, unknown>) => unknown;
+
+/** The `layout` of `World` in tests: the world's parts in the shell, as the app lays them out. */
+export const shellLayout = (parts: WorldScreenParts) => createElement(Shell, parts);
 
 export const testWorld: WorldOpened = {
   name: "Kesh",
