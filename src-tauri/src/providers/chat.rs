@@ -132,7 +132,8 @@ pub async fn test(
 
     let status = response.status();
     if status.is_redirection() {
-        return TestOutcome::failed(TestFailure::Redirected, redirect_host(&response));
+        let host = redirect_host(&response).map(|host| hide_key(&host, key));
+        return TestOutcome::failed(TestFailure::Redirected, host);
     }
     let answer = match read_bounded(&mut response).await {
         Ok(answer) => answer,
@@ -535,6 +536,26 @@ mod tests {
             TestOutcome::failed(
                 TestFailure::Redirected,
                 Some("elsewhere.example:8443".to_owned())
+            )
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn a_redirect_host_that_holds_the_key_is_reported_without_it() {
+        let server = Server::answering(answer(
+            "302 Found",
+            &[("Location", &format!("https://{KEY}.elsewhere.example/v1"))],
+            b"",
+        ));
+
+        let outcome = run(&server.base_url("/v1"), Some(KEY));
+
+        assert_eq!(
+            outcome,
+            TestOutcome::failed(
+                TestFailure::Redirected,
+                Some("[key].elsewhere.example".to_owned())
             )
         );
         assert_eq!(server.requests().len(), 1);
