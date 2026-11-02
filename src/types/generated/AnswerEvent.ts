@@ -4,4 +4,4 @@ import type { ContextPage } from "./ContextPage";
 /**
  * What `assistant_send` sends on its channel while an answer runs.
  */
-export type AnswerEvent = { "kind": "context", conversation: number, pages: Array<ContextPage>, leftOut: number, } | { "kind": "text", delta: string, };
+export type AnswerEvent = { "kind": "context", conversation: number, pages: Array<ContextPage>, leftOut: number, indexing: boolean, } | { "kind": "text", delta: string, };

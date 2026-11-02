@@ -1,5 +1,5 @@
 import { invokeCommand, invokeStreaming } from "@/lib/ipc";
-import type { AnswerEnd, AnswerEvent } from "@/types/api";
+import type { AnswerEnd, AnswerEvent, EditorLinks } from "@/types/api";
 
 type Outgoing = {
   /** The conversation to continue, or null to start one with this message. */
@@ -24,3 +24,10 @@ export const assistantSend = (outgoing: Outgoing, onEvent: (event: AnswerEvent) 
 
 /** Stops the running answer, if any, and resolves once its text is saved as stopped. */
 export const assistantStop = () => invokeCommand<void>("assistant_stop");
+
+/**
+ * The links of an answer's text, each with the page it resolves to as on a page at the world's top
+ * level, or `not_ready` while the index is being built. Rejects with `ai_off` and `no_world`.
+ */
+export const assistantLinks = (text: string) =>
+  invokeCommand<EditorLinks>("assistant_links", { text });

@@ -232,6 +232,83 @@ pub fn page_matches(pages: &[String], aliases: &[(String, String)], query: &str)
         .collect()
 }
 
+/// The pages among `pages`, by path, with `aliases` as (page path, alias), whose name or an alias
+/// occurs in `text` as whole words, with letter case and accents ignored: bounded by the text's
+/// start or end or a character that is neither alphanumeric nor a combining mark. Ordered by their
+/// first such occurrence, ties in the tree's order.
+pub fn named_in(pages: &[String], aliases: &[(String, String)], text: &str) -> Vec<String> {
+    let text = fold(text).text;
+    let mut aliases_of: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (path, alias) in aliases {
+        aliases_of.entry(path).or_default().push(alias);
+    }
+    let mut found: Vec<(usize, &str)> = Vec::new();
+    for path in pages {
+        let names = aliases_of.get(path.as_str()).into_iter().flatten();
+        let first = std::iter::once(&page_name(path))
+            .chain(names)
+            .filter_map(|name| first_whole(&text, &fold(name).text))
+            .min();
+        if let Some(at) = first {
+            found.push((at, path));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| path_order(a.1, b.1)));
+    found.into_iter().map(|(_, path)| path.to_owned()).collect()
+}
+
+/// Where `name` first occurs in `text` as whole words, both folded; never for an empty `name`.
+fn first_whole(text: &str, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    let separates = |c: Option<char>| match c {
+        Some(c) => !(c.is_alphanumeric() || is_combining_mark(c)),
+        None => true,
+    };
+    let mut from = 0;
+    while let Some(found) = text[from..].find(name) {
+        let start = from + found;
+        let end = start + name.len();
+        if separates(text[..start].chars().next_back()) && separates(text[end..].chars().next()) {
+            return Some(start);
+        }
+        // A later occurrence may overlap this one.
+        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    None
+}
+
+/// How many distinct words of a text `any_word_expression` takes at most.
+const MATCH_WORDS: usize = 32;
+
+/// The full-text expression that selects the pages holding any of the first 32 distinct words of
+/// `text` as a whole word, with letter case and accents ignored: each word's search form quoted,
+/// joined by `OR`. `None` when `text` has no words. Whatever else `text` holds, such as quotes or
+/// the expression's operators, separates words.
+pub fn any_word_expression(text: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for range in words(text) {
+        let form = fold(&text[range]).text;
+        // A word of marks alone has no search form.
+        if form.is_empty() || terms.contains(&form) {
+            continue;
+        }
+        terms.push(form);
+        if terms.len() == MATCH_WORDS {
+            break;
+        }
+    }
+    // Letters, digits and marks only, so the quotes hold no syntax and no quote.
+    (!terms.is_empty()).then(|| {
+        terms
+            .iter()
+            .map(|term| format!("\"{term}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    })
+}
+
 /// A page path without its `.md`, in any letter case.
 fn without_extension(path: &str) -> &str {
     let cut = path.len().saturating_sub(3);

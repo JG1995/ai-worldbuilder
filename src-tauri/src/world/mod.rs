@@ -634,7 +634,7 @@ impl WorldState {
 
     /// The links in `text`, the editor's text of the page at `path`, each with what it leads to.
     /// It reads no file: the text is parsed before the index's lock is taken.
-    fn links_in(&self, path: &str, text: &str) -> Result<EditorLinks, AppError> {
+    pub(crate) fn links_in(&self, path: &str, text: &str) -> Result<EditorLinks, AppError> {
         let parsed = index::parse(text, index::page_name(path));
         self.query_index(|index| index.links_in(path, &parsed))
     }
@@ -652,6 +652,30 @@ impl WorldState {
         query: impl FnOnce(&mut Index) -> rusqlite::Result<T>,
     ) -> Result<T, AppError> {
         let index = Arc::clone(&self.lock().world.as_ref().ok_or_else(no_world)?.index);
+        self.query(index, query)
+    }
+
+    /// Runs `query` on the index of the opening `session` while it is the open world, under the
+    /// index's lock alone, and `no_world` otherwise. The world lock is released before the index
+    /// lock is taken, so `query` reads no file.
+    pub(crate) fn query_index_in<T>(
+        &self,
+        session: u64,
+        query: impl FnOnce(&mut Index) -> rusqlite::Result<T>,
+    ) -> Result<T, AppError> {
+        let index = {
+            let inner = self.lock();
+            let world = inner.world.as_ref().filter(|_| inner.session == session);
+            Arc::clone(&world.ok_or_else(no_world)?.index)
+        };
+        self.query(index, query)
+    }
+
+    fn query<T>(
+        &self,
+        index: Arc<Mutex<Index>>,
+        query: impl FnOnce(&mut Index) -> rusqlite::Result<T>,
+    ) -> Result<T, AppError> {
         let (answer, needs_worker) = {
             let mut index = lock_index(&index);
             (query(&mut index), index.needs_worker())

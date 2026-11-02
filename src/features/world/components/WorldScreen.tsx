@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
 import type { RecentWorld, TreeEntry } from "@/types/api";
 import { Button } from "@/ui/Button";
+import type { LinkAnchor } from "@/ui/editor-links";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
 import { Notice } from "@/ui/Notice";
@@ -61,13 +62,14 @@ export type QuickOpenPorts = {
 
 /**
  * What the assistant gets from the world's screen. `openPage` opens a page by the tab rules of the
- * tree; `flushActive` resolves once the active page's pending edits have saved or failed to;
- * `hasPage` answers from the loaded tree.
+ * tree, with the cursor at `at` if given; `flushActive` resolves once the active page's pending
+ * edits have saved or failed to; `hasPage` answers from the loaded tree.
  */
 export type AssistantPorts = {
   session: number;
   activePage: string | null;
-  openPage: (path: string, options: { newTab: boolean }) => void;
+  indexRevision: number;
+  openPage: (path: string, options: { newTab: boolean; at?: LinkAnchor }) => void;
   flushActive: () => Promise<void>;
   hasPage: (path: string) => boolean;
 };
@@ -269,7 +271,8 @@ export function WorldScreen({
   const assistantPorts: AssistantPorts = {
     session,
     activePage: active,
-    openPage: (path, { newTab }) => void openFromTree(path, { newTab }),
+    indexRevision,
+    openPage: (path, { newTab, at }) => void openFromTree(path, { newTab, at }),
     flushActive: async () => {
       const { active } = useWorldStore.getState();
       if (active !== null) await flush(active);

@@ -99,6 +99,7 @@ pub fn run() {
             settings::provider_test_cancel,
             assistant::assistant_send,
             assistant::assistant_stop,
+            assistant::assistant_links,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

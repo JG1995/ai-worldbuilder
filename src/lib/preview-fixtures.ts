@@ -768,8 +768,27 @@ function cannedAnswer(active: string | null) {
 }
 
 /**
+ * The pages a message's request carries: the active page, then each page a `[[link]]` in the
+ * message names, then each page whose name the message holds as whole words in any letter case,
+ * each once. An approximation for the preview: the core also resolves paths and aliases, folds
+ * accents, and adds the pages one link away and the pages whose text matches, within its budgets.
+ */
+function contextOf(open: PreviewWorld, active: string | null, message: string): ContextPage[] {
+  const isText = (path: string | null): path is string =>
+    path !== null && typeof open.pages[path] === "string";
+  const linked = linksOf(open, "", message).map((link) => link.path);
+  const wholeWords = (name: string) =>
+    new RegExp(`(^|[^\\p{L}\\p{N}])${escapedForPattern(name)}($|[^\\p{L}\\p{N}])`, "iu");
+  const named = Object.keys(open.pages)
+    .filter((path) => wholeWords(nameOf(path)).test(message))
+    .sort();
+  const paths = [...new Set([active, ...linked, ...named].filter(isText))];
+  return paths.map((path) => ({ path, partial: false }));
+}
+
+/**
  * Answers a message without a network. An approximation for the preview: the request carries
- * only the active page; the canned answer streams in chunks about 100 ms apart; a message
+ * the pages `contextOf` chooses; the canned answer streams in chunks about 100 ms apart; a message
  * `fail:<reason>`, with a `ProviderFailure` as the reason, fails for that reason with a sample
  * detail and provider message; conversations are kept in memory, and a retry is accepted whatever
  * the last answer was.
@@ -810,10 +829,8 @@ async function sendAnswer(
   const run: Answering = { stopped: false, wake: () => {}, ended, end };
   answering = run;
   try {
-    const page = active === null ? undefined : open.pages[active];
-    const pages: ContextPage[] =
-      active !== null && typeof page === "string" ? [{ path: active, partial: false }] : [];
-    onEvent({ kind: "context", conversation: id, pages, leftOut: 0 });
+    const pages = contextOf(open, active, message);
+    onEvent({ kind: "context", conversation: id, pages, leftOut: 0, indexing: false });
     let answer = "";
     const reason = providerFailures.find((failure) => message === `fail:${failure}`);
     if (reason) {
@@ -1026,6 +1043,12 @@ export const previewFixtures: Record<string, unknown> = {
   provider_test_cancel: () => null,
   // A streaming command: `invokeStreaming` calls it with the event handler too.
   assistant_send: sendAnswer,
+  // Resolves by page name only, as `links_in` does in the preview, from the world's top level.
+  assistant_links: (args?: InvokeArgs): EditorLinks => {
+    requireAi();
+    const { text } = args as { text: string };
+    return { state: "ready", links: linksOf(requireWorld(), "", text) };
+  },
   assistant_stop: async () => {
     requireAi();
     await stopAnswer();

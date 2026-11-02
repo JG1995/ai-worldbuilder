@@ -1,4 +1,5 @@
 import { type ReactNode, useState } from "react";
+import type { EditorLink } from "@/types/api";
 import { AssistantPane, type ChatMessage } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
 import { defaultAssistantWidth } from "@/ui/Shell";
@@ -102,13 +103,30 @@ function AssistantPaneFrame({
 
 const keshTor = { path: "Locations/Kesh Tor.md", partial: false, gone: false };
 
-/** A complete answer with its disclosure, then an answer still arriving. */
+const sampleAnswer =
+  "[[Brother Ketil]] keeps the shrine at [[Kesh Tor]], the only shade for a day's ride.\n\n- He guided Venn's caravan.\n- He is called *the old monk*.\n\nNo page tells of the [[Winter road]] yet.";
+
+/** The link to `target` in the sample answer, resolved to `path` when there is one. */
+function sampleLink(target: string, path: string | null): EditorLink {
+  const from = sampleAnswer.indexOf(`[[${target}]]`);
+  return {
+    from,
+    to: from + target.length + 4,
+    state: path ? "resolved" : "unresolved",
+    target,
+    path,
+    heading: null,
+    block: null,
+  };
+}
+
+/** A complete answer with its links and disclosure, then an answer still arriving. */
 const sampleConversation: ChatMessage[] = [
   { id: 1, role: "user", text: "Who keeps the shrine at Kesh Tor?" },
   {
     id: 2,
     role: "answer",
-    text: "[[Brother Ketil]] keeps the shrine at [[Kesh Tor]], the only shade for a day's ride.\n\n- He guided Venn's caravan.\n- He is called *the old monk*.",
+    text: sampleAnswer,
     state: "complete",
     context: {
       pages: [
@@ -117,8 +135,14 @@ const sampleConversation: ChatMessage[] = [
         { path: "Old notes.md", partial: false, gone: true },
       ],
       leftOut: 2,
+      indexing: true,
     },
     failure: null,
+    links: [
+      sampleLink("Brother Ketil", "Characters/Brother Ketil.md"),
+      sampleLink("Kesh Tor", "Locations/Kesh Tor.md"),
+      sampleLink("Winter road", null),
+    ],
   },
   { id: 3, role: "user", text: "And where does he go in winter?" },
   {
@@ -126,7 +150,7 @@ const sampleConversation: ChatMessage[] = [
     role: "answer",
     text: "The pages do not say where he",
     state: "streaming",
-    context: { pages: [keshTor], leftOut: 0 },
+    context: { pages: [keshTor], leftOut: 0, indexing: false },
     failure: null,
   },
 ];
@@ -139,7 +163,7 @@ const sampleEndings: ChatMessage[] = [
     role: "answer",
     text: "A glass storm strands the caravan at",
     state: "stopped",
-    context: { pages: [], leftOut: 0 },
+    context: { pages: [], leftOut: 0, indexing: false },
     failure: null,
   },
   { id: 3, role: "user", text: "Describe it again, briefly." },
@@ -148,7 +172,7 @@ const sampleEndings: ChatMessage[] = [
     role: "answer",
     text: "",
     state: "failed",
-    context: { pages: [keshTor], leftOut: 0 },
+    context: { pages: [keshTor], leftOut: 0, indexing: false },
     failure: {
       reason: "rate_limited",
       detail: null,
@@ -179,6 +203,8 @@ function AssistantChatDemo({
         onStop: () => onEvent("Stop"),
         onRetry: () => onEvent("Retry"),
         onOpenPage: (path, { newTab }) => onEvent(`Open ${path}${newTab ? " in a new tab" : ""}`),
+        onFollowLink: (link) => onEvent(`Follow [[${link.target}]]`),
+        onCopy: () => onEvent("Copy the answer"),
         refusal: null,
         announcement: "",
       }}

@@ -201,3 +201,42 @@ test("a rate-limited answer shows a warning with Retry, which answers again", as
   await expect(pane(page).getByRole("alert")).toHaveCount(1);
   await expect(pane(page).getByRole("alert").getByRole("button", { name: "Retry" })).toBeVisible();
 });
+
+// The canned answer links [[Brother Ketil]] and [[Kesh Tor]], two pages of the sample world.
+
+test("a page the message links is read, and Ctrl+click on a link in the answer opens its page in a new tab", async ({
+  page,
+}) => {
+  await openWithProvider(page);
+
+  await send(page, "Who keeps the shrine at [[Kesh Tor]]?");
+  await expect(pane(page).getByRole("button", { name: "Send" })).toBeVisible();
+  await pane(page).getByRole("button", { name: "Read 2 pages" }).click();
+  await expect(pane(page).getByRole("button", { name: "Campaign overview" })).toBeVisible();
+  await expect(pane(page).getByRole("button", { name: "Kesh Tor" })).toBeVisible();
+
+  const link = answer(page).locator(".cm-link", { hasText: "[[Kesh Tor]]" });
+  await link.click({ modifiers: ["Control"] });
+
+  await expect(page.getByRole("tab", { name: "Kesh Tor" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByRole("tab", { name: "Campaign overview" })).toBeVisible();
+});
+
+test("Copy puts the answer's Markdown on the clipboard", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openWithProvider(page);
+
+  await send(page, "What is the steppe like?");
+  await expect(pane(page).getByRole("button", { name: "Send" })).toBeVisible();
+  await pane(page).getByRole("button", { name: "Copy" }).click();
+
+  await expect(pane(page).getByText("Copied", { exact: true })).toBeAttached();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toMatch(/^The pages I read say this about \[\[Campaign overview\]\]:\n\n- /);
+  expect(copied).toMatch(
+    /\[\[Kesh Tor\]\], the only shade for a day's ride\.\n\nAsk about another page to compare them\.$/,
+  );
+});

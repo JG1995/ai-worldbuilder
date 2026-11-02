@@ -2,7 +2,7 @@
 //! chosen pages, then the earlier messages that fit their budget, then the new message.
 
 use super::ContextPage;
-use super::context::{ChosenPage, EARLIER_LIMIT};
+use super::context::{Context, EARLIER_LIMIT};
 use super::store::Message;
 use crate::providers::{ChatMessage, Role};
 
@@ -11,17 +11,21 @@ The pages that follow are the world's established canon: rely on them, and say s
 not answer something. When you name a page of the world, write its name as a link in double \
 square brackets, such as [[Saltmere]]. You cannot change pages; only the user can.";
 
-/// A request's messages, and what its context event tells: the pages it carries and how many
-/// earlier messages it leaves out. Both come from this one value.
+/// A request's messages, and what its context event tells: the pages it carries, how many earlier
+/// messages it leaves out, and whether the index was still being built. All come from this one
+/// value.
 #[derive(Debug)]
 pub struct Request {
     pub messages: Vec<ChatMessage>,
     pub pages: Vec<ContextPage>,
     pub left_out: u32,
+    pub indexing: bool,
 }
 
-/// The request for `new`, sent in the world `world_name` with `pages`, after `earlier` messages.
-pub fn build(world_name: &str, pages: &[ChosenPage], earlier: &[Message], new: &str) -> Request {
+/// The request for `new`, sent in the world `world_name` with the pages of `context`, after
+/// `earlier` messages.
+pub fn build(world_name: &str, context: &Context, earlier: &[Message], new: &str) -> Request {
+    let pages = &context.pages;
     let mut system = format!("{INSTRUCTIONS}\n\nThe world: {world_name}");
     for page in pages {
         let read = match page.partial {
@@ -64,6 +68,7 @@ pub fn build(world_name: &str, pages: &[ChosenPage], earlier: &[Message], new: &
             })
             .collect(),
         left_out: (earlier.len() - kept.len()) as u32,
+        indexing: context.indexing,
     }
 }
 
@@ -102,7 +107,7 @@ mod tests {
             message("🜁".repeat(2_000), None),
         ];
 
-        let request = build("Kesh", &[], &earlier, "Now?");
+        let request = build("Kesh", &Context::default(), &earlier, "Now?");
 
         let roles: Vec<(Role, char)> = request
             .messages
@@ -136,7 +141,7 @@ mod tests {
             message(String::new(), Some(AnswerState::Stopped)),
         ];
 
-        let request = build("Kesh", &[], &earlier, "Now?");
+        let request = build("Kesh", &Context::default(), &earlier, "Now?");
 
         let sent: Vec<(Role, &str)> = request.messages[1..]
             .iter()

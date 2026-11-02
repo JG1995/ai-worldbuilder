@@ -1,6 +1,6 @@
 //! The `assistant` area: answers a message about the open world with a reply streamed from the
-//! saved text provider, with the active page as context, and keeps each world session's
-//! conversations.
+//! saved text provider, with the pages of the world that matter to it as context, and keeps each
+//! world session's conversations.
 //!
 //! One answer runs at a time. Its entry in `AssistantState` holds its stop mark, the abort of its
 //! request and the text received so far, so stopping it never loses that text. It goes through
@@ -26,6 +26,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use crate::error::{AppError, ErrorKind, guard};
+use crate::index::EditorLinks;
 use crate::providers::{self, ChatMessage, ProviderFailure, StreamEnd};
 use crate::settings::{self, Abort, PreparedRequest, RequestGuard, SettingsState};
 use crate::world::{self, WorldState};
@@ -51,11 +52,13 @@ pub struct ContextPage {
 )]
 pub enum AnswerEvent {
     /// The request is leaving with these pages, in the order chosen, and without `leftOut` earlier
-    /// messages of the conversation. Sent once, only when the request starts.
+    /// messages of the conversation; `indexing` when the index was still being built as the pages
+    /// were chosen. Sent once, only when the request starts.
     Context {
         conversation: i64,
         pages: Vec<ContextPage>,
         left_out: u32,
+        indexing: bool,
     },
     /// The next piece of the answer's text.
     Text { delta: String },
@@ -442,8 +445,8 @@ pub(crate) async fn send<S: Services>(
         earlier,
     } = blocking(&services, move |services| begin(services, outgoing)).await?;
     let request = blocking(&services, move |services| {
-        let pages = context::choose(services.world(), session, active.as_deref());
-        Ok(request::build(&world_name, &pages, &earlier, &text))
+        let context = context::choose(services.world(), session, active.as_deref(), &text);
+        Ok(request::build(&world_name, &context, &earlier, &text))
     })
     .await?;
     let read = prepared.clone();
@@ -560,6 +563,7 @@ impl Start {
             messages,
             pages,
             left_out,
+            indexing,
         } = request;
         let mut task = None;
         let started = services.settings().start_request(prepared, || {
@@ -572,6 +576,7 @@ impl Start {
                         conversation: self.conversation,
                         pages: pages.clone(),
                         left_out,
+                        indexing,
                     });
                     let spawned = tauri::async_runtime::spawn(stream(
                         services.clone(),
@@ -642,6 +647,18 @@ pub(crate) async fn stop<S: Services>(services: S) -> Result<(), AppError> {
     .await
 }
 
+/// Refuses while AI is off; otherwise the links of `text`, an answer's text, each with the page it
+/// resolves to as on a page at the world's top level, once the index is built.
+pub(crate) async fn links<S: Services>(services: S, text: String) -> Result<EditorLinks, AppError> {
+    blocking(&services, move |services| {
+        if !services.settings().ai_on() {
+            return Err(settings::ai_off());
+        }
+        services.world().links_in("", &text)
+    })
+    .await
+}
+
 /// Runs `work` on Tauri's blocking pool, inside `guard`.
 async fn blocking<S: Services, T: Send + 'static>(
     services: &S,
@@ -667,8 +684,8 @@ fn now() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// Answers a message about the open world with the active page as context, streaming the answer's
-/// events to `on_event`.
+/// Answers a message about the open world with the pages of the world that matter to it as
+/// context, streaming the answer's events to `on_event`.
 #[tauri::command]
 pub async fn assistant_send(
     app: AppHandle,
@@ -693,9 +710,16 @@ pub async fn assistant_stop(app: AppHandle) -> Result<(), AppError> {
     stop(app).await
 }
 
+/// The links of an answer's text, resolved as on a page at the world's top level.
+#[tauri::command]
+pub async fn assistant_links(app: AppHandle, text: String) -> Result<EditorLinks, AppError> {
+    links(app, text).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::{BuildState, EditorLink, LinkState};
     use crate::providers::test_support::{Server, answer, stream_head};
     use crate::secrets::test_support::{KEY, MockKeychain};
     use serde_json::{Value, json};
@@ -765,13 +789,27 @@ mod tests {
                 assistant: AssistantState::default(),
             };
             states.world.open(world.path().to_path_buf()).unwrap();
-            Self {
+            let fixture = Self {
                 services: TestServices(Arc::new(states)),
                 keychain,
                 server,
                 world,
                 _data: data,
-            }
+            };
+            fixture.indexed();
+            fixture
+        }
+
+        /// Waits until the open world's index is built, so the pages it chooses do not depend on
+        /// how far the build is.
+        fn indexed(&self) {
+            let world = self.services.world();
+            let session = world.current().unwrap().session;
+            wait_until("the index", || {
+                world
+                    .query_index_in(session, |index| Ok(index.state() == &BuildState::Ready))
+                    .unwrap()
+            });
         }
 
         fn save_provider(&self) {
@@ -995,6 +1033,7 @@ mod tests {
                     "conversation": conversation,
                     "pages": [{ "path": PAGE, "partial": true }],
                     "leftOut": 0,
+                    "indexing": false,
                 }),
                 json!({ "kind": "text", "delta": "A port." }),
             ]
@@ -1250,5 +1289,92 @@ mod tests {
         let (refused, _) = fixture.send(Some(conversation), "Still there?", None);
         assert_eq!(kind(refused), ErrorKind::NotFound);
         assert_eq!(fixture.server.requests().len(), 1);
+    }
+
+    impl Fixture {
+        /// Adds `pages`, as (path, text), to the world, and opens it again once they are indexed.
+        fn add_pages(&self, pages: &[(&str, &str)]) {
+            for (path, text) in pages {
+                let file = self.world.path().join(path);
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, text).unwrap();
+            }
+            self.reopen_world();
+            self.indexed();
+        }
+    }
+
+    #[test]
+    fn the_request_carries_exactly_the_pages_its_event_lists_and_no_other_page() {
+        let fixture = Fixture::new(answering("A port."));
+        fixture.add_pages(&[
+            ("Kesh Tor.md", "Brother Ketil keeps the tor."),
+            ("People/Mirela.md", "Mirela sails to [[Saltmere]]."),
+            ("Secret.md", "Hidden lore: the moon is glass."),
+        ]);
+
+        let (end, events) = fixture.send(None, "What about [[Kesh Tor]]?", Some(PAGE));
+
+        assert!(matches!(end, Ok(AnswerEnd::Complete { .. })), "{end:?}");
+        // The active page, the page the message links, then the page that links to the active one.
+        let listed = [PAGE, "Kesh Tor.md", "People/Mirela.md"];
+        let pages: Vec<Value> = listed
+            .iter()
+            .map(|path| json!({ "path": path, "partial": false }))
+            .collect();
+        assert_eq!(events[0]["pages"], json!(pages));
+        assert_eq!(events[0]["indexing"], json!(false));
+        let body = fixture.bodies().pop().unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(system.matches("\n--- Page ").count(), listed.len());
+        for path in listed {
+            let text = fs::read_to_string(fixture.world.path().join(path)).unwrap();
+            assert!(
+                system.contains(&format!("--- Page {path} ---\n{text}")),
+                "{path}"
+            );
+        }
+        assert!(!system.contains("Secret"));
+        assert!(!system.contains("Hidden lore"));
+    }
+
+    #[test]
+    fn an_answer_s_links_resolve_from_the_world_s_top_level_only_while_ai_is_on() {
+        let fixture = Fixture::new(answering("Hi"));
+        fixture.add_pages(&[("Saltmere.md", "The top-level Saltmere.")]);
+        let links_of = |text: &str| block_on(links(fixture.services.clone(), text.to_owned()));
+
+        let EditorLinks::Ready { links } =
+            links_of("See [[Saltmere#Docks]], not [[Nowhere]].").unwrap()
+        else {
+            panic!("the index is built");
+        };
+
+        // A page in `Places/` would prefer `Places/Saltmere.md`.
+        assert_eq!(
+            links,
+            [
+                EditorLink {
+                    from: 4,
+                    to: 22,
+                    state: LinkState::Resolved,
+                    target: "Saltmere".to_owned(),
+                    path: Some("Saltmere.md".to_owned()),
+                    heading: Some("Docks".to_owned()),
+                    block: None,
+                },
+                EditorLink {
+                    from: 28,
+                    to: 39,
+                    state: LinkState::Unresolved,
+                    target: "Nowhere".to_owned(),
+                    path: None,
+                    heading: None,
+                    block: None,
+                },
+            ]
+        );
+        fixture.settings().set_ai(false).unwrap();
+        assert_eq!(links_of("[[Saltmere]]").unwrap_err().kind, ErrorKind::AiOff);
     }
 }
