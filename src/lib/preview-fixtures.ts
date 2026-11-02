@@ -3,9 +3,12 @@
 // check if the marker below, which every version token carries, appears in a production bundle.
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
+  AnswerEnd,
+  AnswerEvent,
   Backlink,
   Backlinks,
   Comparison,
+  ContextPage,
   DiffLine,
   EditorLink,
   EditorLinks,
@@ -681,6 +684,7 @@ function saveProvider(args: InvokeArgs | undefined): ProviderSaved {
   } else if (typed) storage = "keychain";
   else if (previous && new URL(previous.baseUrl).origin === url.origin) storage = previous.key;
   else storage = "none";
+  void stopAnswer();
   previewSettings = {
     ai: true,
     textProvider: { baseUrl: trimmed, model: model.trim(), key: storage, host: url.host },
@@ -688,7 +692,7 @@ function saveProvider(args: InvokeArgs | undefined): ProviderSaved {
   return { state: "saved", settings: previewSettings };
 }
 
-const testFailures: ProviderFailure[] = [
+const providerFailures: ProviderFailure[] = [
   "unreachable",
   "insecure",
   "timeout",
@@ -701,6 +705,7 @@ const testFailures: ProviderFailure[] = [
   "redirected",
   "invalid_reply",
   "key_unreadable",
+  "interrupted",
 ];
 
 /**
@@ -713,7 +718,7 @@ async function testProvider(): Promise<TestOutcome> {
   const provider = previewSettings.textProvider;
   if (!provider) throw { kind: "not_found", message: "No provider is saved." };
   await new Promise((resolve) => setTimeout(resolve, 600));
-  const reason = testFailures.find((failure) => provider.model === `fail:${failure}`);
+  const reason = providerFailures.find((failure) => provider.model === `fail:${failure}`);
   if (!reason) return { state: "connected" };
   return {
     state: "failed",
@@ -721,6 +726,119 @@ async function testProvider(): Promise<TestOutcome> {
     detail: "Sample detail from the preview",
     providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
   };
+}
+
+/** The answer the preview is streaming; a stop wakes it from its pause and waits for its end. */
+type Answering = { stopped: boolean; wake: () => void; ended: Promise<void>; end: () => void };
+let answering: Answering | null = null;
+
+/** The preview's conversations hold only their last message, which a retry sends again. */
+const lastMessages = new Map<number, string>();
+let nextConversation = 1;
+
+/** Waits `ms` milliseconds, or until a stop. */
+function pause(run: Answering, ms: number) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    run.wake = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+}
+
+/** Stops the answer being streamed, if any, once it has ended. */
+async function stopAnswer() {
+  if (!answering) return;
+  answering.stopped = true;
+  answering.wake();
+  await answering.ended;
+}
+
+/** The canned answer, in chunks of a few words, naming the active page and linking a page. */
+function cannedAnswer(active: string | null) {
+  const about = active ? `[[${nameOf(active)}]]` : "this world";
+  const text = `The pages I read say this about ${about}:\n\n- Caravans cross the steppe by night, when the glass is cool.\n- [[Brother Ketil]] keeps the shrine at [[Kesh Tor]], the only shade for a day's ride.\n\nAsk about another page to compare them.`;
+  const words = text.match(/\S+\s*/g) ?? [];
+  const chunks: string[] = [];
+  for (let start = 0; start < words.length; start += 3) {
+    chunks.push(words.slice(start, start + 3).join(""));
+  }
+  return chunks;
+}
+
+/**
+ * Answers a message without a network. An approximation for the preview: the request carries
+ * only the active page; the canned answer streams in chunks about 100 ms apart; a message
+ * `fail:<reason>`, with a `ProviderFailure` as the reason, fails for that reason with a sample
+ * detail and provider message; conversations are kept in memory, and a retry is accepted whatever
+ * the last answer was.
+ */
+async function sendAnswer(
+  args: Record<string, unknown>,
+  onEvent: (event: AnswerEvent) => void,
+): Promise<AnswerEnd> {
+  requireAi();
+  const open = requireWorld();
+  if (!previewSettings.textProvider) throw { kind: "not_found", message: "No provider is saved." };
+  if (answering) throw { kind: "conflict", message: "An answer is already running." };
+  const { conversation, text, active, retry } = args as {
+    conversation: number | null;
+    text: string;
+    active: string | null;
+    retry: boolean;
+  };
+  let id: number;
+  let message: string | undefined;
+  if (retry) {
+    message = conversation === null ? undefined : lastMessages.get(conversation);
+    if (conversation === null || message === undefined) {
+      throw { kind: "not_found", message: "There is no message to answer again." };
+    }
+    id = conversation;
+  } else {
+    if (text.trim() === "") throw { kind: "invalid_name", message: "The message is empty." };
+    id = conversation ?? nextConversation++;
+    message = text;
+    lastMessages.set(id, text);
+  }
+
+  let end = () => {};
+  const ended = new Promise<void>((resolve) => {
+    end = resolve;
+  });
+  const run: Answering = { stopped: false, wake: () => {}, ended, end };
+  answering = run;
+  try {
+    const page = active === null ? undefined : open.pages[active];
+    const pages: ContextPage[] =
+      active !== null && typeof page === "string" ? [{ path: active, partial: false }] : [];
+    onEvent({ kind: "context", conversation: id, pages, leftOut: 0 });
+    let answer = "";
+    const reason = providerFailures.find((failure) => message === `fail:${failure}`);
+    if (reason) {
+      await pause(run, 300);
+      if (run.stopped) return { state: "stopped", conversation: id, text: answer };
+      return {
+        state: "failed",
+        conversation: id,
+        text: answer,
+        reason,
+        detail: "Sample detail from the preview",
+        providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
+      };
+    }
+    for (const delta of cannedAnswer(active)) {
+      await pause(run, 100);
+      if (run.stopped) return { state: "stopped", conversation: id, text: answer };
+      answer += delta;
+      onEvent({ kind: "text", delta });
+    }
+    return { state: "complete", conversation: id, text: answer };
+  } finally {
+    answering = null;
+    run.end();
+  }
 }
 
 /** Sample command results: values, or functions of the arguments that throw like the core. */
@@ -890,6 +1008,7 @@ export const previewFixtures: Record<string, unknown> = {
   settings_get: (): Settings => previewSettings,
   settings_ai_set: (args?: InvokeArgs): Settings => {
     const { on } = args as { on: boolean };
+    if (!on) void stopAnswer();
     previewSettings = { ...previewSettings, ai: on };
     return previewSettings;
   },
@@ -898,10 +1017,18 @@ export const previewFixtures: Record<string, unknown> = {
     requireAi();
     const provider = previewSettings.textProvider;
     if (provider) {
+      void stopAnswer();
       previewSettings = { ...previewSettings, textProvider: { ...provider, key: "none" } };
     }
     return previewSettings;
   },
   provider_test: () => testProvider(),
   provider_test_cancel: () => null,
+  // A streaming command: `invokeStreaming` calls it with the event handler too.
+  assistant_send: sendAnswer,
+  assistant_stop: async () => {
+    requireAi();
+    await stopAnswer();
+    return null;
+  },
 };

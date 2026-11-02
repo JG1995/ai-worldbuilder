@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useEffectEvent } from "react";
+import { Assistant } from "@/features/assistant/components/Assistant";
 import { settingsGet, settingsGetKey } from "@/features/settings/api/commands";
 import type { WorldScreenParts } from "@/features/world/components/WorldScreen";
-import { AssistantPane } from "@/ui/AssistantPane";
 import { assistantSideQuery, Shell } from "@/ui/Shell";
 
 type WorldLayoutProps = WorldScreenParts & {
@@ -10,10 +10,16 @@ type WorldLayoutProps = WorldScreenParts & {
 };
 
 /**
- * The open world's screen: its parts in the shell, with the assistant pane once the settings have
- * loaded with AI on. While AI is on, Ctrl/Cmd+Shift+A opens and closes the pane, as its button does.
+ * The open world's screen: its parts in the shell, with the assistant once the settings have loaded
+ * with AI on; a new world session starts it anew. While AI is on, Ctrl/Cmd+Shift+A opens and
+ * closes the pane, as its button does.
  */
-export function WorldLayout({ onOpenSettings, changingWorld, ...parts }: WorldLayoutProps) {
+export function WorldLayout({
+  onOpenSettings,
+  changingWorld,
+  assistantPorts,
+  ...parts
+}: WorldLayoutProps) {
   const settings = useQuery({ queryKey: settingsGetKey, queryFn: settingsGet });
   const ai = settings.data?.ai === true;
   const provider = settings.data?.textProvider;
@@ -41,7 +47,9 @@ export function WorldLayout({ onOpenSettings, changingWorld, ...parts }: WorldLa
       {...parts}
       assistant={
         ai ? (
-          <AssistantPane
+          <Assistant
+            key={assistantPorts.session}
+            ports={assistantPorts}
             model={provider?.model}
             host={provider?.host}
             onOpenSettings={onOpenSettings}

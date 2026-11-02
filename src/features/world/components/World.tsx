@@ -49,15 +49,20 @@ type WorldProps = {
   onOpenSettings?: () => void;
   /** Lays out the open world's screen from the parts it supplies. */
   layout: (parts: WorldScreenParts) => ReactNode;
+  /**
+   * Runs first in every world change and before the window closes, such as to stop work that
+   * belongs to the open world. The change waits for it; a rejection does not stop the change.
+   */
+  beforeWorldChange?: () => Promise<void>;
 };
 
 /**
  * The welcome screen or the open world, and the flows that open, switch and close worlds and the
  * window. At launch the world that was open last reopens. Before the world changes or the window
- * closes, every open page saves, with the failed-save dialog for each one that cannot, and then
- * the workspace saves.
+ * closes, `beforeWorldChange` runs, every open page saves, with the failed-save dialog for each one
+ * that cannot, and then the workspace saves.
  */
-export function World({ quickOpen, onOpenSettings, layout }: WorldProps) {
+export function World({ quickOpen, onOpenSettings, layout, beforeWorldChange }: WorldProps) {
   const world = useWorldStore((store) => store.world);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
@@ -113,6 +118,7 @@ export function World({ quickOpen, onOpenSettings, layout }: WorldProps) {
     if (useWorldStore.getState().changingWorld) return;
     setChangingWorld(true);
     try {
+      await beforeWorldChange?.().catch(() => {});
       if (!(await confirmAllSaved())) return;
       await saveWorkspace();
       const release = holdSaving();

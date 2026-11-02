@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import { AssistantPane } from "@/ui/AssistantPane";
+import { AssistantPane, type ChatMessage } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
 import { defaultAssistantWidth } from "@/ui/Shell";
 import { type Tab, TabStrip } from "@/ui/TabStrip";
@@ -78,17 +78,111 @@ function TabStripDemo({
 }
 
 /** The assistant pane's content at its default width, as the shell shows it. */
-function AssistantPaneFrame({ title, children }: { title: string; children: ReactNode }) {
+function AssistantPaneFrame({
+  title,
+  tall = false,
+  children,
+}: {
+  title: string;
+  tall?: boolean;
+  children: ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-2">
       <h3 className="ui-small text-text-muted">{title}</h3>
       <div
         style={{ width: defaultAssistantWidth }}
-        className="flex h-60 flex-col border border-divider bg-page"
+        className={`flex flex-col border border-divider bg-page ${tall ? "h-120" : "h-60"}`}
       >
         {children}
       </div>
     </div>
+  );
+}
+
+const keshTor = { path: "Locations/Kesh Tor.md", partial: false, gone: false };
+
+/** A complete answer with its disclosure, then an answer still arriving. */
+const sampleConversation: ChatMessage[] = [
+  { id: 1, role: "user", text: "Who keeps the shrine at Kesh Tor?" },
+  {
+    id: 2,
+    role: "answer",
+    text: "[[Brother Ketil]] keeps the shrine at [[Kesh Tor]], the only shade for a day's ride.\n\n- He guided Venn's caravan.\n- He is called *the old monk*.",
+    state: "complete",
+    context: {
+      pages: [
+        keshTor,
+        { path: "Characters/Brother Ketil.md", partial: true, gone: false },
+        { path: "Old notes.md", partial: false, gone: true },
+      ],
+      leftOut: 2,
+    },
+    failure: null,
+  },
+  { id: 3, role: "user", text: "And where does he go in winter?" },
+  {
+    id: 4,
+    role: "answer",
+    text: "The pages do not say where he",
+    state: "streaming",
+    context: { pages: [keshTor], leftOut: 0 },
+    failure: null,
+  },
+];
+
+/** A stopped answer, then one that failed because the provider limits requests. */
+const sampleEndings: ChatMessage[] = [
+  { id: 1, role: "user", text: "Describe the glass storm." },
+  {
+    id: 2,
+    role: "answer",
+    text: "A glass storm strands the caravan at",
+    state: "stopped",
+    context: { pages: [], leftOut: 0 },
+    failure: null,
+  },
+  { id: 3, role: "user", text: "Describe it again, briefly." },
+  {
+    id: 4,
+    role: "answer",
+    text: "",
+    state: "failed",
+    context: { pages: [keshTor], leftOut: 0 },
+    failure: {
+      reason: "rate_limited",
+      detail: null,
+      providerMessage: "Rate limit exceeded: 20 requests per minute.",
+    },
+  },
+];
+
+/** The pane with a conversation, its composer holding a local draft. */
+function AssistantChatDemo({
+  messages,
+  onEvent,
+}: {
+  messages: ChatMessage[];
+  onEvent: (event: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  return (
+    <AssistantPane
+      model="mistral-small-latest"
+      host="api.mistral.ai"
+      onOpenSettings={() => onEvent("Open Settings")}
+      chat={{
+        messages,
+        draft,
+        onDraftChange: setDraft,
+        onSend: () => onEvent(`Send "${draft}"`),
+        onStop: () => onEvent("Stop"),
+        onRetry: () => onEvent("Retry"),
+        onOpenPage: (path, { newTab }) => onEvent(`Open ${path}${newTab ? " in a new tab" : ""}`),
+        refusal: null,
+        announcement: "",
+      }}
+    />
   );
 }
 
@@ -129,7 +223,7 @@ export function ShellSections() {
       </Section>
       <Section
         title="Assistant pane"
-        use="The pane's content: its header, then the notice that asks for a provider, or the explanation of an empty conversation, which names where messages go."
+        use="The pane's content: its header, then the notice that asks for a provider, or the explanation of an empty conversation, which names where messages go; the conversation, with each answer's Read N pages disclosure, its marks and failures; and the composer, where Enter sends and Send becomes Stop while an answer arrives."
       >
         <div className="flex flex-wrap gap-4">
           <AssistantPaneFrame title="No provider saved">
@@ -141,6 +235,12 @@ export function ShellSections() {
               host="api.mistral.ai"
               onOpenSettings={() => setEvent("Open Settings")}
             />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="An answer arriving" tall>
+            <AssistantChatDemo messages={sampleConversation} onEvent={setEvent} />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="A stopped answer and a failure" tall>
+            <AssistantChatDemo messages={sampleEndings} onEvent={setEvent} />
           </AssistantPaneFrame>
         </div>
         <p className="ui text-text-muted">Last event: {event}</p>

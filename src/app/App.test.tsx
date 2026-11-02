@@ -1,7 +1,9 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { answerChannel } from "@/features/assistant/api/test-ipc";
 import { mockWorldIpc, testWorld } from "@/features/world/api/test-ipc";
 import { useWorldStore } from "@/features/world/stores/world-store";
+import type { AnswerEvent } from "@/types/api";
 import { App } from "./App";
 
 it("launches on the welcome screen when the core has no world to reopen", async () => {
@@ -86,8 +88,12 @@ describe("the assistant", () => {
   });
 
   /** Opens the test world, with its assistant's side pane closed, under these settings. */
-  async function openWorld(settings: () => unknown) {
+  async function openWorld(
+    settings: () => unknown,
+    overrides: Record<string, (args: Record<string, unknown>) => unknown> = {},
+  ) {
     const calls = mockWorldIpc({
+      ...overrides,
       settings_get: settings,
       world_open: () => ({
         ...testWorld,
@@ -98,7 +104,18 @@ describe("the assistant", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));
     await screen.findByRole("tree");
     await waitFor(() => expect(calls.map(({ command }) => command)).toContain("settings_get"));
+    return calls;
   }
+
+  const withProvider = () => ({
+    ai: true,
+    textProvider: {
+      baseUrl: "https://api.example.com/v1",
+      model: "mistral-small",
+      key: "none",
+      host: "api.example.com",
+    },
+  });
 
   const pressShortcut = () =>
     fireEvent.keyDown(document.body, { key: "A", ctrlKey: true, shiftKey: true });
@@ -124,6 +141,55 @@ describe("the assistant", () => {
     expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
     // Only the file tree's pane.
     expect(screen.getAllByRole("complementary", { hidden: true })).toHaveLength(1);
+  });
+
+  it("focuses the composer when the pane opens with a provider saved", async () => {
+    await openWorld(withProvider);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Assistant" }));
+
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus();
+  });
+
+  it("keeps a streaming answer and Stop while the pane is closed and opened again", async () => {
+    let send: (event: AnswerEvent) => void = () => {};
+    await openWorld(withProvider, {
+      assistant_send: (args) => {
+        send = answerChannel(args);
+        return new Promise(() => {});
+      },
+    });
+    const button = await screen.findByRole("button", { name: "Assistant" });
+    fireEvent.click(button);
+    const message = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(message, { target: { value: "Who lives at Kesh Tor?" } });
+    fireEvent.keyDown(message, { key: "Enter" });
+    await screen.findByRole("button", { name: "Stop" });
+    act(() => send({ kind: "context", conversation: 1, pages: [], leftOut: 0 }));
+    act(() => send({ kind: "text", delta: "Brother Ketil" }));
+
+    fireEvent.click(button);
+    expect(screen.queryByRole("complementary", { name: "Assistant" })).toBeNull();
+    act(() => send({ kind: "text", delta: " keeps the shrine." }));
+    fireEvent.click(button);
+
+    const pane = screen.getByRole("complementary", { name: "Assistant" });
+    expect(within(pane).getByRole("textbox", { name: "Answer" })).toHaveTextContent(
+      "Brother Ketil keeps the shrine.",
+    );
+    expect(within(pane).getByRole("button", { name: "Stop" })).toBeInTheDocument();
+  });
+
+  it("stops a running answer before the world closes", async () => {
+    const calls = await openWorld(withProvider, { assistant_stop: () => null });
+
+    fireEvent.click(screen.getByRole("button", { name: "World menu" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Close world" }));
+
+    await screen.findByRole("button", { name: "Open world…" });
+    const commands = calls.map(({ command }) => command);
+    expect(commands.lastIndexOf("assistant_stop")).toBeLessThan(commands.indexOf("world_close"));
+    expect(commands.lastIndexOf("assistant_stop")).toBeGreaterThan(commands.indexOf("world_open"));
   });
 
   it("has no button while the settings load", async () => {

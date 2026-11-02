@@ -186,6 +186,13 @@
   line-height: 1.65;
 }
 
+@utility assistant {
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
 @utility ui {
   font-family: var(--font-text);
   font-size: 14px;

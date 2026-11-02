@@ -1,7 +1,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { describe, expect, it, vi } from "vitest";
-import { invokeCommand, listenEvent } from "./ipc";
+import { invokeCommand, invokeStreaming, listenEvent } from "./ipc";
 
 vi.mock("./preview-fixtures", () => ({
   previewFixtures: {
@@ -9,6 +9,12 @@ vi.mock("./preview-fixtures", () => ({
     sample_echo: (args: unknown) => ({ received: args }),
     sample_failure: () => {
       throw { kind: "not_found", message: "The page or folder does not exist." };
+    },
+    sample_stream: async (args: unknown, onEvent: (event: unknown) => void) => {
+      onEvent("first");
+      await Promise.resolve();
+      onEvent("second");
+      return { received: args };
     },
   },
 }));
@@ -76,6 +82,53 @@ describe("invokeCommand in the browser preview", () => {
       kind: "ipc",
       message: expect.stringContaining("world_create"),
     });
+  });
+});
+
+/** Sends `messages` on the channel a command received as `onEvent`, as the core does. */
+function sendOnChannel(channel: unknown, messages: unknown[]) {
+  const { id } = channel as { id: number };
+  const internals = (window as unknown as { __TAURI_INTERNALS__: { runCallback: RunCallback } })
+    .__TAURI_INTERNALS__;
+  messages.forEach((message, index) => {
+    internals.runCallback(id, { index, message });
+  });
+}
+type RunCallback = (id: number, data: unknown) => void;
+
+describe("invokeStreaming", () => {
+  it("passes a channel as onEvent inside Tauri, delivers its messages in order and resolves with the result", async () => {
+    mockTauri((command, args) => {
+      const { onEvent, ...rest } = args as { onEvent: unknown };
+      sendOnChannel(onEvent, ["first", "second"]);
+      return { command, args: rest };
+    });
+    const events: unknown[] = [];
+
+    await expect(
+      invokeStreaming("assistant_send", { text: "Hello" }, (event) => events.push(event)),
+    ).resolves.toEqual({ command: "assistant_send", args: { text: "Hello" } });
+    expect(events).toEqual(["first", "second"]);
+  });
+
+  it("turns a rejection inside Tauri into an IpcError", async () => {
+    mockTauri(() => {
+      throw { kind: "conflict", message: "An answer is already running." };
+    });
+
+    await expect(invokeStreaming("assistant_send", {}, () => {})).rejects.toMatchObject({
+      name: "IpcError",
+      kind: "conflict",
+    });
+  });
+
+  it("calls a preview fixture with the arguments and the event handler", async () => {
+    const events: unknown[] = [];
+
+    await expect(
+      invokeStreaming("sample_stream", { text: "Hello" }, (event) => events.push(event)),
+    ).resolves.toEqual({ received: { text: "Hello" } });
+    expect(events).toEqual(["first", "second"]);
   });
 });
 

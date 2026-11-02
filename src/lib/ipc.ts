@@ -1,4 +1,4 @@
-import { type InvokeArgs, invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, type InvokeArgs, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ErrorKind } from "@/types/api";
 
@@ -25,12 +25,8 @@ export async function invokeCommand<T>(name: string, args?: InvokeArgs): Promise
   }
 
   if (import.meta.env.DEV) {
-    const { previewFixtures } = await import("./preview-fixtures");
-    if (!Object.hasOwn(previewFixtures, name)) {
-      throw new IpcError("ipc", `The browser preview has no sample data for command "${name}".`);
-    }
     // A fixture is a value, or a function of the arguments that may throw like the core.
-    const fixture = previewFixtures[name];
+    const fixture = await previewFixture(name);
     try {
       return (typeof fixture === "function" ? await fixture(args) : fixture) as T;
     } catch (rejection) {
@@ -38,8 +34,54 @@ export async function invokeCommand<T>(name: string, args?: InvokeArgs): Promise
     }
   }
 
-  throw new IpcError("ipc", `Command "${name}" is only available in the Grimoire.md app.`);
+  throw unavailable(name);
 }
+
+/**
+ * Calls a Rust command that sends events while it runs: each message on the channel it receives as
+ * `onEvent` goes to `onEvent`, in the order sent. Resolves with the command's result; every
+ * rejection is an `IpcError`. In the browser preview, the command's fixture is a function of the
+ * arguments and `onEvent`.
+ */
+export async function invokeStreaming<T, E>(
+  name: string,
+  args: Record<string, unknown>,
+  onEvent: (event: E) => void,
+): Promise<T> {
+  if (isTauri()) {
+    try {
+      return await invoke<T>(name, { ...args, onEvent: new Channel<E>(onEvent) });
+    } catch (rejection) {
+      throw toIpcError(rejection);
+    }
+  }
+
+  if (import.meta.env.DEV) {
+    const fixture = (await previewFixture(name)) as (
+      args: Record<string, unknown>,
+      onEvent: (event: E) => void,
+    ) => Promise<T>;
+    try {
+      return await fixture(args, onEvent);
+    } catch (rejection) {
+      throw toIpcError(rejection);
+    }
+  }
+
+  throw unavailable(name);
+}
+
+/** The browser preview's fixture for `name`. Development builds only. */
+async function previewFixture(name: string) {
+  const { previewFixtures } = await import("./preview-fixtures");
+  if (!Object.hasOwn(previewFixtures, name)) {
+    throw new IpcError("ipc", `The browser preview has no sample data for command "${name}".`);
+  }
+  return previewFixtures[name];
+}
+
+const unavailable = (name: string) =>
+  new IpcError("ipc", `Command "${name}" is only available in the Grimoire.md app.`);
 
 /**
  * Calls `handler` with the payload of each event `name` the Rust core sends, until the returned
