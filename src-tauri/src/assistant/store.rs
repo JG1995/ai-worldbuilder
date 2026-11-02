@@ -3,32 +3,51 @@
 //! database by `history::file_name`. The file records the world folder's path too, so two paths
 //! with the same hash never share their conversations.
 //!
-//! Format 1, named by `PRAGMA user_version`:
+//! Format 2, named by `PRAGMA user_version`:
 //!
 //! - `meta`: one row, the world folder's path.
 //! - `conversations`: each conversation's `title`, from its first message, and the times it was
 //!   `created` and `updated` by its latest message, in seconds since the Unix epoch.
 //! - `messages`: each message of a conversation in order (`id`): its `role` (`user` or
 //!   `assistant`), `text` and `time`, and for an answer how it ended (`state`: `complete`,
-//!   `stopped` or `cut_off`), how many earlier messages its request `left_out`, and whether the
-//!   world was still `indexing` as its pages were chosen.
+//!   `stopped` or `cut_off`), how many earlier messages its request `left_out`, whether the
+//!   world was still `indexing` as its pages were chosen, how many of its proposals were
+//!   `unreadable`, and whether it ended inside one (`unfinished`). An answer's text is its prose
+//!   alone; its proposals are kept in their own tables.
 //! - `read_pages`: the path of each page an answer's request carried, in the order chosen
 //!   (`ordinal`), and whether only part of it was read. Never a page's text.
+//! - `accepts`: each set of an answer's proposals that an accept began: the history change it
+//!   recorded, named by its id (`change`) and start time (`started`), or none when history was not
+//!   recording; its `state` (`writing` until the accept finishes, then `accepted`, and `undoing`
+//!   while an undo runs); and the `time` it began. A set is deleted once none of its proposals
+//!   stays accepted.
+//! - `proposals`: each proposal of an answer in order (`ordinal`): its `kind` (`new_page` or
+//!   `edit`), its `path` (as the model gave it until a set begins, then as the accept writes it),
+//!   a new page's `text`, an edit's `base` (the FNV-1a hash of its page's text when the answer
+//!   ended), the `result` hash of the text its accept writes, its `state` (`pending`, `accepted`
+//!   or `rejected`), whether it was `undone`, and the set it belongs to (`accept`).
+//! - `proposal_changes`: each passage of an edit, in order: the text to `find` and its
+//!   `replace`ment.
 //!
-//! Deleting a conversation deletes its messages and their pages. Each message is written in one
-//! transaction, and the file syncs fully, so after a crash a message is there whole or not at all.
+//! Hashes are stored as the bits of a signed integer. Format 1 lacked the notes and the proposal
+//! tables; a format-1 file is updated in place, in one transaction, when its world opens.
+//!
+//! Deleting a conversation deletes its messages with their pages, proposals and sets. Each
+//! message is written in one transaction, and the file syncs fully, so after a crash a message is
+//! there whole or not at all.
 //!
 //! A damaged file is set aside, as a damaged history database is, and a new one replaces it. A file
 //! in a newer format, holding unknown data, or recording another world is left untouched; so is
-//! everything when the world's path cannot name a file or there is no app data folder. The store
-//! then keeps this opening's conversations in memory. A write to the file that fails moves the
-//! store to memory too, with what the file held, for the rest of the opening.
+//! everything when the world's path cannot name a file or there is no app data folder; so is a
+//! format-1 file whose update fails. The store then keeps this opening's conversations in memory.
+//! A write to the file that fails moves the store to memory too, with what the file held, for the
+//! rest of the opening.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rusqlite::types::Value;
+use rusqlite::types::{Type, Value};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params, params_from_iter};
 use serde::Serialize;
 
@@ -38,8 +57,10 @@ use crate::error::{AppError, ErrorKind};
 use crate::history;
 
 /// The format this version writes. A file in a newer format is never written.
-const FORMAT: i64 = 1;
+const FORMAT: i64 = 2;
 
+/// The tables of format 1, with the notes format 2 added to `messages` last, where the update from
+/// format 1 adds them, so an updated file and a new one have their columns in the same order.
 const SCHEMA: &str = "
     CREATE TABLE conversations (
         id INTEGER PRIMARY KEY,
@@ -55,7 +76,9 @@ const SCHEMA: &str = "
         time INTEGER,
         state TEXT,
         left_out INTEGER,
-        indexing INTEGER
+        indexing INTEGER,
+        unreadable INTEGER NOT NULL DEFAULT 0,
+        unfinished INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX messages_by_conversation ON messages (conversation, id);
     CREATE TABLE read_pages (
@@ -66,8 +89,52 @@ const SCHEMA: &str = "
         PRIMARY KEY (message, ordinal)
     );
 ";
+/// The columns format 2 added to `messages` in a format-1 file.
+const NOTES: &str = "
+    ALTER TABLE messages ADD COLUMN unreadable INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN unfinished INTEGER NOT NULL DEFAULT 0;
+";
+/// The tables format 2 added, created as they are in a new file and in an updated one.
+const PROPOSAL_SCHEMA: &str = "
+    CREATE TABLE accepts (
+        id INTEGER PRIMARY KEY,
+        message INTEGER REFERENCES messages ON DELETE CASCADE,
+        change INTEGER,
+        started INTEGER,
+        state TEXT,
+        time INTEGER
+    );
+    CREATE TABLE proposals (
+        id INTEGER PRIMARY KEY,
+        message INTEGER REFERENCES messages ON DELETE CASCADE,
+        ordinal INTEGER,
+        kind TEXT,
+        path TEXT,
+        text TEXT,
+        base INTEGER,
+        result INTEGER,
+        state TEXT,
+        undone INTEGER,
+        accept INTEGER REFERENCES accepts ON DELETE SET NULL
+    );
+    CREATE INDEX proposals_by_message ON proposals (message, ordinal);
+    CREATE TABLE proposal_changes (
+        proposal INTEGER REFERENCES proposals ON DELETE CASCADE,
+        ordinal INTEGER,
+        find TEXT,
+        replace TEXT,
+        PRIMARY KEY (proposal, ordinal)
+    );
+";
 /// The tables that hold conversations, in an order that keeps their references valid.
-const TABLES: [&str; 3] = ["conversations", "messages", "read_pages"];
+const TABLES: [&str; 6] = [
+    "conversations",
+    "messages",
+    "read_pages",
+    "accepts",
+    "proposals",
+    "proposal_changes",
+];
 /// The most characters of a conversation's title, from its first message's first line.
 const TITLE_LIMIT: usize = 60;
 
@@ -119,6 +186,160 @@ pub struct Answer<'a> {
     pub pages: &'a [(String, bool)],
     pub left_out: u32,
     pub indexing: bool,
+    /// The proposals read from the answer, in order.
+    pub proposals: &'a [Proposal],
+    /// How many proposals could not be read.
+    pub unreadable: u32,
+    /// Whether the answer ended inside a proposal, which was dropped.
+    pub unfinished: bool,
+}
+
+/// A proposal as an answer saves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposal {
+    /// The path as the model gave it.
+    pub path: String,
+    pub content: ProposalContent,
+}
+
+/// What a proposal writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalContent {
+    NewPage {
+        text: String,
+    },
+    /// Passages to replace in an existing page, with the hash of the page's text when the answer
+    /// ended, or none when it could not be read.
+    Edit {
+        passages: Vec<Passage>,
+        base: Option<u64>,
+    },
+}
+
+/// A passage of an edit: text to find in the page and its replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passage {
+    pub find: String,
+    pub replace: String,
+}
+
+/// Where a proposal stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalState {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl ProposalState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "pending" => Some(Self::Pending),
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// Where a set of accepted proposals stands. `Writing` and `Undoing` are unfinished: an accept or
+/// undo is writing its pages, or stopped before it could finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetState {
+    Writing,
+    Accepted,
+    Undoing,
+}
+
+impl SetState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Writing => "writing",
+            Self::Accepted => "accepted",
+            Self::Undoing => "undoing",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "writing" => Some(Self::Writing),
+            "accepted" => Some(Self::Accepted),
+            "undoing" => Some(Self::Undoing),
+            _ => None,
+        }
+    }
+}
+
+/// A change in history, by its id and the time it started, which together name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryChange {
+    pub id: i64,
+    pub started: u64,
+}
+
+/// A saved proposal and where it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedProposal {
+    pub id: i64,
+    /// The path as the model gave it, or as the accept wrote it once a set began.
+    pub path: String,
+    pub content: ProposalContent,
+    pub state: ProposalState,
+    /// It was accepted, and that accept was undone.
+    pub undone: bool,
+    /// The set it belongs to.
+    pub accept: Option<i64>,
+}
+
+/// A set of an answer's proposals that an accept began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptSet {
+    pub id: i64,
+    /// The change the accept recorded, or none when history was not recording.
+    pub change: Option<HistoryChange>,
+    pub state: SetState,
+}
+
+/// An answer's proposals, its notes and its sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerProposals {
+    pub answer: i64,
+    pub unreadable: u32,
+    pub unfinished: bool,
+    pub proposals: Vec<SavedProposal>,
+    pub sets: Vec<AcceptSet>,
+}
+
+/// A proposal's page in a set: the path its accept writes and the hash of the text it writes
+/// there, which tell whether the page holds the accepted text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetPage {
+    pub proposal: i64,
+    pub path: String,
+    pub result: u64,
+}
+
+/// An unfinished set with its proposals' pages, to be resolved from what the pages hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfinishedSet {
+    pub id: i64,
+    pub pages: Vec<SetPage>,
+}
+
+/// Whether finishing or resolving a set changed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settling {
+    Settled,
+    /// The set was no longer unfinished, so nothing changed.
+    AlreadySettled,
 }
 
 /// Why the conversations are kept differently than usual until the world closes.
@@ -191,6 +412,8 @@ pub struct Store {
     /// `connection` is the world's file, rather than a database in memory.
     saving: bool,
     notice: Option<StoreNotice>,
+    /// The sets an earlier process or opening left unfinished, until they are taken to be resolved.
+    unfinished: Vec<UnfinishedSet>,
 }
 
 /// Why a message could not be written.
@@ -223,6 +446,7 @@ impl Store {
     pub fn open(app_data: Option<&Path>, world: &Path, now: u64) -> Result<Self, AppError> {
         match open_file(app_data, world, now) {
             Ok((connection, set_aside)) => Ok(Self {
+                unfinished: unfinished_sets(&connection).map_err(store_error)?,
                 connection,
                 saving: true,
                 notice: set_aside.then_some(StoreNotice::SetAside),
@@ -233,9 +457,20 @@ impl Store {
                     connection,
                     saving: false,
                     notice: Some(StoreNotice::NotSaved { reason }),
+                    unfinished: Vec::new(),
                 })
             }
         }
+    }
+
+    /// Takes the sets that were unfinished when the store opened, so they are resolved once. Sets
+    /// begun since are never among them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    pub fn take_unfinished(&mut self) -> Vec<UnfinishedSet> {
+        std::mem::take(&mut self.unfinished)
     }
 
     /// Runs `write` in one transaction. When writing to the file fails, the store moves to memory,
@@ -310,8 +545,9 @@ impl Store {
     }
 
     /// Readies `conversation` to answer its last message again: that message must be a user
-    /// message whose answer is missing or stopped, and a stopped answer is removed. Returns the
-    /// message's text.
+    /// message whose answer is missing or stopped, and a stopped answer is removed, unless one of
+    /// its proposals belongs to a set, accepted or still being accepted. Returns the message's
+    /// text.
     pub fn prepare_retry(&mut self, conversation: i64) -> Result<String, AppError> {
         self.write(|transaction| {
             let last: Vec<(i64, String, String, Option<String>)> = transaction
@@ -328,6 +564,18 @@ impl Store {
                 [(answer, _, _, Some(state)), (_, role, text, _)]
                     if role == USER && state == AnswerState::Stopped.as_str() =>
                 {
+                    let in_set: bool = transaction.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM proposals
+                                        WHERE message = ?1 AND accept IS NOT NULL)",
+                        [answer],
+                        |row| row.get(0),
+                    )?;
+                    if in_set {
+                        return Err(WriteFailure::Refused(AppError::new(
+                            ErrorKind::Conflict,
+                            "The last answer has accepted proposals.",
+                        )));
+                    }
                     transaction.execute("DELETE FROM messages WHERE id = ?1", [answer])?;
                     Ok(text.clone())
                 }
@@ -340,17 +588,19 @@ impl Store {
         })
     }
 
-    /// Saves the answer to `conversation`'s last message, with the pages its request carried.
+    /// Saves the answer to `conversation`'s last message, with the pages its request carried and
+    /// its proposals, and returns the answer's id.
     pub fn add_answer(
         &mut self,
         conversation: i64,
         answer: &Answer,
         now: i64,
-    ) -> Result<(), AppError> {
+    ) -> Result<i64, AppError> {
         self.write(|transaction| {
             transaction.execute(
-                "INSERT INTO messages (conversation, role, text, time, state, left_out, indexing)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO messages (conversation, role, text, time, state, left_out, indexing,
+                                       unreadable, unfinished)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     conversation,
                     ASSISTANT,
@@ -358,7 +608,9 @@ impl Store {
                     now,
                     answer.state.as_str(),
                     answer.left_out,
-                    answer.indexing
+                    answer.indexing,
+                    answer.unreadable,
+                    answer.unfinished
                 ],
             )?;
             let message = transaction.last_insert_rowid();
@@ -369,15 +621,161 @@ impl Store {
                     params![message, ordinal as i64, path, partial],
                 )?;
             }
+            for (ordinal, proposal) in answer.proposals.iter().enumerate() {
+                add_proposal(transaction, message, ordinal, proposal)?;
+            }
             transaction.execute(
                 "UPDATE conversations SET updated = ?2 WHERE id = ?1",
                 params![conversation, now],
+            )?;
+            Ok(message)
+        })
+    }
+
+    /// Rejects a pending proposal that belongs to no set.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    pub fn reject(&mut self, proposal: i64) -> Result<(), AppError> {
+        self.write(|transaction| {
+            let standing = proposal_standing(transaction, proposal)?
+                .ok_or_else(|| WriteFailure::Refused(no_proposal()))?;
+            if !standing.free() {
+                return Err(WriteFailure::Refused(not_pending()));
+            }
+            transaction.execute(
+                "UPDATE proposals SET state = ?2 WHERE id = ?1",
+                params![proposal, ProposalState::Rejected.as_str()],
             )?;
             Ok(())
         })
     }
 
-    /// Deletes `conversation` with its messages and their pages, for good.
+    /// Begins a set of `answer`'s proposals for an accept that recorded `change`, before the
+    /// accept writes anything: each proposal must be pending and in no set, and takes the path
+    /// the accept writes and the hash of the text it writes there. Returns the set's id.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    pub fn begin_accept(
+        &mut self,
+        answer: i64,
+        pages: &[SetPage],
+        change: Option<HistoryChange>,
+        now: i64,
+    ) -> Result<i64, AppError> {
+        self.write(|transaction| {
+            transaction.execute(
+                "INSERT INTO accepts (message, change, started, state, time)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    answer,
+                    change.map(|change| change.id),
+                    change.map(|change| change.started as i64),
+                    SetState::Writing.as_str(),
+                    now
+                ],
+            )?;
+            let set = transaction.last_insert_rowid();
+            for page in pages {
+                let standing = proposal_standing(transaction, page.proposal)?
+                    .filter(|standing| standing.answer == answer)
+                    .ok_or_else(|| WriteFailure::Refused(no_proposal()))?;
+                if !standing.free() {
+                    return Err(WriteFailure::Refused(not_pending()));
+                }
+                transaction.execute(
+                    "UPDATE proposals SET accept = ?2, path = ?3, result = ?4 WHERE id = ?1",
+                    params![page.proposal, set, page.path, hash_value(page.result)],
+                )?;
+            }
+            Ok(set)
+        })
+    }
+
+    /// Marks an accepted set as being undone, before the undo writes anything, and returns its
+    /// accepted proposals' pages.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    pub fn begin_undo(&mut self, set: i64) -> Result<UnfinishedSet, AppError> {
+        self.write(|transaction| {
+            let state: SetState = transaction
+                .query_row("SELECT state FROM accepts WHERE id = ?1", [set], |row| {
+                    stored(row, 0, SetState::parse)
+                })
+                .optional()?
+                .ok_or_else(|| WriteFailure::Refused(no_set()))?;
+            if state != SetState::Accepted {
+                return Err(WriteFailure::Refused(AppError::new(
+                    ErrorKind::Conflict,
+                    "The proposals are no longer accepted.",
+                )));
+            }
+            transaction.execute(
+                "UPDATE accepts SET state = ?2 WHERE id = ?1",
+                params![set, SetState::Undoing.as_str()],
+            )?;
+            Ok(UnfinishedSet {
+                id: set,
+                pages: set_pages(transaction, set)?,
+            })
+        })
+    }
+
+    /// Settles an unfinished set: its proposals in `accepted` become accepted, and the rest of
+    /// its proposals pending and in no set, marked undone when the set was being undone. The set
+    /// stays, accepted, while any of its proposals does; otherwise it is deleted. This finishes an
+    /// accept with the proposals it wrote, an undo with none, and resolves a set left unfinished
+    /// with the proposals whose pages hold their results. A set that is no longer unfinished is
+    /// left as it is.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    pub fn settle(&mut self, set: i64, accepted: &[i64]) -> Result<Settling, AppError> {
+        self.write(|transaction| {
+            let state = transaction
+                .query_row("SELECT state FROM accepts WHERE id = ?1", [set], |row| {
+                    stored(row, 0, SetState::parse)
+                })
+                .optional()?;
+            let undoing = match state {
+                Some(SetState::Writing) => false,
+                Some(SetState::Undoing) => true,
+                Some(SetState::Accepted) | None => return Ok(Settling::AlreadySettled),
+            };
+            transaction.execute(
+                "UPDATE proposals SET state = ?2, undone = undone OR ?3 WHERE accept = ?1",
+                params![set, ProposalState::Pending.as_str(), undoing],
+            )?;
+            let mut kept = 0;
+            for proposal in accepted {
+                kept += transaction.execute(
+                    "UPDATE proposals SET state = ?3, undone = 0 WHERE id = ?1 AND accept = ?2",
+                    params![proposal, set, ProposalState::Accepted.as_str()],
+                )?;
+            }
+            transaction.execute(
+                "UPDATE proposals SET accept = NULL WHERE accept = ?1 AND state = ?2",
+                params![set, ProposalState::Pending.as_str()],
+            )?;
+            if kept == 0 {
+                transaction.execute("DELETE FROM accepts WHERE id = ?1", [set])?;
+            } else {
+                transaction.execute(
+                    "UPDATE accepts SET state = ?2 WHERE id = ?1",
+                    params![set, SetState::Accepted.as_str()],
+                )?;
+            }
+            Ok(Settling::Settled)
+        })
+    }
+
+    /// Deletes `conversation` with its messages and their pages, proposals and sets, for good.
     pub fn delete(&mut self, conversation: i64) -> Result<(), AppError> {
         self.write(|transaction| {
             let deleted =
@@ -434,6 +832,106 @@ impl Store {
         self.read_conversation(conversation)
             .map_err(store_error)?
             .ok_or_else(no_conversation)
+    }
+
+    /// The answers of `conversation` that have proposals or notes, in order, each with its
+    /// proposals and sets.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    pub fn proposals(&self, conversation: i64) -> Result<Vec<AnswerProposals>, AppError> {
+        self.read_proposals(conversation)
+            .map_err(store_error)?
+            .ok_or_else(no_conversation)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from package proposal-flow")
+    )]
+    fn read_proposals(&self, conversation: i64) -> rusqlite::Result<Option<Vec<AnswerProposals>>> {
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1)",
+            [conversation],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let mut answers = self.connection.prepare(
+            "SELECT id, unreadable, unfinished FROM messages
+             WHERE conversation = ?1 AND role = ?2
+               AND (unreadable > 0 OR unfinished
+                    OR EXISTS (SELECT 1 FROM proposals WHERE message = messages.id))
+             ORDER BY id",
+        )?;
+        let mut proposals = self.connection.prepare(
+            "SELECT id, kind, path, text, base, state, undone, accept FROM proposals
+             WHERE message = ?1 ORDER BY ordinal",
+        )?;
+        let mut passages = self.connection.prepare(
+            "SELECT find, replace FROM proposal_changes WHERE proposal = ?1 ORDER BY ordinal",
+        )?;
+        let mut sets = self.connection.prepare(
+            "SELECT id, change, started, state FROM accepts WHERE message = ?1 ORDER BY id",
+        )?;
+        let mut rows = answers.query(params![conversation, ASSISTANT])?;
+        let mut read = Vec::new();
+        while let Some(row) = rows.next()? {
+            let answer: i64 = row.get(0)?;
+            let mut answer_proposals = Vec::new();
+            let mut proposal_rows = proposals.query([answer])?;
+            while let Some(proposal) = proposal_rows.next()? {
+                let id: i64 = proposal.get(0)?;
+                let content = match stored(proposal, 1, Kind::parse)? {
+                    Kind::NewPage => ProposalContent::NewPage {
+                        text: proposal.get(3)?,
+                    },
+                    Kind::Edit => ProposalContent::Edit {
+                        passages: passages
+                            .query_map([id], |passage| {
+                                Ok(Passage {
+                                    find: passage.get(0)?,
+                                    replace: passage.get(1)?,
+                                })
+                            })?
+                            .collect::<Result<_, _>>()?,
+                        base: proposal.get::<_, Option<i64>>(4)?.map(hash_of),
+                    },
+                };
+                answer_proposals.push(SavedProposal {
+                    id,
+                    path: proposal.get(2)?,
+                    content,
+                    state: stored(proposal, 5, ProposalState::parse)?,
+                    undone: proposal.get(6)?,
+                    accept: proposal.get(7)?,
+                });
+            }
+            let answer_sets = sets
+                .query_map([answer], |set| {
+                    let change: Option<i64> = set.get(1)?;
+                    let started: Option<i64> = set.get(2)?;
+                    Ok(AcceptSet {
+                        id: set.get(0)?,
+                        change: change.zip(started).map(|(id, started)| HistoryChange {
+                            id,
+                            started: started as u64,
+                        }),
+                        state: stored(set, 3, SetState::parse)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            read.push(AnswerProposals {
+                answer,
+                unreadable: row.get(1)?,
+                unfinished: row.get(2)?,
+                proposals: answer_proposals,
+                sets: answer_sets,
+            });
+        }
+        Ok(Some(read))
     }
 
     fn read_conversation(&self, id: i64) -> rusqlite::Result<Option<Conversation>> {
@@ -552,8 +1050,8 @@ impl From<rusqlite::Error> for Refusal {
     }
 }
 
-/// Opens the file at `file` for the world at `world`, creating format 1 in an empty one. On any
-/// refusal the connection is closed before this returns.
+/// Opens the file at `file` for the world at `world`, creating the format in an empty one and
+/// updating a format-1 file. On any refusal the connection is closed before this returns.
 fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     let mut connection = Connection::open(file)?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -562,6 +1060,10 @@ fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     let format: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match format {
         0 => create(&mut connection, world)?,
+        1 => {
+            check_world(&connection, world)?;
+            update_from_format_1(&mut connection)?;
+        }
         FORMAT => check_world(&connection, world)?,
         _ => {
             return Err(Refusal::Failed(
@@ -573,7 +1075,7 @@ fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     Ok(connection)
 }
 
-/// Creates format 1 in one transaction, in a file that holds nothing yet.
+/// Creates the format in one transaction, in a file that holds nothing yet.
 fn create(connection: &mut Connection, world: &str) -> Result<(), Refusal> {
     let transaction = connection.transaction()?;
     let objects: i64 =
@@ -585,6 +1087,7 @@ fn create(connection: &mut Connection, world: &str) -> Result<(), Refusal> {
     }
     transaction.execute_batch("CREATE TABLE meta (world TEXT NOT NULL);")?;
     transaction.execute_batch(SCHEMA)?;
+    transaction.execute_batch(PROPOSAL_SCHEMA)?;
     transaction.execute("INSERT INTO meta (world) VALUES (?1)", [world])?;
     transaction.pragma_update(None, "user_version", FORMAT)?;
     transaction.commit()?;
@@ -602,11 +1105,29 @@ fn check_world(connection: &Connection, world: &str) -> Result<(), Refusal> {
     }
 }
 
+/// Updates a format-1 file to the format in one transaction, so a failure leaves it format 1.
+fn update_from_format_1(connection: &mut Connection) -> Result<(), Refusal> {
+    let update = |connection: &mut Connection| -> rusqlite::Result<()> {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(NOTES)?;
+        transaction.execute_batch(PROPOSAL_SCHEMA)?;
+        transaction.pragma_update(None, "user_version", FORMAT)?;
+        transaction.commit()
+    };
+    update(connection).map_err(|error| {
+        Refusal::Failed(format!(
+            "The conversation store could not be updated to this version's format. {}",
+            failure_reason(&error)
+        ))
+    })
+}
+
 /// An empty store in memory.
 fn memory_database() -> rusqlite::Result<Connection> {
     let connection = Connection::open_in_memory()?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.execute_batch(SCHEMA)?;
+    connection.execute_batch(PROPOSAL_SCHEMA)?;
     Ok(connection)
 }
 
@@ -633,6 +1154,158 @@ fn copied(from: &Connection) -> rusqlite::Result<Connection> {
     Ok(memory)
 }
 
+/// Saves `proposal` as the `ordinal`th of the answer `message`, with its passages.
+fn add_proposal(
+    transaction: &Transaction,
+    message: i64,
+    ordinal: usize,
+    proposal: &Proposal,
+) -> rusqlite::Result<()> {
+    let (kind, text, base, passages) = match &proposal.content {
+        ProposalContent::NewPage { text } => (Kind::NewPage, Some(text), None, &[][..]),
+        ProposalContent::Edit { passages, base } => {
+            (Kind::Edit, None, base.map(hash_value), passages.as_slice())
+        }
+    };
+    transaction.execute(
+        "INSERT INTO proposals (message, ordinal, kind, path, text, base, state, undone)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        params![
+            message,
+            ordinal as i64,
+            kind.as_str(),
+            proposal.path,
+            text,
+            base,
+            ProposalState::Pending.as_str()
+        ],
+    )?;
+    let proposal = transaction.last_insert_rowid();
+    for (ordinal, passage) in passages.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO proposal_changes (proposal, ordinal, find, replace)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![proposal, ordinal as i64, passage.find, passage.replace],
+        )?;
+    }
+    Ok(())
+}
+
+/// A proposal's kind, as it is stored.
+#[derive(Clone, Copy)]
+enum Kind {
+    NewPage,
+    Edit,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NewPage => "new_page",
+            Self::Edit => "edit",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "new_page" => Some(Self::NewPage),
+            "edit" => Some(Self::Edit),
+            _ => None,
+        }
+    }
+}
+
+/// The answer a proposal belongs to, its state and its set.
+struct Standing {
+    answer: i64,
+    state: ProposalState,
+    accept: Option<i64>,
+}
+
+impl Standing {
+    /// Pending and in no set, so it can be rejected or accepted.
+    fn free(&self) -> bool {
+        self.state == ProposalState::Pending && self.accept.is_none()
+    }
+}
+
+fn proposal_standing(
+    transaction: &Transaction,
+    proposal: i64,
+) -> rusqlite::Result<Option<Standing>> {
+    transaction
+        .query_row(
+            "SELECT message, state, accept FROM proposals WHERE id = ?1",
+            [proposal],
+            |row| {
+                Ok(Standing {
+                    answer: row.get(0)?,
+                    state: stored(row, 1, ProposalState::parse)?,
+                    accept: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+}
+
+/// The pages of the proposals in `set` that are accepted or being accepted.
+fn set_pages(connection: &Connection, set: i64) -> rusqlite::Result<Vec<SetPage>> {
+    connection
+        .prepare("SELECT id, path, result FROM proposals WHERE accept = ?1 ORDER BY id")?
+        .query_map([set], |row| {
+            Ok(SetPage {
+                proposal: row.get(0)?,
+                path: row.get(1)?,
+                result: hash_of(row.get(2)?),
+            })
+        })?
+        .collect()
+}
+
+/// The sets that are unfinished, with their proposals' pages.
+fn unfinished_sets(connection: &Connection) -> rusqlite::Result<Vec<UnfinishedSet>> {
+    let ids: Vec<i64> = connection
+        .prepare("SELECT id FROM accepts WHERE state IN (?1, ?2) ORDER BY id")?
+        .query_map(
+            [SetState::Writing.as_str(), SetState::Undoing.as_str()],
+            |row| row.get(0),
+        )?
+        .collect::<Result<_, _>>()?;
+    ids.into_iter()
+        .map(|id| {
+            Ok(UnfinishedSet {
+                id,
+                pages: set_pages(connection, id)?,
+            })
+        })
+        .collect()
+}
+
+/// The value in `column` of `row`, read as text by `parse`.
+fn stored<T>(
+    row: &rusqlite::Row,
+    column: usize,
+    parse: impl Fn(&str) -> Option<T>,
+) -> rusqlite::Result<T> {
+    let text: String = row.get(column)?;
+    parse(&text).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            Type::Text,
+            format!("unknown value {text:?}").into(),
+        )
+    })
+}
+
+/// A hash as it is stored: its bits as a signed integer, since SQLite has no unsigned one.
+fn hash_value(hash: u64) -> i64 {
+    hash as i64
+}
+
+fn hash_of(value: i64) -> u64 {
+    value as u64
+}
+
 /// A conversation's title: its first message's first line, cut to `TITLE_LIMIT` characters.
 fn title(text: &str) -> String {
     let line = text.trim().lines().next().unwrap_or_default();
@@ -641,6 +1314,18 @@ fn title(text: &str) -> String {
 
 fn no_conversation() -> AppError {
     AppError::new(ErrorKind::NotFound, "The conversation does not exist.")
+}
+
+fn no_proposal() -> AppError {
+    AppError::new(ErrorKind::NotFound, "The proposal does not exist.")
+}
+
+fn not_pending() -> AppError {
+    AppError::new(ErrorKind::Conflict, "The proposal is no longer pending.")
+}
+
+fn no_set() -> AppError {
+    AppError::new(ErrorKind::NotFound, "The accepted proposals do not exist.")
 }
 
 /// Why the file cannot be used or written, as the not-saved notice gives it: a sentence.
@@ -703,6 +1388,9 @@ mod tests {
             pages: &[],
             left_out: 0,
             indexing: false,
+            proposals: &[],
+            unreadable: 0,
+            unfinished: false,
         }
     }
 
@@ -711,10 +1399,11 @@ mod tests {
         listed.into_iter().map(|item| item.title).collect()
     }
 
-    /// The number of rows in each table of the world's file, read with a connection of its own.
+    /// The number of rows in each of format 1's tables in the world's file, read with a connection
+    /// of its own.
     fn rows_in_file(app_data: &TempDir) -> [i64; 3] {
         let connection = Connection::open(file_of(app_data)).unwrap();
-        TABLES.map(|table| {
+        ["conversations", "messages", "read_pages"].map(|table| {
             connection
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
                     row.get(0)
@@ -740,6 +1429,9 @@ mod tests {
                     pages: &pages,
                     left_out: 2,
                     indexing: true,
+                    proposals: &[],
+                    unreadable: 0,
+                    unfinished: false,
                 },
                 30,
             )
@@ -795,7 +1487,7 @@ mod tests {
         let world: String = connection
             .query_row("SELECT world FROM meta", [], |row| row.get(0))
             .unwrap();
-        assert_eq!((format, world.as_str()), (1, WORLD));
+        assert_eq!((format, world.as_str()), (2, WORLD));
     }
 
     #[test]
@@ -822,6 +1514,9 @@ mod tests {
                     pages: &pages,
                     left_out: 0,
                     indexing: false,
+                    proposals: &[],
+                    unreadable: 0,
+                    unfinished: false,
                 },
                 2,
             )
@@ -881,7 +1576,7 @@ mod tests {
     fn a_newer_unknown_or_foreign_file_is_left_untouched_and_the_store_works_in_memory() {
         let cases: [(&str, &str, &str); 3] = [
             (
-                "PRAGMA user_version = 2;",
+                "PRAGMA user_version = 3;",
                 "",
                 "The conversation store is in a newer format than this version of Grimoire.md knows.",
             ),
@@ -1003,22 +1698,45 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_conversation_removes_its_messages_and_pages_and_nothing_else() {
+    fn deleting_a_conversation_removes_its_messages_pages_proposals_and_sets_and_nothing_else() {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
         let gone = store.add_user_message(None, "Gone", 1).unwrap();
         let pages = [("A.md".to_owned(), false)];
-        let answer_with_page = Answer {
-            pages: &pages,
-            ..answer(AnswerState::Complete, "Hi")
-        };
-        store.add_answer(gone, &answer_with_page, 2).unwrap();
+        let gone_proposals = [new_page("Gone.md"), edit("A.md")];
+        let gone_answer = store
+            .add_answer(
+                gone,
+                &Answer {
+                    pages: &pages,
+                    proposals: &gone_proposals,
+                    ..answer(AnswerState::Complete, "Hi")
+                },
+                2,
+            )
+            .unwrap();
+        let ids = proposal_ids(&store, gone);
+        store
+            .begin_accept(gone_answer, &pages_of(&ids), None, 2)
+            .unwrap();
         let kept = store.add_user_message(None, "Kept", 3).unwrap();
-        store.add_answer(kept, &answer_with_page, 4).unwrap();
+        let kept_proposals = [new_page("Kept.md")];
+        store
+            .add_answer(
+                kept,
+                &Answer {
+                    pages: &pages,
+                    proposals: &kept_proposals,
+                    ..answer(AnswerState::Complete, "Hi")
+                },
+                4,
+            )
+            .unwrap();
 
         store.delete(gone).unwrap();
 
         assert_eq!(rows_in_file(&app_data), [1, 2, 1]);
+        assert_eq!(proposal_rows_in_file(&app_data), [0, 1, 0]);
         assert_eq!(titles(&store), ["Kept"]);
         assert_eq!(store.delete(gone).unwrap_err().kind, ErrorKind::NotFound);
     }
@@ -1063,5 +1781,581 @@ mod tests {
         );
         // Refusals are not failures: the store still saves to its file.
         assert_eq!(store.conversations().unwrap().notice, None);
+    }
+
+    /// A format-1 file as the previous version wrote it, with two conversations, their answers and
+    /// the pages they read.
+    const FORMAT_1: &str = "
+        CREATE TABLE meta (world TEXT NOT NULL);
+        CREATE TABLE conversations (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            created INTEGER,
+            updated INTEGER
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
+            conversation INTEGER REFERENCES conversations ON DELETE CASCADE,
+            role TEXT,
+            text TEXT,
+            time INTEGER,
+            state TEXT,
+            left_out INTEGER,
+            indexing INTEGER
+        );
+        CREATE INDEX messages_by_conversation ON messages (conversation, id);
+        CREATE TABLE read_pages (
+            message INTEGER REFERENCES messages ON DELETE CASCADE,
+            ordinal INTEGER,
+            path TEXT,
+            partial INTEGER,
+            PRIMARY KEY (message, ordinal)
+        );
+        INSERT INTO meta (world) VALUES ('/home/tester/Worlds/Kesh');
+        INSERT INTO conversations VALUES (1, 'Saltmere', 10, 30), (2, 'Kesh', 40, 60);
+        INSERT INTO messages VALUES
+            (1, 1, 'user', 'Saltmere', 10, NULL, NULL, NULL),
+            (2, 1, 'assistant', 'A harbour town.', 30, 'complete', 1, 0),
+            (3, 2, 'user', 'Kesh', 40, NULL, NULL, NULL),
+            (4, 2, 'assistant', 'A city', 60, 'cut_off', 0, 1);
+        INSERT INTO read_pages VALUES
+            (2, 0, 'Places/Saltmere.md', 0),
+            (2, 1, 'People/Ada.md', 1),
+            (4, 0, 'Kesh.md', 0);
+        PRAGMA user_version = 1;
+    ";
+
+    /// Writes the format-1 file, followed by `extra`, as the world's file.
+    fn write_format_1(app_data: &TempDir, extra: &str) -> PathBuf {
+        let file = file_of(app_data);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let connection = Connection::open(&file).unwrap();
+        connection.execute_batch(FORMAT_1).unwrap();
+        connection.execute_batch(extra).unwrap();
+        file
+    }
+
+    /// Every row the query reads, as values.
+    fn rows(connection: &Connection, query: &str) -> Vec<Vec<Value>> {
+        let mut statement = connection.prepare(query).unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns).map(|column| row.get(column)).collect()
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Each table's column names, in order.
+    fn columns(file: &Path) -> Vec<Vec<String>> {
+        let connection = Connection::open(file).unwrap();
+        TABLES
+            .iter()
+            .map(|table| {
+                rows(&connection, &format!("PRAGMA table_info({table})"))
+                    .into_iter()
+                    .map(|row| match &row[1] {
+                        Value::Text(name) => name.clone(),
+                        other => panic!("a column name is text, not {other:?}"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The format-1 tables' rows, in the columns format 1 has.
+    const FORMAT_1_ROWS: [&str; 3] = [
+        "SELECT * FROM conversations ORDER BY id",
+        "SELECT id, conversation, role, text, time, state, left_out, indexing FROM messages
+         ORDER BY id",
+        "SELECT * FROM read_pages ORDER BY message, ordinal",
+    ];
+
+    /// The number of rows in each table format 2 added, in the world's file.
+    fn proposal_rows_in_file(app_data: &TempDir) -> [i64; 3] {
+        let connection = Connection::open(file_of(app_data)).unwrap();
+        ["accepts", "proposals", "proposal_changes"].map(|table| {
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+    }
+
+    fn new_page(path: &str) -> Proposal {
+        Proposal {
+            path: path.to_owned(),
+            content: ProposalContent::NewPage {
+                text: format!("# {path}\n"),
+            },
+        }
+    }
+
+    fn edit(path: &str) -> Proposal {
+        Proposal {
+            path: path.to_owned(),
+            content: ProposalContent::Edit {
+                passages: vec![
+                    Passage {
+                        find: "old".to_owned(),
+                        replace: "new".to_owned(),
+                    },
+                    Passage {
+                        find: "grey".to_owned(),
+                        replace: "green".to_owned(),
+                    },
+                ],
+                // A hash with its high bit set, which SQLite stores as a negative integer.
+                base: Some(u64::MAX - 1),
+            },
+        }
+    }
+
+    /// A conversation whose stopped answer proposes the pages `A.md`, `B.md` and `C.md`: its id,
+    /// the answer's id and the proposals' ids.
+    fn with_proposals(store: &mut Store) -> (i64, i64, [i64; 3]) {
+        let conversation = store.add_user_message(None, "Propose", 1).unwrap();
+        let proposals = [new_page("A.md"), new_page("B.md"), edit("C.md")];
+        let answer = store
+            .add_answer(
+                conversation,
+                &Answer {
+                    proposals: &proposals,
+                    ..answer(AnswerState::Stopped, "Here")
+                },
+                2,
+            )
+            .unwrap();
+        let ids = proposal_ids(store, conversation);
+        (conversation, answer, [ids[0], ids[1], ids[2]])
+    }
+
+    fn proposal_ids(store: &Store, conversation: i64) -> Vec<i64> {
+        store.proposals(conversation).unwrap()[0]
+            .proposals
+            .iter()
+            .map(|proposal| proposal.id)
+            .collect()
+    }
+
+    /// The pages an accept of `proposals` writes: each at a path of its own, with a result hash
+    /// whose high bit is set.
+    fn pages_of(proposals: &[i64]) -> Vec<SetPage> {
+        proposals
+            .iter()
+            .map(|&proposal| SetPage {
+                proposal,
+                path: format!("Written/{proposal}.md"),
+                result: u64::MAX - proposal as u64,
+            })
+            .collect()
+    }
+
+    /// Each proposal of the conversation's first answer with proposals: its state, whether it was
+    /// undone and its set.
+    fn standing(store: &Store, conversation: i64) -> Vec<(ProposalState, bool, Option<i64>)> {
+        store.proposals(conversation).unwrap()[0]
+            .proposals
+            .iter()
+            .map(|proposal| (proposal.state, proposal.undone, proposal.accept))
+            .collect()
+    }
+
+    fn sets(store: &Store, conversation: i64) -> Vec<(i64, SetState)> {
+        store.proposals(conversation).unwrap()[0]
+            .sets
+            .iter()
+            .map(|set| (set.id, set.state))
+            .collect()
+    }
+
+    use ProposalState::{Accepted, Pending, Rejected};
+
+    #[test]
+    fn a_format_1_file_is_updated_in_place_keeping_every_row() {
+        let app_data = tempfile::tempdir().unwrap();
+        let file = write_format_1(&app_data, "");
+        let connection = Connection::open(&file).unwrap();
+        let before = FORMAT_1_ROWS.map(|query| rows(&connection, query));
+        drop(connection);
+
+        let store = opened(&app_data);
+
+        assert_eq!(store.conversations().unwrap().notice, None);
+        assert_eq!(titles(&store), ["Kesh", "Saltmere"]);
+        drop(store);
+        let connection = Connection::open(&file).unwrap();
+        assert_eq!(FORMAT_1_ROWS.map(|query| rows(&connection, query)), before);
+        assert_eq!(
+            rows(&connection, "SELECT unreadable, unfinished FROM messages"),
+            vec![vec![Value::Integer(0), Value::Integer(0)]; 4]
+        );
+        let format: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(format, 2);
+        // A move to memory copies the columns in order, so they must match a new file's.
+        let new = tempfile::tempdir().unwrap();
+        drop(opened(&new));
+        assert_eq!(columns(&file), columns(&file_of(&new)));
+    }
+
+    #[test]
+    fn a_format_1_file_whose_update_fails_is_left_as_it_was_and_the_store_works_in_memory() {
+        let app_data = tempfile::tempdir().unwrap();
+        // A table in the way of the update, which fails after the notes were added.
+        let file = write_format_1(&app_data, "CREATE TABLE accepts (id INTEGER);");
+        let before = fs::read(&file).unwrap();
+
+        let mut store = opened(&app_data);
+        store.add_user_message(None, "In memory", 1).unwrap();
+
+        let Some(StoreNotice::NotSaved { reason }) = store.conversations().unwrap().notice else {
+            panic!("the store is not saved");
+        };
+        assert!(
+            reason.starts_with(
+                "The conversation store could not be updated to this version's format."
+            ),
+            "{reason}"
+        );
+        assert_eq!(titles(&store), ["In memory"]);
+        drop(store);
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn an_answer_keeps_its_proposals_passages_and_notes_across_reopening() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let conversation = store.add_user_message(None, "Propose", 1).unwrap();
+        store
+            .add_answer(conversation, &answer(AnswerState::Complete, "Plain"), 2)
+            .unwrap();
+        store
+            .add_user_message(Some(conversation), "Again", 3)
+            .unwrap();
+        let proposals = [new_page("Places/Saltmere"), edit("People/Ada.md")];
+        let answer_id = store
+            .add_answer(
+                conversation,
+                &Answer {
+                    proposals: &proposals,
+                    unreadable: 2,
+                    unfinished: true,
+                    ..answer(AnswerState::Stopped, "Prose")
+                },
+                4,
+            )
+            .unwrap();
+        drop(store);
+
+        let store = opened(&app_data);
+
+        let read = store.proposals(conversation).unwrap();
+        let ids: Vec<i64> = read[0]
+            .proposals
+            .iter()
+            .map(|proposal| proposal.id)
+            .collect();
+        assert_eq!(
+            read,
+            [AnswerProposals {
+                answer: answer_id,
+                unreadable: 2,
+                unfinished: true,
+                proposals: proposals
+                    .into_iter()
+                    .zip(ids)
+                    .map(|(proposal, id)| SavedProposal {
+                        id,
+                        path: proposal.path,
+                        content: proposal.content,
+                        state: Pending,
+                        undone: false,
+                        accept: None,
+                    })
+                    .collect(),
+                sets: vec![],
+            }],
+            "only the answer with proposals or notes is listed"
+        );
+        let Some(SavedMessage::Answer { text, .. }) =
+            store.conversation(conversation).unwrap().messages.pop()
+        else {
+            panic!("the last message is the answer");
+        };
+        assert_eq!(text, "Prose");
+        assert_eq!(store.proposals(99).unwrap_err().kind, ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn finishing_an_accept_keeps_the_written_proposals_and_frees_the_rest() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (conversation, answer, [a, b, _]) = with_proposals(&mut store);
+        let change = HistoryChange {
+            id: 7,
+            started: 1_700_000_000,
+        };
+
+        let set = store
+            .begin_accept(answer, &pages_of(&[a, b]), Some(change), 5)
+            .unwrap();
+
+        assert_eq!(
+            standing(&store, conversation),
+            [
+                (Pending, false, Some(set)),
+                (Pending, false, Some(set)),
+                (Pending, false, None)
+            ]
+        );
+        let read = store.proposals(conversation).unwrap();
+        assert_eq!(
+            read[0].sets,
+            [AcceptSet {
+                id: set,
+                change: Some(change),
+                state: SetState::Writing
+            }]
+        );
+        assert_eq!(read[0].proposals[0].path, format!("Written/{a}.md"));
+
+        assert_eq!(store.settle(set, &[a]).unwrap(), Settling::Settled);
+        let finished = [
+            (Accepted, false, Some(set)),
+            (Pending, false, None),
+            (Pending, false, None),
+        ];
+        assert_eq!(standing(&store, conversation), finished);
+        assert_eq!(sets(&store, conversation), [(set, SetState::Accepted)]);
+
+        assert_eq!(store.settle(set, &[b]).unwrap(), Settling::AlreadySettled);
+        assert_eq!(standing(&store, conversation), finished);
+
+        // A set with nothing written is deleted.
+        let empty = store
+            .begin_accept(answer, &pages_of(&[b]), None, 6)
+            .unwrap();
+        assert_eq!(store.settle(empty, &[]).unwrap(), Settling::Settled);
+        assert_eq!(standing(&store, conversation), finished);
+        assert_eq!(sets(&store, conversation), [(set, SetState::Accepted)]);
+        assert_eq!(store.settle(empty, &[]).unwrap(), Settling::AlreadySettled);
+    }
+
+    #[test]
+    fn an_undo_marks_its_set_and_settling_returns_the_proposals_as_undone() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (conversation, answer, [a, b, _]) = with_proposals(&mut store);
+        let set = store
+            .begin_accept(answer, &pages_of(&[a, b]), None, 5)
+            .unwrap();
+        store.settle(set, &[a, b]).unwrap();
+
+        assert_eq!(
+            store.begin_undo(set).unwrap(),
+            UnfinishedSet {
+                id: set,
+                pages: pages_of(&[a, b])
+            }
+        );
+        assert_eq!(sets(&store, conversation), [(set, SetState::Undoing)]);
+
+        // Resolved after an undo that restored only `b`'s page.
+        assert_eq!(store.settle(set, &[a]).unwrap(), Settling::Settled);
+        assert_eq!(
+            standing(&store, conversation)[..2],
+            [(Accepted, false, Some(set)), (Pending, true, None)]
+        );
+        assert_eq!(sets(&store, conversation), [(set, SetState::Accepted)]);
+
+        store.begin_undo(set).unwrap();
+        assert_eq!(store.settle(set, &[]).unwrap(), Settling::Settled);
+        assert_eq!(
+            standing(&store, conversation)[..2],
+            [(Pending, true, None), (Pending, true, None)]
+        );
+        assert_eq!(sets(&store, conversation), []);
+        assert_eq!(store.settle(set, &[]).unwrap(), Settling::AlreadySettled);
+
+        // Accepted again, a proposal is no longer marked undone.
+        let again = store
+            .begin_accept(answer, &pages_of(&[a]), None, 6)
+            .unwrap();
+        store.settle(again, &[a]).unwrap();
+        assert_eq!(
+            standing(&store, conversation)[0],
+            (Accepted, false, Some(again))
+        );
+    }
+
+    #[test]
+    fn rejecting_beginning_and_undoing_refuse_proposals_and_sets_in_the_wrong_state() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (conversation, answer, [a, b, _]) = with_proposals(&mut store);
+        let (_, _, [other, ..]) = with_proposals(&mut store);
+        fn kind<T>(result: Result<T, AppError>) -> ErrorKind {
+            result.err().expect("the store refuses").kind
+        }
+
+        store.reject(a).unwrap();
+        assert_eq!(standing(&store, conversation)[0], (Rejected, false, None));
+        assert_eq!(kind(store.reject(a)), ErrorKind::Conflict);
+        assert_eq!(kind(store.reject(999)), ErrorKind::NotFound);
+        assert_eq!(
+            kind(store.begin_accept(answer, &pages_of(&[b, a]), None, 3)),
+            ErrorKind::Conflict
+        );
+        assert_eq!(
+            kind(store.begin_accept(answer, &pages_of(&[other]), None, 3)),
+            ErrorKind::NotFound
+        );
+        // A refused set leaves nothing behind.
+        assert_eq!(sets(&store, conversation), []);
+        assert_eq!(standing(&store, conversation)[1], (Pending, false, None));
+
+        let set = store
+            .begin_accept(answer, &pages_of(&[b]), None, 4)
+            .unwrap();
+        assert_eq!(kind(store.reject(b)), ErrorKind::Conflict);
+        assert_eq!(
+            kind(store.begin_accept(answer, &pages_of(&[b]), None, 5)),
+            ErrorKind::Conflict
+        );
+        assert_eq!(kind(store.begin_undo(set)), ErrorKind::Conflict);
+        assert_eq!(kind(store.begin_undo(999)), ErrorKind::NotFound);
+        store.settle(set, &[b]).unwrap();
+        assert_eq!(kind(store.reject(b)), ErrorKind::Conflict);
+        store.begin_undo(set).unwrap();
+        assert_eq!(kind(store.begin_undo(set)), ErrorKind::Conflict);
+        // Refusals are not failures: the store still saves to its file.
+        assert_eq!(store.conversations().unwrap().notice, None);
+    }
+
+    #[test]
+    fn the_sets_left_unfinished_are_listed_once_when_the_store_opens() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (_, answer, [a, b, c]) = with_proposals(&mut store);
+        let writing = store
+            .begin_accept(answer, &pages_of(&[a]), None, 3)
+            .unwrap();
+        let undoing = store
+            .begin_accept(answer, &pages_of(&[b]), None, 4)
+            .unwrap();
+        store.settle(undoing, &[b]).unwrap();
+        store.begin_undo(undoing).unwrap();
+        assert_eq!(store.take_unfinished(), []);
+        drop(store);
+
+        let mut store = opened(&app_data);
+        store
+            .begin_accept(answer, &pages_of(&[c]), None, 5)
+            .unwrap();
+
+        assert_eq!(
+            store.take_unfinished(),
+            [
+                UnfinishedSet {
+                    id: writing,
+                    pages: pages_of(&[a])
+                },
+                UnfinishedSet {
+                    id: undoing,
+                    pages: pages_of(&[b])
+                }
+            ]
+        );
+        assert_eq!(store.take_unfinished(), []);
+    }
+
+    #[test]
+    fn a_failed_write_moves_proposals_and_sets_to_memory_from_a_new_or_an_updated_file() {
+        for format_1 in [false, true] {
+            let app_data = tempfile::tempdir().unwrap();
+            if format_1 {
+                write_format_1(&app_data, "");
+            }
+            let mut store = opened(&app_data);
+            let (conversation, answer, [a, b, c]) = with_proposals(&mut store);
+            let accepted = store
+                .begin_accept(
+                    answer,
+                    &pages_of(&[a]),
+                    Some(HistoryChange { id: 3, started: 9 }),
+                    3,
+                )
+                .unwrap();
+            store.settle(accepted, &[a]).unwrap();
+            store
+                .begin_accept(answer, &pages_of(&[b]), None, 4)
+                .unwrap();
+            store.reject(c).unwrap();
+            let before = store.proposals(conversation).unwrap();
+            let earlier = titles(&store);
+            store
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail BEFORE INSERT ON messages WHEN NEW.text = 'Fails'
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )
+                .unwrap();
+
+            store
+                .add_user_message(Some(conversation), "Fails", 5)
+                .unwrap();
+
+            assert!(
+                matches!(
+                    store.conversations().unwrap().notice,
+                    Some(StoreNotice::NotSaved { .. })
+                ),
+                "format 1: {format_1}"
+            );
+            assert_eq!(
+                store.proposals(conversation).unwrap(),
+                before,
+                "format 1: {format_1}"
+            );
+            assert_eq!(titles(&store), earlier, "format 1: {format_1}");
+            assert_eq!(
+                store.messages(conversation).unwrap().last(),
+                Some(&user("Fails"))
+            );
+        }
+    }
+
+    #[test]
+    fn retry_is_refused_while_a_proposal_of_the_stopped_answer_belongs_to_a_set() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (conversation, answer, [a, ..]) = with_proposals(&mut store);
+        let set = store
+            .begin_accept(answer, &pages_of(&[a]), None, 3)
+            .unwrap();
+
+        assert_eq!(
+            store.prepare_retry(conversation).unwrap_err().kind,
+            ErrorKind::Conflict,
+            "while the accept runs"
+        );
+        store.settle(set, &[a]).unwrap();
+        assert_eq!(
+            store.prepare_retry(conversation).unwrap_err().kind,
+            ErrorKind::Conflict,
+            "once accepted"
+        );
+
+        store.begin_undo(set).unwrap();
+        store.settle(set, &[]).unwrap();
+        assert_eq!(store.prepare_retry(conversation).unwrap(), "Propose");
+        assert_eq!(store.messages(conversation).unwrap(), [user("Propose")]);
+        assert_eq!(proposal_rows_in_file(&app_data), [0, 0, 0]);
     }
 }
