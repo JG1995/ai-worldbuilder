@@ -44,8 +44,11 @@ function renderTree(overrides: Partial<Props> = {}) {
     onNameCancel: vi.fn(),
     ...overrides,
   };
-  render(<FileTree {...props} />);
-  return props;
+  const { rerender } = render(<FileTree {...props} />);
+  return {
+    ...props,
+    rerender: (next: Partial<Props>) => rerender(<FileTree {...props} {...next} />),
+  };
 }
 
 const row = (name: string) => screen.getByRole("treeitem", { name });
@@ -254,6 +257,27 @@ describe("FileTree", () => {
     );
     fireEvent.click(search);
     expect(onSearch).toHaveBeenCalledOnce();
+  });
+
+  it("flashes the shown rows of each new set of flashed paths once", () => {
+    const { rerender } = renderTree();
+    const flashingRows = () =>
+      screen.getAllByRole("treeitem").filter((item) => item.classList.contains("tree-flash"));
+
+    const flashed = new Set(["Places/Saltmere.md", "Places/North/Þórr.md"]);
+    rerender({ flashed });
+    expect(flashingRows()).toEqual([row("Saltmere")]);
+
+    // A row that was inside a collapsed folder does not flash once it shows.
+    const expanded = new Set(["Places", "Places/North"]);
+    rerender({ flashed, expanded });
+    expect(flashingRows()).toEqual([row("Saltmere")]);
+    // jsdom has no AnimationEvent, so React listens for the prefixed name there.
+    fireEvent(row("Saltmere"), new Event("webkitAnimationEnd", { bubbles: true }));
+    expect(flashingRows()).toEqual([]);
+
+    rerender({ flashed: new Set(["Places/North/Þórr.md"]), expanded });
+    expect(flashingRows()).toEqual([row("Þórr")]);
   });
 
   it("shows the empty state with a New page button when the world has no entries", () => {

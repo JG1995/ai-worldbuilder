@@ -197,4 +197,18 @@ describe("the assistant", () => {
 
     expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
   });
+
+  it("labels a version an accept wrote as accepted from the assistant with AI on", async () => {
+    await openWorld(withProvider, {
+      history_list: () => [{ id: "1-after", kind: "accepted_edit", at: 1_700_000_000 }],
+    });
+
+    fireEvent.contextMenu(screen.getByRole("treeitem", { name: "Overview" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^History/ }));
+
+    const versions = await screen.findByRole("listbox", { name: "Versions" });
+    expect(within(versions).getAllByRole("option")[1]).toHaveTextContent(
+      "Accepted from the assistant",
+    );
+  });
 });

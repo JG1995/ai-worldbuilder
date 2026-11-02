@@ -2,9 +2,17 @@ import { type ReactNode, useState } from "react";
 import type { ConversationSummary, EditorLink, StoreNotice } from "@/types/api";
 import { AssistantPane, type ChatMessage } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
-import { defaultAssistantWidth } from "@/ui/Shell";
+import { FileTree } from "@/ui/FileTree";
+import { defaultAssistantWidth, defaultTreeWidth } from "@/ui/Shell";
 import { type Tab, TabStrip } from "@/ui/TabStrip";
-import { sampleLongTabs, sampleManyTabs, sampleTabs } from "./sample-data";
+import {
+  sampleLongTabs,
+  sampleManyTabs,
+  sampleTabs,
+  sampleTree,
+  sampleTreeExpanded,
+  sampleWorldName,
+} from "./sample-data";
 
 // Every label here is sample data. The build guard in vite.config.ts keeps this module out of
 // production builds.
@@ -73,6 +81,60 @@ function TabStripDemo({
           }}
         />
         <div className="h-12 bg-page" />
+      </div>
+    </div>
+  );
+}
+
+/** The tabs with the first one's page holding changes waiting for review. */
+const samplePendingTabs: Tab[] = sampleTabs.map((tab, index) =>
+  index === 0 ? { ...tab, pending: true } : tab,
+);
+
+/** Rows an accept could have written: two shown, and one inside a collapsed folder. */
+const sampleWrittenPaths = [
+  "Places/The Northern Reaches/Saltmere.md",
+  "People/Þórr.md",
+  "Sessions/Session 2.md",
+];
+
+/** The tree at its default width, whose button flashes the rows an accept wrote. */
+function TreeFlashDemo({ onEvent }: { onEvent: (event: string) => void }) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set(sampleTreeExpanded));
+  const [flashed, setFlashed] = useState<ReadonlySet<string>>(new Set());
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-3">
+        <h3 className="ui-small text-text-muted">Rows an accept wrote flash once</h3>
+        <Button variant="ghost" onClick={() => setFlashed(new Set(sampleWrittenPaths))}>
+          Flash rows
+        </Button>
+      </div>
+      <div style={{ width: defaultTreeWidth }} className="h-80 border border-divider">
+        <FileTree
+          worldName={sampleWorldName}
+          entries={sampleTree}
+          expanded={expanded}
+          flashed={flashed}
+          worldMenuItems={[]}
+          onWorldMenuSelect={() => {}}
+          contextMenuItems={() => []}
+          onContextMenuSelect={() => {}}
+          onOpen={(path) => onEvent(`Open ${path}`)}
+          onToggle={(path, open) =>
+            setExpanded((current) => {
+              const next = new Set(current);
+              if (open) next.add(path);
+              else next.delete(path);
+              return next;
+            })
+          }
+          onNewPage={() => onEvent("New page")}
+          onNewFolder={() => onEvent("New folder")}
+          onNameSubmit={() => {}}
+          onNameCancel={() => {}}
+        />
       </div>
     </div>
   );
@@ -285,6 +347,17 @@ export function ShellSections() {
           onEvent={setEvent}
         />
         <p className="ui text-text-muted">Last event: {event}</p>
+      </Section>
+      <Section
+        title="Changes from the assistant"
+        use="A tab whose page has changes waiting for review shows an info dot, with its tooltip on hover or focus. The tree rows an accept wrote take the selection fill once and fade back; with reduced motion the fill holds briefly instead. Rows inside a collapsed folder do not flash."
+      >
+        <TabStripDemo
+          title="Changes waiting for review on Saltmere"
+          initialTabs={samplePendingTabs}
+          onEvent={setEvent}
+        />
+        <TreeFlashDemo onEvent={setEvent} />
       </Section>
       <Section
         title="Shell"

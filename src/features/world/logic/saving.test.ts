@@ -555,3 +555,35 @@ describe("replacing the page through a core write", () => {
     expect(lastNotice()).toEqual({ kind: "conflict" });
   });
 });
+
+describe("taking in a page that a core write wrote", () => {
+  const written = { text: "# Kesh accepted\n", version: "accepted" };
+
+  it("puts the written text in the editor once and leaves nothing to save", async () => {
+    const { saver, writes } = saverOf(page);
+    const replaced: string[] = [];
+
+    await saver.adoptWritten(written, { replace: (text) => void replaced.push(text) });
+
+    expect(replaced).toEqual(["# Kesh accepted\n"]);
+    expect(saver.text()).toBe("# Kesh accepted\n");
+    expect(saver.savedVersion()).toBe("accepted");
+    expect(await saver.flush()).toEqual({ kind: "clean" });
+    expect(writes).toEqual([]);
+  });
+
+  it("keeps text typed since the last save, as a conflict with the page on disk", async () => {
+    const { saver, writes, lastNotice } = saverOf(page);
+    const replaced: string[] = [];
+    saver.changed("# Kesh\nTyped meanwhile");
+
+    await saver.adoptWritten(written, { replace: (text) => void replaced.push(text) });
+    await vi.advanceTimersByTimeAsync(autosaveDelay);
+
+    expect(replaced).toEqual([]);
+    expect(saver.text()).toBe("# Kesh\nTyped meanwhile");
+    expect(saver.savedVersion()).toBe("accepted");
+    expect(lastNotice()).toEqual({ kind: "conflict" });
+    expect(writes).toEqual([]);
+  });
+});

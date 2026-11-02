@@ -90,6 +90,10 @@ type WorldStore = {
   cursorTarget: { path: string; at: CursorTarget } | null;
   /** Oldest first. */
   toasts: WorldToast[];
+  /** The pages with changes from the assistant waiting for review, whose tabs show a dot. */
+  reviewPaths: ReadonlySet<string>;
+  /** The pages whose tree rows flash once, because an accept from the assistant wrote them. */
+  flashedRows: ReadonlySet<string>;
   /**
    * True from the start of a world change until it ends: the pages save, then the folder dialog
    * shows. Nothing in the world can be edited or opened meanwhile, because the change drops every
@@ -161,6 +165,10 @@ type WorldStore = {
   dismissToast: (id: string) => void;
   /** Dismisses a toast and runs its action. */
   runToastAction: (id: string) => void;
+  /** Sets the pages whose tabs show the review dot; ignored once that world is not open. */
+  setReviewPaths: (session: number, paths: string[]) => void;
+  /** Flashes the tree rows of `paths` once; ignored once that world is not open. */
+  flashRows: (session: number, paths: string[]) => void;
   /** Saves an open page's edits now. A page without an editor has none. */
   flush: (path: string) => Promise<SaveResult>;
   /** Stops every page's autosave, and returns the function that resumes it. */
@@ -188,6 +196,8 @@ const closedWorld = {
   indexRevision: 0,
   cursorTarget: null,
   toasts: [],
+  reviewPaths: new Set<string>(),
+  flashedRows: new Set<string>(),
 };
 
 /** Numbers toasts, so each has its own id. */
@@ -456,6 +466,19 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     get().dismissToast(id);
     toast?.onAction?.();
   },
+
+  setReviewPaths: (session, paths) =>
+    set(({ world, reviewPaths }) => {
+      if (world?.session !== session) return {};
+      const next = new Set(paths);
+      // The same pages again change nothing, so the tabs do not render again.
+      const same = next.size === reviewPaths.size && paths.every((path) => reviewPaths.has(path));
+      return same ? {} : { reviewPaths: next };
+    }),
+
+  // A new set each time, so the same rows flash again after a later accept.
+  flashRows: (session, paths) =>
+    set(({ world }) => (world?.session === session ? { flashedRows: new Set(paths) } : {})),
 
   flush: (path) => {
     const page = get().pages[path];

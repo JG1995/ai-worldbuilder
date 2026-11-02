@@ -204,6 +204,44 @@ export class PageSaver {
   }
 
   /**
+   * Takes in `page`, which a core write outside the editor wrote, such as an accept from the
+   * assistant or its undo. It runs in the queue, after any save in flight, and the written text
+   * becomes the saved text. When the editor still holds the text last saved, `editor.replace` puts
+   * the written text in it; text typed since is kept, autosave pauses and the conflict notice
+   * shows, as after `replacePage`.
+   */
+  adoptWritten(page: PageText, editor: Pick<ReplaceEditor, "replace">): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.disposed) return;
+      const edited = this.edited();
+      this.adopt({ text: page.text, version: page.version });
+      if (edited) {
+        this.cancelTimer();
+        this.setNotice({ kind: "conflict" });
+        return;
+      }
+      editor.replace(page.text);
+      this.latest = page.text;
+      // The editor now holds the page on disk, even if it was missing before.
+      this.setNotice(null);
+    });
+  }
+
+  /**
+   * Takes in that a core write deleted the page, such as the undo of an accept that created it. It
+   * runs in the queue, after any save in flight, and resolves to true when the editor holds no
+   * unsaved text, so its tab can close. Otherwise the text stays with the missing-page notice.
+   */
+  pageDeleted(): Promise<boolean> {
+    return this.enqueue(async () => {
+      if (this.disposed || !this.edited()) return true;
+      this.cancelTimer();
+      this.setNotice({ kind: "missing" });
+      return false;
+    });
+  }
+
+  /**
    * Writes the editor's text back with `restore` after the page was deleted or moved on disk, and
    * resolves to true when it did. Something back at the page's path turns the missing-page notice
    * into the conflict notice.
