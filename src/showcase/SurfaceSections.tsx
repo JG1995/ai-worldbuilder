@@ -90,6 +90,7 @@ function WelcomeSection() {
     onNewWorld: () => setEvent("New world"),
     onChooseRecent: (id: string) => setEvent(`Choose recent world ${id}`),
     onRemoveRecent: (id: string) => setEvent(`Remove recent world ${id}`),
+    onOpenSettings: () => setEvent("Settings"),
   };
 
   return (

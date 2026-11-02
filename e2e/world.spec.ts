@@ -253,6 +253,7 @@ test("recent worlds open from the welcome screen, and the world menu lists the o
     "Open world…",
     "New world…",
     "Close world",
+    "Settings…Ctrl+,",
   ]);
   await page.getByRole("menuitem", { name: worldName }).click();
   await expect(page.getByRole("tree", { name: worldName })).toBeVisible();

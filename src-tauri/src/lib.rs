@@ -1,7 +1,11 @@
+mod data_file;
 mod error;
 mod history;
 mod index;
 mod order;
+mod providers;
+mod secrets;
+mod settings;
 #[cfg(target_os = "linux")]
 mod theme;
 mod world;
@@ -29,10 +33,13 @@ pub fn run() {
             if let Some(theme) = theme::fallback() {
                 app.set_theme(Some(theme));
             }
+            let app_data = app.path().app_data_dir().ok();
+            // Without an app data folder, the settings are the defaults and are never saved.
+            app.manage(settings::SettingsState::load(app_data.as_deref()));
             let state = app.state::<world::WorldState>();
             // Without an app data folder, the recent list stays empty and is never saved.
-            if let Ok(folder) = app.path().app_data_dir() {
-                state.load_recent(&folder);
+            if let Some(folder) = &app_data {
+                state.load_recent(folder);
             }
             let handle = app.handle().clone();
             // An event the webview cannot take changes nothing in the core.
@@ -82,6 +89,10 @@ pub fn run() {
             world::search_pages,
             world::search_text,
             world::search_create,
+            settings::settings_get,
+            settings::settings_ai_set,
+            settings::provider_save,
+            settings::provider_key_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

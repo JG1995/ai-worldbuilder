@@ -21,6 +21,7 @@ const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
 const historyShortcut = "Ctrl+Shift+H";
 const searchShortcut = "Ctrl+O";
+const settingsShortcut = "Ctrl+,";
 
 /** World menu items for recent worlds carry the world's id after this prefix. */
 const recentItemPrefix = "recent:";
@@ -66,6 +67,8 @@ type WorldScreenProps = {
   confirmSaved: (path: string) => Promise<boolean>;
   /** Renders the quick open dialog; without it, Ctrl/Cmd+O and K and the Search button do nothing. */
   quickOpen?: (ports: QuickOpenPorts) => ReactNode;
+  /** Opens Settings; without it, the world menu has no Settings… item. */
+  onOpenSettings?: () => void;
 };
 
 /**
@@ -82,6 +85,7 @@ export function WorldScreen({
   onCloseWorld,
   confirmSaved,
   quickOpen,
+  onOpenSettings,
 }: WorldScreenProps) {
   const tabs = useWorldStore((store) => store.tabs);
   const active = useWorldStore((store) => store.active);
@@ -321,12 +325,14 @@ export function WorldScreen({
   const worldMenuItems: MenuItem[] = [
     ...recentWorlds.map((world) => ({ id: `${recentItemPrefix}${world.id}`, label: world.name })),
     ...worldActionItems,
+    ...(onOpenSettings ? [{ id: "settings", label: "Settings…", shortcut: settingsShortcut }] : []),
   ];
 
   function onWorldMenuSelect(id: string) {
     if (id.startsWith(recentItemPrefix)) onOpenRecent(id.slice(recentItemPrefix.length));
     else if (id === "open-world") onOpenWorld();
     else if (id === "new-world") onNewWorld();
+    else if (id === "settings") onOpenSettings?.();
     else onCloseWorld();
   }
 

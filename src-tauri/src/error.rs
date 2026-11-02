@@ -18,6 +18,10 @@ pub enum ErrorKind {
     Conflict,
     InvalidName,
     Exists,
+    /// AI features are off, so the core refuses every provider command.
+    AiOff,
+    /// The system keychain refused or failed, or none is available for a removal.
+    Keychain,
 }
 
 /// The error every command returns, serialized as `{ kind, message }`.

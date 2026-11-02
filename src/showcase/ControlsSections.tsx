@@ -6,6 +6,7 @@ import { Menu, MenuButton, type MenuItem } from "@/ui/Menu";
 import { Notice } from "@/ui/Notice";
 import { TextInput } from "@/ui/TextInput";
 import { type Toast, ToastRegion } from "@/ui/Toast";
+import { Toggle } from "@/ui/Toggle";
 import { type Point, Tooltip } from "@/ui/Tooltip";
 
 // Every name, label and message here is sample data. The build guard in vite.config.ts keeps this
@@ -117,6 +118,22 @@ function InputsSection() {
           <span className="ui text-text">Compact, as in a tree rename</span>
           <TextInput label="Rename page" hideLabel size="compact" defaultValue="Ærøskøbing" />
         </div>
+      </div>
+    </Section>
+  );
+}
+
+function ToggleSection() {
+  const [on, setOn] = useState(true);
+  return (
+    <Section title="Toggle" use="A switch with its label, On/Off state text and description.">
+      <div className="max-w-140 rounded-md bg-raised p-4">
+        <Toggle
+          label="AI features"
+          checked={on}
+          onChange={setOn}
+          description="Off hides the assistant and every AI feature, and sends nothing to an AI provider. Your provider settings are kept."
+        />
       </div>
     </Section>
   );
@@ -342,6 +359,7 @@ export function ControlsSections() {
     <>
       <ButtonsSection />
       <InputsSection />
+      <ToggleSection />
       <TooltipSection />
       <MenuSection />
       <DialogSection pushToast={pushToast} />
