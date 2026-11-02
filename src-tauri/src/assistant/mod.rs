@@ -3006,7 +3006,7 @@ mod tests {
 
     #[test]
     fn proposals_whose_paths_break_the_rules_are_kept_with_their_reason_and_never_written() {
-        #[cfg_attr(not(unix), allow(unused_mut))]
+        #[cfg_attr(not(unix), allow(unused_mut, clippy::useless_vec))]
         let mut paths = vec!["../x", "/abs", "Map.png", ".hidden/x"];
         #[cfg(unix)]
         paths.push("Elsewhere/x");
