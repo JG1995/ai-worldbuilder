@@ -4,4 +4,4 @@
  * How an earlier version of a page came about: the kind of the change that wrote it, or
  * `outside` for text another tool wrote, which one of the application's writes then replaced.
  */
-export type VersionKind = "edit" | "new_page" | "restored_missing" | "keep_mine" | "restore" | "undo" | "outside";
+export type VersionKind = "edit" | "new_page" | "restored_missing" | "keep_mine" | "restore" | "undo" | "outside" | "accepted_new_page" | "accepted_edit";

@@ -54,6 +54,8 @@ type WorldProps = {
    * belongs to the open world. The change waits for it; a rejection does not stop the change.
    */
   beforeWorldChange?: () => Promise<void>;
+  /** Whether AI is on, which the History view's labels follow; off until the caller knows. */
+  ai?: boolean;
 };
 
 /**
@@ -62,7 +64,13 @@ type WorldProps = {
  * closes, `beforeWorldChange` runs, every open page saves, with the failed-save dialog for each one
  * that cannot, and then the workspace saves.
  */
-export function World({ quickOpen, onOpenSettings, layout, beforeWorldChange }: WorldProps) {
+export function World({
+  quickOpen,
+  onOpenSettings,
+  layout,
+  beforeWorldChange,
+  ai = false,
+}: WorldProps) {
   const world = useWorldStore((store) => store.world);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
@@ -280,6 +288,7 @@ export function World({ quickOpen, onOpenSettings, layout, beforeWorldChange }: 
           quickOpen={quickOpen}
           onOpenSettings={onOpenSettings}
           layout={layout}
+          ai={ai}
         />
       );
     }

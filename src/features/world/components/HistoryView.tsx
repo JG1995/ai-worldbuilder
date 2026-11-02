@@ -2,12 +2,12 @@ import { type KeyboardEvent, useEffect, useRef, useState, useSyncExternalStore }
 import type { IpcError } from "@/lib/ipc";
 import type { DiffLine, HistoryVersion, VersionKind } from "@/types/api";
 import { Button } from "@/ui/Button";
+import { DiffLines } from "@/ui/DiffLines";
 import { Notice } from "@/ui/Notice";
 import { historyCompare, historyList } from "../api/commands";
 import type { PageSaver } from "../logic/saving";
-import { DiffLines } from "./DiffLines";
 
-/** How each version came about, as its label says. */
+/** How each version came about, as its label says while AI is off. */
 const versionLabels: Record<VersionKind, string> = {
   edit: "Edit",
   new_page: "New page",
@@ -16,7 +16,15 @@ const versionLabels: Record<VersionKind, string> = {
   restore: "Restored version",
   undo: "Undo",
   outside: "Changed outside Grimoire.md",
+  accepted_new_page: "New page",
+  accepted_edit: "Edit",
 };
+
+/** A version's label: one an accept wrote says so while AI is on, and reads as any other without. */
+function versionLabel(kind: VersionKind, ai: boolean) {
+  const accepted = kind === "accepted_new_page" || kind === "accepted_edit";
+  return ai && accepted ? "Accepted from the assistant" : versionLabels[kind];
+}
 
 /** When a version was recorded, in local date and time, as the list and the restore toast say. */
 export function versionTime(at: number) {
@@ -34,6 +42,8 @@ type HistoryViewProps = {
   saver: PageSaver;
   /** True while the page shows a notice, such as the conflict, failed-save or missing-page one. */
   restoreBlocked: boolean;
+  /** Whether AI is on, which names the versions an accept from the assistant wrote. */
+  ai: boolean;
   /** Restores a version, and resolves to the reason it could not, or null. */
   onRestore: (version: HistoryVersion) => Promise<string | null>;
   /** Returns to the editor. */
@@ -46,7 +56,14 @@ type HistoryViewProps = {
  * versions, and lists them again whenever the page's saved version changes, so a change on disk
  * shows as the new Current.
  */
-export function HistoryView({ path, saver, restoreBlocked, onRestore, onClose }: HistoryViewProps) {
+export function HistoryView({
+  path,
+  saver,
+  restoreBlocked,
+  ai,
+  onRestore,
+  onClose,
+}: HistoryViewProps) {
   const savedVersion = useSyncExternalStore(saver.subscribe, saver.savedVersion);
   const [flushed, setFlushed] = useState(false);
   const [listing, setListing] = useState<{ versions: HistoryVersion[] } | { error: string } | null>(
@@ -200,7 +217,7 @@ export function HistoryView({ path, saver, restoreBlocked, onRestore, onClose }:
                   {version ? (
                     <>
                       <span className="ui-strong">{versionTime(version.at)}</span>
-                      <span className="ui-small">{versionLabels[version.kind]}</span>
+                      <span className="ui-small">{versionLabel(version.kind, ai)}</span>
                     </>
                   ) : (
                     <span className="ui-strong">Current</span>

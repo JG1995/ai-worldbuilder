@@ -31,6 +31,11 @@ type FileTreeProps = {
   entries: TreeEntry[];
   expanded: ReadonlySet<string>;
   selected?: string;
+  /**
+   * Paths whose rows flash the selection fill once, as they are shown when a new set arrives; rows
+   * inside collapsed folders do not flash.
+   */
+  flashed?: ReadonlySet<string>;
   worldMenuItems: MenuItem[];
   onWorldMenuSelect: (id: string) => void;
   /** The context menu items for an entry, or for the tree's empty space when `target` is null. */
@@ -56,6 +61,8 @@ type FileTreeProps = {
 type Row = { entry: TreeEntry; level: number; parent: string | null; group: number };
 
 const tooltipDelay = 500;
+
+const noRows: ReadonlySet<string> = new Set();
 
 // Indent: the row's own 8px, then 16px per level.
 const indent = (level: number) => 8 + (level - 1) * 16;
@@ -89,6 +96,7 @@ type TreeRowProps = {
   expanded: boolean;
   selected: boolean;
   tabbable: boolean;
+  flashing: boolean;
 };
 
 // Memoized and free of callbacks: the tree handles events for every row.
@@ -98,6 +106,7 @@ const TreeRow = memo(function TreeRow({
   expanded,
   selected,
   tabbable,
+  flashing,
 }: TreeRowProps) {
   const folder = entry.kind === "folder";
   const iconColour = selected ? "text-text" : "text-text-muted";
@@ -115,7 +124,7 @@ const TreeRow = memo(function TreeRow({
         selected
           ? "bg-selected text-text before:absolute before:inset-y-0 before:left-0 before:border-accent before:border-l-2"
           : "text-text-muted hover:bg-hover hover:text-text"
-      }`}
+      }${flashing ? " tree-flash" : ""}`}
     >
       <span className={`flex w-4 shrink-0 ${iconColour}`}>
         {folder && <Icon name={expanded ? "expand_more" : "chevron_right"} />}
@@ -137,6 +146,7 @@ type RowGroupProps = {
   selected?: string;
   tabStop?: string;
   nameInput?: { after: string; node: ReactNode };
+  flashing: ReadonlySet<string>;
 };
 
 /**
@@ -150,6 +160,7 @@ const RowGroup = memo(function RowGroup({
   selected,
   tabStop,
   nameInput,
+  flashing,
 }: RowGroupProps) {
   const items: ReactNode[] = rows.map(({ entry, level }) => (
     <TreeRow
@@ -159,6 +170,7 @@ const RowGroup = memo(function RowGroup({
       expanded={expanded.has(entry.path)}
       selected={entry.path === selected}
       tabbable={entry.path === tabStop}
+      flashing={flashing.has(entry.path)}
     />
   ));
   if (nameInput) {
@@ -230,13 +242,14 @@ type ContextMenuState = { at: Point | Rect; target: TreeEntry | null };
 /**
  * The world's file tree: a header with the world name and actions, then the visible entries as a
  * tree with roving focus. It reports every request to its caller and holds only focus, the open
- * menu and the name tooltip.
+ * menu, the name tooltip and the rows flashing.
  */
 export function FileTree({
   worldName,
   entries,
   expanded,
   selected,
+  flashed,
   worldMenuItems,
   onWorldMenuSelect,
   contextMenuItems,
@@ -262,6 +275,12 @@ export function FileTree({
     () => visibleRows(entries, expanded),
     [entries, expanded],
   );
+  const [flashedBefore, setFlashedBefore] = useState(flashed);
+  const [flashing, setFlashing] = useState(noRows);
+  if (flashed !== flashedBefore) {
+    setFlashedBefore(flashed);
+    setFlashing(new Set([...(flashed ?? [])].filter((path) => indexOf.has(path))));
+  }
 
   // The tab stop is the last focused row while it is visible, else the selected row, else the first.
   const tabStop =
@@ -456,6 +475,10 @@ export function FileTree({
             onBlur={hideTooltip}
             onPointerOver={onPointerOver}
             onPointerLeave={hideTooltip}
+            // The rows start flashing together, so the first to finish ends them all.
+            onAnimationEnd={(event) => {
+              if (rowOf(event.target) === event.target) setFlashing(noRows);
+            }}
           >
             {!inputFolder && nameInputNode}
             {groups.map((group, index) => (
@@ -465,6 +488,7 @@ export function FileTree({
                 expanded={expanded}
                 selected={index === selectedGroup ? selected : undefined}
                 tabStop={index === tabStopGroup ? tabStop : undefined}
+                flashing={flashing}
                 nameInput={
                   inputFolder?.group === index && nameInputNode
                     ? { after: inputFolder.entry.path, node: nameInputNode }

@@ -43,8 +43,11 @@ function typeAtEnd(textbox: HTMLElement, text: string) {
   });
 }
 
-/** Opens the test world with its Overview page, whose history the core answers with `versions`. */
-async function openOverview(overrides: Handler = {}) {
+/**
+ * Opens the test world with its Overview page, whose history the core answers with `versions`,
+ * with AI on or off as `ai` says.
+ */
+async function openOverview(overrides: Handler = {}, ai?: boolean) {
   const calls = mockWorldIpc({
     history_list: () => versions,
     history_compare: () => lines,
@@ -53,7 +56,7 @@ async function openOverview(overrides: Handler = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <World layout={shellLayout} />
+      <World layout={shellLayout} ai={ai} />
     </QueryClientProvider>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open world…" }));
@@ -173,6 +176,31 @@ describe("opening the History view", () => {
 });
 
 describe("the version list", () => {
+  it.each([
+    ["on", true, ["Accepted from the assistant", "Accepted from the assistant"]],
+    ["off", false, ["Edit", "New page"]],
+    ["not known yet", undefined, ["Edit", "New page"]],
+  ])("labels the versions an accept wrote by what they are with AI %s", async (_, ai, labels) => {
+    await openOverview(
+      {
+        history_list: (): HistoryVersion[] => [
+          { id: "2-after", kind: "accepted_edit", at: 1_700_000_600 },
+          { id: "1-after", kind: "accepted_new_page", at: 1_700_000_000 },
+        ],
+      },
+      ai,
+    );
+
+    const view = await historyFromMenu();
+
+    expect(
+      within(view)
+        .getAllByRole("option")
+        .slice(1)
+        .map((option) => option.lastChild?.textContent),
+    ).toEqual(labels);
+  });
+
   it("shows the changes since the selected version, and moves with Up, Down, Home and End", async () => {
     const { calls } = await openOverview();
     const view = await historyFromMenu();

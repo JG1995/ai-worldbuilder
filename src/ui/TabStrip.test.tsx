@@ -111,6 +111,29 @@ describe("TabStrip", () => {
     expect(onActivate.mock.calls).toEqual([["archive"]]);
   });
 
+  it("marks a tab with changes waiting for review with a dot, a tooltip and its description", () => {
+    vi.useFakeTimers();
+    const pending = [{ ...tabs[0], pending: true }, tabs[1]];
+    render(<TabStrip tabs={pending} onActivate={() => {}} onClose={() => {}} />);
+    const shownTooltip = () =>
+      screen
+        .queryAllByText("Changes waiting for review")
+        .filter((element) => !element.closest("[hidden]"));
+
+    expect(tab("Saltmere")).toHaveAccessibleDescription("Changes waiting for review");
+    expect(tab("Saltmere").querySelector('[aria-hidden="true"]')).toBeInTheDocument();
+    expect(tab("Þórr")).toHaveAccessibleDescription("");
+    expect(tab("Þórr").querySelector('[aria-hidden="true"]')).not.toBeInTheDocument();
+
+    fireEvent.pointerEnter(tab("Þórr"));
+    act(() => vi.advanceTimersByTime(500));
+    expect(shownTooltip()).toEqual([]);
+    fireEvent.pointerEnter(tab("Saltmere"));
+    act(() => vi.advanceTimersByTime(500));
+    expect(shownTooltip()).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
   it("makes the focused tab and its close button the strip's tab stops", () => {
     renderStrip();
     const tabStops = () =>

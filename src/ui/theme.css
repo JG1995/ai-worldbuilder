@@ -400,6 +400,21 @@
   opacity: 1;
 }
 
+/*
+ * The tree rows an accept from the assistant wrote take the selection fill once and fade back
+ * (src/ui/FileTree.tsx). The class outweighs the zero duration of the reduced-motion rule below,
+ * so reduced motion still shows the fill briefly: it holds without fading, then goes at once.
+ */
+@keyframes tree-flash {
+  from {
+    background-color: var(--color-selection);
+  }
+}
+
+.tree-flash {
+  animation: tree-flash 800ms ease-out;
+}
+
 /* Outside any layer, so it wins over the transition and animation utilities. */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -407,5 +422,9 @@
   ::after {
     transition-duration: 0s;
     animation-duration: 0s;
+  }
+
+  .tree-flash {
+    animation-timing-function: step-end;
   }
 }

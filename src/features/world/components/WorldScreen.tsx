@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
-import type { RecentWorld, TreeEntry } from "@/types/api";
+import type { RecentWorld, TreeEntry, WrittenPage } from "@/types/api";
 import { Button } from "@/ui/Button";
 import type { LinkAnchor } from "@/ui/editor-links";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
@@ -15,7 +15,7 @@ import { folderCreate, pageCreate, worldTree, worldTreeKey } from "../api/comman
 import { createFromLink } from "../logic/links";
 import { type CursorTarget, useWorldStore } from "../stores/world-store";
 import { pageNameOf } from "../utils/paths";
-import { PageTab } from "./PageTab";
+import { PageTab, pageEditor } from "./PageTab";
 
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
@@ -72,6 +72,26 @@ export type AssistantPorts = {
   openPage: (path: string, options: { newTab: boolean; at?: LinkAnchor }) => void;
   flushActive: () => Promise<void>;
   hasPage: (path: string) => boolean;
+  /**
+   * Saves the pending edits of the open pages among `paths`, and resolves once each has saved or
+   * failed to: false when any could not be saved, so the caller writes nothing.
+   */
+  flushPages: (paths: string[]) => Promise<boolean>;
+  /**
+   * Takes in pages a core write wrote: each open page's editor takes the written text by its
+   * saver's rules, and the tree refreshes; with `flash`, which only an accept sets, the pages'
+   * rows then flash once.
+   */
+  pagesWritten: (pages: WrittenPage[], options: { flash: boolean }) => Promise<void>;
+  /**
+   * Takes in pages a core write deleted: each one's tab closes unless it holds unsaved text, which
+   * stays with the missing-page notice, and the tree refreshes.
+   */
+  pagesDeleted: (paths: string[]) => Promise<void>;
+  /** Shows a toast in this world, with an action such as Undo when `action` is given. */
+  showToast: (message: string, action?: { label: string; run: () => void }) => void;
+  /** Marks the tabs of `paths` as having changes waiting for review. */
+  setReviewPaths: (paths: string[]) => void;
 };
 
 /**
@@ -124,6 +144,8 @@ type WorldScreenProps = {
   onOpenSettings?: () => void;
   /** Lays out the screen's parts. */
   layout: (parts: WorldScreenParts) => ReactNode;
+  /** Whether AI is on, which the History view's labels follow. */
+  ai: boolean;
 };
 
 /**
@@ -142,6 +164,7 @@ export function WorldScreen({
   quickOpen,
   onOpenSettings,
   layout,
+  ai,
 }: WorldScreenProps) {
   const tabs = useWorldStore((store) => store.tabs);
   const active = useWorldStore((store) => store.active);
@@ -157,6 +180,8 @@ export function WorldScreen({
   const worldNotices = useWorldStore((store) => store.worldNotices);
   const historyNotRecording = useWorldStore((store) => store.historyNotRecording);
   const toasts = useWorldStore((store) => store.toasts);
+  const reviewPaths = useWorldStore((store) => store.reviewPaths);
+  const flashedRows = useWorldStore((store) => store.flashedRows);
   const indexRevision = useWorldStore((store) => store.indexRevision);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const [searching, setSearching] = useState(false);
@@ -182,8 +207,11 @@ export function WorldScreen({
     folderCreated,
     showWorldNotice,
     showHistory,
+    showToast,
     dismissToast,
     runToastAction,
+    setReviewPaths,
+    flashRows,
   } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const treeKey = [...worldTreeKey, session];
@@ -274,6 +302,46 @@ export function WorldScreen({
     close: () => setSearching(false),
   };
 
+  /** Saves the open pages among `paths`; false when any of them could not be saved. */
+  async function flushPages(paths: string[]) {
+    const results = await Promise.all(paths.map((path) => flush(path)));
+    return results.every(({ kind }) => kind === "saved" || kind === "clean");
+  }
+
+  /** Puts written pages in their open tabs, then refreshes the tree and flashes their rows. */
+  async function pagesWritten(pages: WrittenPage[], { flash }: { flash: boolean }) {
+    await Promise.all(
+      pages.map(async ({ path, text, version }) => {
+        const page = useWorldStore.getState().pages[path];
+        if (page?.status === "ready") {
+          await page.saver.adoptWritten({ text, version }, pageEditor(session, path));
+        }
+      }),
+    );
+    // The watcher leaves the application's own writes out, so the tree is refreshed here, and
+    // new pages' rows can flash only once it lists them.
+    await queryClient.invalidateQueries({ queryKey: treeKey });
+    if (!flash) return;
+    flashRows(
+      session,
+      pages.map((page) => page.path),
+    );
+  }
+
+  /** Closes the tabs of deleted pages that hold no unsaved text, then refreshes the tree. */
+  async function pagesDeleted(paths: string[]) {
+    await Promise.all(
+      paths.map(async (path) => {
+        const page = useWorldStore.getState().pages[path];
+        if (page === undefined) return;
+        if (page.status === "ready" && !(await page.saver.pageDeleted())) return;
+        // Unless the tab closed or opened the page again meanwhile.
+        if (useWorldStore.getState().pages[path] === page) closeTab(path);
+      }),
+    );
+    await queryClient.invalidateQueries({ queryKey: treeKey });
+  }
+
   const assistantPorts: AssistantPorts = {
     session,
     activePage: active,
@@ -285,6 +353,11 @@ export function WorldScreen({
     },
     // Until the tree has loaded, every page counts as there.
     hasPage: (path) => tree.data === undefined || treeHasPage(tree.data, path),
+    flushPages,
+    pagesWritten,
+    pagesDeleted,
+    showToast: (message, action) => showToast(session, message, action),
+    setReviewPaths: (paths) => setReviewPaths(session, paths),
   };
 
   /** Opens a page from the tree in the current tab, as a click does, then shows its history. */
@@ -442,6 +515,7 @@ export function WorldScreen({
               entries={tree.data ?? []}
               expanded={expanded}
               selected={selectedFolder ?? active ?? undefined}
+              flashed={flashedRows}
               worldMenuItems={worldMenuItems}
               onWorldMenuSelect={onWorldMenuSelect}
               contextMenuItems={contextMenuItems}
@@ -464,7 +538,11 @@ export function WorldScreen({
           ),
         tabStrip: (treeToggle, assistantToggle) => (
           <TabStrip
-            tabs={tabs.map((path) => ({ id: path, label: pageNameOf(path) }))}
+            tabs={tabs.map((path) => ({
+              id: path,
+              label: pageNameOf(path),
+              pending: reviewPaths.has(path),
+            }))}
             activeId={active ?? undefined}
             onActivate={activateTab}
             onClose={closePage}
@@ -515,6 +593,7 @@ export function WorldScreen({
                   key={active}
                   path={active}
                   session={session}
+                  ai={ai}
                   onClose={(path) => void closeFromPage(path, { save: true })}
                   onDiscard={(path) => void closeFromPage(path, { save: false })}
                   onOpenPage={(path, options) => void openFromTree(path, options)}

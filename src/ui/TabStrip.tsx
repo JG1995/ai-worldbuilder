@@ -3,6 +3,7 @@ import {
   type ReactNode,
   useEffect,
   useEffectEvent,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -11,7 +12,12 @@ import { IconButton } from "./Button";
 import { MenuButton } from "./Menu";
 import { usePopoverPosition } from "./Tooltip";
 
-export type Tab = { id: string; label: string };
+export type Tab = {
+  id: string;
+  label: string;
+  /** Shows a dot, with a tooltip and the tab's description, for changes waiting for review. */
+  pending?: boolean;
+};
 
 type TabStripProps = {
   /** Shown in this order. */
@@ -27,6 +33,14 @@ type TabStripProps = {
 
 const tooltipDelay = 500;
 
+const pendingText = "Changes waiting for review";
+
+/**
+ * The tooltip of the tab that has the pointer or focus: the full label of a truncated tab, and that
+ * changes wait for review.
+ */
+type TabTooltipState = { anchor: Element; label: string | null; pending: boolean };
+
 /** The element that holds a tab and its close button. */
 function tabElement(list: HTMLElement | null, id: string | undefined) {
   return [...(list?.querySelectorAll<HTMLElement>("[data-tab]") ?? [])].find(
@@ -34,8 +48,8 @@ function tabElement(list: HTMLElement | null, id: string | undefined) {
   );
 }
 
-/** The full label of a truncated tab. It repeats the tab's own name, so it is hidden from AT. */
-function LabelTooltip({ anchor }: { anchor: Element }) {
+/** A tab's tooltip. It repeats the tab's own name and description, so it is hidden from AT. */
+function TabTooltip({ anchor, label, pending }: TabTooltipState) {
   const tooltip = useRef<HTMLDivElement>(null);
   const position = usePopoverPosition(tooltip, anchor, "start");
 
@@ -46,7 +60,8 @@ function LabelTooltip({ anchor }: { anchor: Element }) {
       style={position}
       className="ui-small pointer-events-none z-(--z-menu) max-w-80 break-words rounded-md border border-divider bg-raised px-2 py-1 text-text shadow-(--level-2-shadow)"
     >
-      {anchor.textContent}
+      {label && <div>{label}</div>}
+      {pending && <div>{pendingText}</div>}
     </div>
   );
 }
@@ -55,7 +70,7 @@ function LabelTooltip({ anchor }: { anchor: Element }) {
  * The open pages above the page region, with manual activation: Left and Right move focus, and
  * Enter, Space or a click report an activate request. Ctrl/Cmd+Tab and Ctrl/Cmd+Shift+Tab report
  * the next and previous tab while the strip is mounted. It holds only focus, overflow and the
- * label tooltip.
+ * tabs' tooltip.
  */
 export function TabStrip({
   tabs,
@@ -70,7 +85,8 @@ export function TabStrip({
   const tooltipTimer = useRef<number>(undefined);
   const [focused, setFocused] = useState<string>();
   const [overflowing, setOverflowing] = useState(false);
-  const [tooltipAnchor, setTooltipAnchor] = useState<Element | null>(null);
+  const [tooltip, setTooltip] = useState<TabTooltipState | null>(null);
+  const pendingId = useId();
   const has = (id: string | undefined) => tabs.some((tab) => tab.id === id);
   const tabStop = [focused, activeId].find(has) ?? tabs[0]?.id;
 
@@ -118,18 +134,23 @@ export function TabStrip({
 
   useEffect(() => () => window.clearTimeout(tooltipTimer.current), []);
 
-  function showTooltipLater(label: Element | null) {
+  /** Shows the tooltip of the tab `id` after a delay, when its label is cut or it is pending. */
+  function showTooltipLater(id: string | undefined) {
     window.clearTimeout(tooltipTimer.current);
-    if (!label || label.scrollWidth <= label.clientWidth) {
-      setTooltipAnchor(null);
+    const tab = tabs.find((candidate) => candidate.id === id);
+    const label = tabElement(list.current, id)?.querySelector("[data-label]");
+    const truncated = label != null && label.scrollWidth > label.clientWidth;
+    if (!tab || !label || (!truncated && !tab.pending)) {
+      setTooltip(null);
       return;
     }
-    tooltipTimer.current = window.setTimeout(() => setTooltipAnchor(label), tooltipDelay);
+    const shown = { anchor: label, label: truncated ? tab.label : null, pending: !!tab.pending };
+    tooltipTimer.current = window.setTimeout(() => setTooltip(shown), tooltipDelay);
   }
 
   function hideTooltip() {
     window.clearTimeout(tooltipTimer.current);
-    setTooltipAnchor(null);
+    setTooltip(null);
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
@@ -142,7 +163,7 @@ export function TabStrip({
       focusTab(tabs[(index + step + tabs.length) % tabs.length].id);
     } else if (event.key === "Enter" || event.key === " ") {
       onActivate(id);
-    } else if (event.key === "Escape" && tooltipAnchor) {
+    } else if (event.key === "Escape" && tooltip) {
       hideTooltip();
     } else {
       return;
@@ -171,9 +192,7 @@ export function TabStrip({
           onFocus={(event) => {
             const tab = event.target.closest<HTMLElement>("[data-tab]");
             if (tab?.dataset.tab) setFocused(tab.dataset.tab);
-            if (event.target.getAttribute("role") === "tab") {
-              showTooltipLater(event.target.firstElementChild);
-            }
+            if (event.target.getAttribute("role") === "tab") showTooltipLater(tab?.dataset.tab);
           }}
           onBlur={(event) => {
             hideTooltip();
@@ -188,9 +207,7 @@ export function TabStrip({
                 key={tab.id}
                 role="presentation"
                 data-tab={tab.id}
-                onPointerEnter={(event) =>
-                  showTooltipLater(event.currentTarget.querySelector("[data-label]"))
-                }
+                onPointerEnter={() => showTooltipLater(tab.id)}
                 onPointerLeave={hideTooltip}
                 className={`group relative flex h-full max-w-[200px] shrink-0 items-center transition-colors ${
                   active
@@ -202,6 +219,7 @@ export function TabStrip({
                   type="button"
                   role="tab"
                   aria-selected={active}
+                  aria-describedby={tab.pending ? pendingId : undefined}
                   tabIndex={tab.id === tabStop ? 0 : -1}
                   onClick={() => onActivate(tab.id)}
                   onAuxClick={(event) => event.button === 1 && onClose(tab.id)}
@@ -212,6 +230,13 @@ export function TabStrip({
                   <span data-label className="min-w-0 truncate">
                     {tab.label}
                   </span>
+                  {/* A border, not a fill, so forced colours keep the dot. */}
+                  {tab.pending && (
+                    <span
+                      aria-hidden="true"
+                      className="ml-2 size-2 shrink-0 rounded-full border-4 border-info"
+                    />
+                  )}
                 </button>
                 <span className="invisible absolute inset-y-0 right-1 flex items-center group-focus-within:visible group-hover:visible">
                   <IconButton
@@ -241,7 +266,10 @@ export function TabStrip({
         </div>
       )}
       {trailing && <div className="flex shrink-0 items-center px-1">{trailing}</div>}
-      {tooltipAnchor && <LabelTooltip anchor={tooltipAnchor} />}
+      {tooltip && <TabTooltip {...tooltip} />}
+      <span id={pendingId} hidden>
+        {pendingText}
+      </span>
     </div>
   );
 }

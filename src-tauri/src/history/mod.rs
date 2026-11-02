@@ -168,6 +168,10 @@ pub enum VersionKind {
     Restore,
     Undo,
     Outside,
+    /// A page an accepted change from the assistant created.
+    AcceptedNewPage,
+    /// A page an accepted change from the assistant edited.
+    AcceptedEdit,
 }
 
 /// An earlier version of a page, as the History view lists it.
@@ -396,6 +400,7 @@ impl History {
         };
         for row in rows {
             let (change, kind, started, latest, before, after) = row?;
+            let after_kind = version_kind(&kind, before == State::Absent);
             // When the text a change replaced is the text the change before it left, it is the
             // last version listed, so it is skipped as a repeat; any other came from another tool.
             if let State::Page(bytes) = before {
@@ -407,12 +412,7 @@ impl History {
                 );
             }
             if let State::Page(bytes) = after {
-                push(
-                    version_id(change, AFTER),
-                    version_kind(&kind),
-                    latest,
-                    bytes,
-                );
+                push(version_id(change, AFTER), after_kind, latest, bytes);
             }
         }
         versions.reverse();
@@ -605,10 +605,12 @@ impl History {
     }
 }
 
-/// The kind of a version a change of `kind` left. Only an edit and the kinds below leave a page; a
-/// new folder leaves none.
-fn version_kind(kind: &str) -> VersionKind {
+/// The kind of a version a change of `kind` left where the page was `absent` before or not. Only
+/// an edit and the kinds below leave a page; a new folder leaves none.
+fn version_kind(kind: &str, absent: bool) -> VersionKind {
     match kind {
+        "accepted" if absent => VersionKind::AcceptedNewPage,
+        "accepted" => VersionKind::AcceptedEdit,
         "new_page" => VersionKind::NewPage,
         "restored_missing" => VersionKind::RestoredMissing,
         "keep_mine" => VersionKind::KeepMine,
@@ -1116,6 +1118,34 @@ mod tests {
             );
         }
         assert_eq!(history.version_bytes("Other.md", "2-before").unwrap(), None);
+    }
+
+    #[test]
+    fn an_accepted_change_lists_a_new_page_and_an_edit_apart() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        change(
+            &mut history,
+            Kind::Accepted,
+            State::Absent,
+            page(b"new"),
+            10,
+        );
+        change(
+            &mut history,
+            Kind::Accepted,
+            page(b"new"),
+            page(b"edited"),
+            20,
+        );
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("2-after", VersionKind::AcceptedEdit, 20, "edited"),
+                version("1-after", VersionKind::AcceptedNewPage, 10, "new"),
+            ]
+        );
     }
 
     #[test]

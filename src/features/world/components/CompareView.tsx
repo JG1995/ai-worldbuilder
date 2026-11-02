@@ -2,8 +2,8 @@ import { type Ref, useEffect, useState } from "react";
 import type { IpcError } from "@/lib/ipc";
 import type { DiffLine } from "@/types/api";
 import { Button } from "@/ui/Button";
+import { DiffLines } from "@/ui/DiffLines";
 import { pageCompare } from "../api/commands";
-import { DiffLines } from "./DiffLines";
 
 type CompareViewProps = {
   /** Keep mine, which the opener focuses because the Compare button that opened it is gone. */

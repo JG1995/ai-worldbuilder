@@ -61,6 +61,8 @@ type PageTabProps = {
   onOpenPage: (path: string, options: { newTab: boolean; at: CursorTarget }) => void;
   /** Creates the page that `link`, unresolved in the page at `from`, names. */
   onCreateLink: (from: string, link: EditorLink) => void;
+  /** Whether AI is on, which the History view's labels follow; off by default. */
+  ai?: boolean;
 };
 
 /**
@@ -114,7 +116,7 @@ function readyPage(session: number, path: string) {
  * Puts a page's text from a core write in its editor: in the running editor while its tab shows
  * the page, otherwise in the state the tab will show.
  */
-function pageEditor(session: number, path: string): ReplaceEditor {
+export function pageEditor(session: number, path: string): ReplaceEditor {
   const { setEditor } = useWorldStore.getState();
   return {
     replace: (text) => {
@@ -182,6 +184,7 @@ export function PageTab({
   onDiscard,
   onOpenPage,
   onCreateLink,
+  ai = false,
 }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
@@ -348,6 +351,7 @@ export function PageTab({
             path={path}
             saver={saver}
             restoreBlocked={notice !== null}
+            ai={ai}
             onRestore={restoreVersion}
             onClose={backToEditor}
           />
