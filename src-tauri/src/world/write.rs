@@ -35,6 +35,8 @@ enum Written {
     /// A page, by the version of the bytes written.
     Page(String),
     Folder,
+    /// Nothing: a page the application deleted, or a folder it removed.
+    Absent,
 }
 
 impl OwnWrites {
@@ -45,6 +47,10 @@ impl OwnWrites {
 
     fn folder(&mut self, relative: &str) {
         self.0.insert(relative.to_owned(), Written::Folder);
+    }
+
+    fn absent(&mut self, relative: &str) {
+        self.0.insert(relative.to_owned(), Written::Absent);
     }
 
     /// Whether the entry at `relative` inside `root` still is what the application last wrote
@@ -59,6 +65,10 @@ impl OwnWrites {
                 fs::read(&path).is_ok_and(|bytes| page::version_of(&bytes) == *version)
             }
             Some(Written::Folder) => fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_dir()),
+            Some(Written::Absent) => matches!(
+                fs::symlink_metadata(&path),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ),
         };
         if !own {
             self.0.remove(relative);
@@ -164,6 +174,27 @@ impl<'a> Recorder<'a> {
         }
     }
 
+    /// Completes `record`, whose write stopped partway, keeping only the entries of `paths`, which
+    /// were written. Returns the id of the change once it is complete.
+    fn finish_only(&mut self, record: Option<Record>, paths: &[String]) -> Option<i64> {
+        let (Some(record), Some(history)) = (record, self.history.as_deref_mut()) else {
+            return None;
+        };
+        let change = record.change();
+        let result = history.complete_only(record, paths);
+        let completed = result.is_ok();
+        self.ended(result);
+        completed.then_some(change)
+    }
+
+    /// The change `record` names, by its id and the time of this write, which started it.
+    fn change_of(&self, record: Option<&Record>) -> Option<ChangeId> {
+        record.map(|record| ChangeId {
+            id: record.change(),
+            started: self.now,
+        })
+    }
+
     fn started(&mut self, result: Result<Record, Failure>) -> Option<Record> {
         result.map_err(|failure| self.failed(failure)).ok()
     }
@@ -203,7 +234,7 @@ pub struct RestoredPage {
 enum Replacement<'a> {
     /// The editor's text, rebuilt over the page's bytes; Keep mine's when `keep_mine` is set.
     Text { text: &'a str, keep_mine: bool },
-    /// Exact bytes, for Restore this version (`Kind::Restore`) and Undo (`Kind::Undo`).
+    /// Exact bytes, for Restore this version (`Kind::Restore`).
     Bytes { bytes: &'a [u8], kind: Kind },
 }
 
@@ -269,7 +300,7 @@ fn write_page_with(
 }
 
 /// Writes `bytes` exactly over the page at `relative` inside `root`, if the page still has the
-/// bytes that `version` names, and records the write as `kind`: Restore this version or Undo. The
+/// bytes that `version` names, and records the write as `kind`, as Restore this version does. The
 /// caller holds the world lock, so writes and their records do not overlap.
 pub fn write_bytes(
     root: &Path,
@@ -336,51 +367,49 @@ pub fn undo(
     recorder: &mut Recorder,
     change: &str,
 ) -> Result<RestoredPage, AppError> {
-    let entries = match (change.parse::<i64>(), recorder.history()) {
-        (Ok(id), Some(history)) => history.change_entries(id)?,
+    let id = change.parse::<i64>().ok();
+    let entries = match (id, recorder.history()) {
+        (Some(id), Some(history)) => history.change_entries(id)?,
         _ => None,
     };
-    let Some(
-        [
-            Entry {
-                path,
-                before: State::Page(before),
-                after: State::Page(after),
-            },
-        ],
-    ) = entries.as_deref()
+    let (
+        Some(id),
+        Some(
+            [
+                Entry {
+                    path,
+                    before: State::Page(_),
+                    after: State::Page(after),
+                },
+            ],
+        ),
+    ) = (id, entries.as_deref())
     else {
-        return Err(AppError::new(
-            ErrorKind::NotFound,
-            "This change cannot be undone.",
-        ));
+        return Err(cannot_undo());
     };
-    // Every entry is checked before any is written, so an undo stays all or nothing.
-    let current = match paths::existing_page(root, path) {
-        Ok(page) => Some(fs::read(page)?),
-        Err(error) if error.kind == ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    let Some(current) = current.filter(|current| current == after) else {
-        let name = Path::new(path).file_stem().unwrap_or_default();
-        return Err(AppError::new(
-            ErrorKind::Conflict,
-            format!(
-                "“{}” changed since the restore, so nothing was undone. Its history still holds \
-                 every version.",
-                name.to_string_lossy()
-            ),
-        ));
-    };
-    write_bytes(
-        root,
-        own,
-        recorder,
-        path,
-        before,
-        &page::version_of(&current),
-        Kind::Undo,
-    )
+    // `undo_change` checks the page too; this check gives a changed page the restore's wording.
+    match check_holds(root, path, after) {
+        Err(error) if error.kind == ErrorKind::Conflict => {
+            let name = Path::new(path).file_stem().unwrap_or_default();
+            return Err(AppError::new(
+                ErrorKind::Conflict,
+                format!(
+                    "“{}” changed since the restore, so nothing was undone. Its history still \
+                     holds every version.",
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+        result => result?,
+    }
+    let undone = undo_change(root, own, recorder, UndoTarget::Change(id), |_, _| true)?;
+    // A change of one page undoes in one step, which leaves nothing to roll back.
+    let page = undone.restored.into_iter().next().ok_or_else(cannot_undo)?;
+    Ok(RestoredPage {
+        text: page.text,
+        version: page.version,
+        change: undone.change.map(|change| change.id.to_string()),
+    })
 }
 
 /// Replaces the page at `relative` inside `root` with `replacement`, if the page still has the
@@ -401,11 +430,7 @@ fn replace_page_with(
     if page::version_of(&current) != version {
         return Err(conflict());
     }
-    // Unix lets a rename replace a read-only file, so the write path refuses it itself.
-    let permissions = fs::metadata(&page)?.permissions();
-    if permissions.readonly() {
-        return Err(AppError::new(ErrorKind::Io, "The page is read-only."));
-    }
+    let permissions = writable_permissions(&page)?;
     let bytes = match replacement {
         Replacement::Text { text, .. } => page::rebuild(&current, text)?,
         Replacement::Bytes { bytes, .. } => {
@@ -435,22 +460,7 @@ fn replace_page_with(
             recorder.begin(kind, &[entry])
         }
     };
-    let temporary = temporary_path(&page);
-    let result = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(AppError::from)
-        .and_then(|file| {
-            let result = write_temporary(file, &bytes, permissions)
-                .map_err(AppError::from)
-                .and_then(|()| put_in_place(&temporary, &page, version));
-            if result.is_err() {
-                // The failure being reported matters more than one that removing the file might add.
-                let _ = fs::remove_file(&temporary);
-            }
-            result
-        });
+    let result = put_bytes(&page, &bytes, permissions, version, put_in_place);
     let change = recorder.finish(record, result.is_ok());
     result?;
     own.page(relative, &bytes);
@@ -458,6 +468,41 @@ fn replace_page_with(
         version: page::version_of(&bytes),
         change,
     })
+}
+
+/// The permissions of the page at `page`, which its replacement takes. Unix lets a rename replace a
+/// read-only file, so the write path refuses one itself.
+fn writable_permissions(page: &Path) -> Result<Permissions, AppError> {
+    let permissions = fs::metadata(page)?.permissions();
+    if permissions.readonly() {
+        return Err(AppError::new(ErrorKind::Io, "The page is read-only."));
+    }
+    Ok(permissions)
+}
+
+/// Writes `bytes` to a temporary file beside the page at `page`, with `permissions`, and has
+/// `put_in_place` put it in place, given the version the page must still have. Any failure removes
+/// the temporary file.
+fn put_bytes(
+    page: &Path,
+    bytes: &[u8],
+    permissions: Permissions,
+    version: &str,
+    put_in_place: impl FnOnce(&Path, &Path, &str) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let temporary = temporary_path(page);
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let result = write_temporary(file, bytes, permissions)
+        .map_err(AppError::from)
+        .and_then(|()| put_in_place(&temporary, page, version));
+    if result.is_err() {
+        // The failure being reported matters more than one that removing the file might add.
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// A page or folder the user created, by its path relative to the world.
@@ -846,6 +891,686 @@ pub fn outside_world() -> AppError {
     )
 }
 
+/// A change in history, by its id and the time it started, which together name it: ids start again
+/// in a history database that replaced a damaged one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeId {
+    pub id: i64,
+    pub started: u64,
+}
+
+/// One write of a batch.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+)]
+#[derive(Debug, Clone)]
+pub enum BatchWrite {
+    /// A page to create at `path` with `text`, written as it is.
+    NewPage { path: String, text: String },
+    /// The editor's `text` for the existing page at `path`, made from its text at `version`.
+    Edit {
+        path: String,
+        text: String,
+        version: String,
+    },
+}
+
+/// A page that a batch or an undo wrote: its path as it is on disk, its text as the editor reads
+/// it, and the version of its bytes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WrittenPage {
+    pub path: String,
+    pub text: String,
+    pub version: String,
+}
+
+/// The write that stopped a batch partway, by its index in the batch, and why.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+)]
+#[derive(Debug)]
+pub struct BatchFailure {
+    pub index: usize,
+    pub error: AppError,
+}
+
+/// What a batch wrote, in order.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+)]
+#[derive(Debug)]
+pub struct BatchWritten {
+    pub written: Vec<WrittenPage>,
+    /// The change that records what was written, once it is complete.
+    pub change: Option<ChangeId>,
+    /// The write that failed; the writes after it were not tried.
+    pub failure: Option<BatchFailure>,
+}
+
+/// A batch write once checked: its path as it is on disk, the bytes it writes and their text.
+struct PlannedWrite {
+    path: String,
+    bytes: Vec<u8>,
+    text: String,
+    kind: PlannedKind,
+}
+
+enum PlannedKind {
+    /// A new page, with the folders it creates first, outermost first, by path relative to the
+    /// world. A folder that an earlier page of the batch creates is not among them.
+    New { folders: Vec<String> },
+    /// An edit of a page whose bytes are `before`, with `version`.
+    Edit { before: Vec<u8>, version: String },
+}
+
+/// Writes `writes` in order as one `accepted` change: new pages, with the folders they need, and
+/// edits of existing pages. Every write is checked before any is written, and any refusal writes
+/// and records nothing: an edit's page must exist, still have its version, be UTF-8 and change; a
+/// new page's path must pass the naming rules and confinement and be free in any letter case, also
+/// of the batch's other pages. Paths map to the names on disk, and a folder the batch creates
+/// counts as existing for its later pages. The change is begun with every entry before any file is
+/// written, and `on_record` then gets its id and start time, or none when nothing records, with
+/// the writes' paths as they will be written; when it returns false, the record is abandoned and
+/// nothing is written. A write that fails stops the batch: what was written stays, the change keeps
+/// exactly it, and the result names the failure. The caller holds the world lock, so writes do not
+/// overlap.
+pub fn write_batch(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    writes: &[BatchWrite],
+    on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+) -> Result<BatchWritten, AppError> {
+    write_batch_with(root, own, recorder, writes, on_record, |_| Ok(()))
+}
+
+/// `write_batch`, with a step that runs just before the write at each index puts its page's file
+/// in place, after a new page's folders were created, so tests can make that write fail.
+fn write_batch_with(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    writes: &[BatchWrite],
+    on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+    mut before_write: impl FnMut(usize) -> Result<(), AppError>,
+) -> Result<BatchWritten, AppError> {
+    let planned = check_batch(root, writes)?;
+    let record = recorder.begin(Kind::Accepted, &batch_entries(&planned));
+    let change = recorder.change_of(record.as_ref());
+    let paths: Vec<String> = planned.iter().map(|write| write.path.clone()).collect();
+    if !on_record(change, &paths) {
+        recorder.finish(record, false);
+        return Err(stopped());
+    }
+
+    let mut written = Vec::new();
+    // The paths of the pages written and of the folders created for them.
+    let mut kept: Vec<String> = Vec::new();
+    let mut failure = None;
+    for (index, write) in planned.into_iter().enumerate() {
+        let result = match &write.kind {
+            PlannedKind::New { folders } => {
+                let created = create_batch_page(root, own, &write, folders, || before_write(index));
+                match created {
+                    Ok(()) => {
+                        kept.extend(folders.iter().cloned());
+                        Ok(())
+                    }
+                    Err((error, left)) => {
+                        kept.extend(left);
+                        Err(error)
+                    }
+                }
+            }
+            PlannedKind::Edit { version, .. } => before_write(index)
+                .and_then(|()| replace_batch_page(root, &write.path, &write.bytes, version)),
+        };
+        if let Err(error) = result {
+            failure = Some(BatchFailure { index, error });
+            break;
+        }
+        own.page(&write.path, &write.bytes);
+        kept.push(write.path.clone());
+        written.push(WrittenPage {
+            version: page::version_of(&write.bytes),
+            path: write.path,
+            text: write.text,
+        });
+    }
+
+    let completed = match &failure {
+        None => recorder.finish(record, true),
+        // The DESIGN records no change when no page was written, whatever folders remain.
+        Some(_) if written.is_empty() => recorder.finish(record, false),
+        Some(_) => recorder.finish_only(record, &kept),
+    };
+    Ok(BatchWritten {
+        written,
+        change: change.filter(|_| completed.is_some()),
+        failure,
+    })
+}
+
+/// Checks every write of a batch, in order, and maps each path to the names on disk.
+fn check_batch(root: &Path, writes: &[BatchWrite]) -> Result<Vec<PlannedWrite>, AppError> {
+    // What the batch writes and creates, by path in lowercase: the path as written, and whether it
+    // is a folder.
+    let mut taken: HashMap<String, (String, bool)> = HashMap::new();
+    let mut planned = Vec::with_capacity(writes.len());
+    for write in writes {
+        let write = match write {
+            BatchWrite::Edit {
+                path,
+                text,
+                version,
+            } => {
+                let (path, page) = existing_page_on_disk(root, path)?;
+                let current = fs::read(&page)?;
+                if page::version_of(&current) != *version {
+                    return Err(conflict());
+                }
+                let bytes = page::rebuild(&current, text)?;
+                // Review reports an edit that changes nothing, so it is never offered.
+                if bytes == current || taken.contains_key(&path.to_lowercase()) {
+                    return Err(conflict());
+                }
+                taken.insert(path.to_lowercase(), (path.clone(), false));
+                PlannedWrite {
+                    text: page::text_of(&bytes)?,
+                    path,
+                    bytes,
+                    kind: PlannedKind::Edit {
+                        before: current,
+                        version: version.clone(),
+                    },
+                }
+            }
+            BatchWrite::NewPage { path, text } => {
+                let mapped = new_page_path(root, path)?;
+                let (_, missing) = paths::restorable_page(root, &mapped)?;
+                let mut segments: Vec<&str> = mapped.split('/').collect();
+                let page_name = segments.pop().unwrap_or_default();
+                let existing = segments.len() - missing.len();
+                let mut folder = segments[..existing].join("/");
+                let mut folders = Vec::new();
+                for segment in &segments[existing..] {
+                    let path = join_relative(&folder, segment);
+                    match taken.get(&path.to_lowercase()) {
+                        Some((spelled, true)) => folder = spelled.clone(),
+                        Some((_, false)) => return Err(outside_world()),
+                        None => {
+                            taken.insert(path.to_lowercase(), (path.clone(), true));
+                            folders.push(path.clone());
+                            folder = path;
+                        }
+                    }
+                }
+                let path = join_relative(&folder, page_name);
+                if taken.contains_key(&path.to_lowercase()) {
+                    return Err(exists());
+                }
+                taken.insert(path.to_lowercase(), (path.clone(), false));
+                PlannedWrite {
+                    path,
+                    bytes: text.as_bytes().to_vec(),
+                    text: page::text_of(text.as_bytes())?,
+                    kind: PlannedKind::New { folders },
+                }
+            }
+        };
+        planned.push(write);
+    }
+    Ok(planned)
+}
+
+/// The entries of a batch's record: each folder it creates, shallowest first, then each page.
+fn batch_entries(planned: &[PlannedWrite]) -> Vec<Entry> {
+    let mut folders: Vec<&String> = planned
+        .iter()
+        .flat_map(|write| match &write.kind {
+            PlannedKind::New { folders } => folders.as_slice(),
+            PlannedKind::Edit { .. } => &[],
+        })
+        .collect();
+    folders.sort_by_key(|folder| folder.matches('/').count());
+    let folders = folders.into_iter().map(|folder| Entry {
+        path: folder.clone(),
+        before: State::Absent,
+        after: State::Folder,
+    });
+    let pages = planned.iter().map(|write| Entry {
+        path: write.path.clone(),
+        before: match &write.kind {
+            PlannedKind::New { .. } => State::Absent,
+            PlannedKind::Edit { before, .. } => State::Page(before.clone()),
+        },
+        after: State::Page(write.bytes.clone()),
+    });
+    folders.chain(pages).collect()
+}
+
+/// Creates a batch's new page `write`, after its `folders`, as a restored page is created, with
+/// `before_write` run just before the page's file is. On a failure, the folders it created are
+/// removed again, deepest first, and the error comes with those that could not be.
+fn create_batch_page(
+    root: &Path,
+    own: &mut OwnWrites,
+    write: &PlannedWrite,
+    folders: &[String],
+    before_write: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), (AppError, Vec<String>)> {
+    let mut created: Vec<&String> = Vec::new();
+    let mut result = folders.iter().try_for_each(|folder| {
+        create_restored_folder(&absolute(root, folder))?;
+        own.folder(folder);
+        created.push(folder);
+        Ok(())
+    });
+    if result.is_ok() {
+        result = before_write().and_then(|()| {
+            let page = absolute(root, &write.path);
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&page)
+                .map_err(creation_error)?;
+            if let Err(error) = write_new_file(file, &write.bytes) {
+                // The file is the one this call created, so nothing of anyone else's is removed.
+                let _ = fs::remove_file(&page);
+                return Err(error.into());
+            }
+            Ok(())
+        });
+    }
+    let Err(error) = result else {
+        return Ok(());
+    };
+    let mut left = Vec::new();
+    for folder in created.into_iter().rev() {
+        if fs::remove_dir(absolute(root, folder)).is_ok() {
+            own.absent(folder);
+        } else {
+            left.push(folder.clone());
+        }
+    }
+    Err((error, left))
+}
+
+/// Writes a batch's edit, `bytes`, over the page at `relative` through a save's steps, if the page
+/// still has the bytes that `version` names.
+fn replace_batch_page(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    version: &str,
+) -> Result<(), AppError> {
+    let page = paths::existing_page(root, relative)?;
+    if page::version_of(&fs::read(&page)?) != version {
+        return Err(conflict());
+    }
+    let permissions = writable_permissions(&page)?;
+    put_bytes(&page, bytes, permissions, version, check_and_rename)
+}
+
+/// A change to undo.
+#[derive(Debug, Clone, Copy)]
+pub enum UndoTarget {
+    /// Any change, by its id.
+    Change(i64),
+    /// An accepted change, by its id and start time.
+    Accepted(ChangeId),
+}
+
+/// What an undo wrote back.
+#[derive(Debug)]
+pub struct BatchUndone {
+    /// The pages it put back as they were before the change.
+    pub restored: Vec<WrittenPage>,
+    /// The pages it deleted, because the change created them, by path.
+    pub deleted: Vec<String>,
+    /// The change that records the undo, once it is complete.
+    pub change: Option<ChangeId>,
+    /// Why the undo stopped partway: a write failed, and putting back what was undone failed too.
+    /// The pages above are what stays undone.
+    pub failure: Option<AppError>,
+}
+
+/// One step of an undo that writes a page, for the test seam, by its number among those steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UndoStep {
+    Undo(usize),
+    RollBack(usize),
+}
+
+/// Entries of a change, each by its path with how the undo reverses it.
+type Reversals<'a> = Vec<&'a (String, Reversal)>;
+
+/// How an undo reverses one entry of a change.
+enum Reversal {
+    /// A page the change edited, put back from `after` to `before`, whose text is `text`.
+    Restore {
+        before: Vec<u8>,
+        after: Vec<u8>,
+        text: String,
+    },
+    /// A page the change created, which holds `after`, deleted.
+    Delete { after: Vec<u8> },
+    /// A folder the change created, removed when it is empty.
+    RemoveFolder,
+}
+
+/// Undoes the change `target` as a whole, and records the undo: puts back each page it edited,
+/// deletes each page it created and removes each folder it created that is empty, deepest first,
+/// keeping one that is not. It writes only when every page the change wrote still holds exactly
+/// the bytes it left, and every folder it created is still a folder; otherwise it is a `conflict`
+/// naming the first that changed, and nothing is written. A change that history does not hold, or
+/// whose kind or start time differ, is `not_found`. The undo is begun with every entry before
+/// anything is written, and `on_record` then gets its id and start time, or none, with the pages'
+/// paths; when it returns false, nothing is written. A failed write rolls back what the undo did
+/// and records nothing; only when the rollback fails too does the undo stay partly done, recorded
+/// as written, and the result names the failure. The caller holds the world lock, so writes do not
+/// overlap.
+pub fn undo_change(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    target: UndoTarget,
+    on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+) -> Result<BatchUndone, AppError> {
+    undo_change_with(root, own, recorder, target, on_record, |_| Ok(()))
+}
+
+/// `undo_change`, with a step that runs before each page is undone or rolled back, so tests can
+/// make that step fail.
+fn undo_change_with(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    target: UndoTarget,
+    on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+    mut step: impl FnMut(UndoStep) -> Result<(), AppError>,
+) -> Result<BatchUndone, AppError> {
+    let entries = match (target, recorder.history()) {
+        (UndoTarget::Change(id), Some(history)) => history.change_entries(id)?,
+        (UndoTarget::Accepted(change), Some(history))
+            if history.holds(change.id, Kind::Accepted, change.started)? =>
+        {
+            history.change_entries(change.id)?
+        }
+        _ => None,
+    };
+    let reversals = check_undo(root, entries.ok_or_else(cannot_undo)?)?;
+    let record = recorder.begin(Kind::Undo, &undo_entries(&reversals));
+    let change = recorder.change_of(record.as_ref());
+    let (pages, folders): (Vec<_>, Vec<_>) = reversals
+        .iter()
+        .partition(|(_, reversal)| !matches!(reversal, Reversal::RemoveFolder));
+    let paths: Vec<String> = pages.iter().map(|(path, _)| path.clone()).collect();
+    if !on_record(change, &paths) {
+        recorder.finish(record, false);
+        return Err(stopped());
+    }
+
+    for (number, (path, reversal)) in pages.iter().enumerate() {
+        let result = step(UndoStep::Undo(number)).and_then(|()| undo_page(root, path, reversal));
+        if let Err(error) = result {
+            let Err((rollback, left)) = roll_back(root, own, &pages[..number], &mut step) else {
+                recorder.finish(record, false);
+                return Err(error);
+            };
+            let kept: Vec<String> = left.iter().map(|(path, _)| path.clone()).collect();
+            let completed = recorder.finish_only(record, &kept);
+            let mut undone = undone_pages(&left);
+            undone.change = change.filter(|_| completed.is_some());
+            undone.failure = Some(AppError::new(
+                error.kind,
+                format!(
+                    "{} The pages undone before it could not all be put back: {}",
+                    error.message, rollback.message
+                ),
+            ));
+            return Ok(undone);
+        }
+        match reversal {
+            Reversal::Restore { before, .. } => own.page(path, before),
+            _ => own.absent(path),
+        }
+    }
+
+    // Deepest first, so the folders inside a folder are gone before it is tried.
+    let mut folders: Vec<&String> = folders.into_iter().map(|(path, _)| path).collect();
+    folders.sort_by_key(|folder| std::cmp::Reverse(folder.matches('/').count()));
+    let mut kept = paths;
+    for folder in folders {
+        // A folder that is not empty, or cannot be removed, stays, and the undo does not record it.
+        let removed =
+            paths::existing_folder(root, Some(folder)).and_then(|path| Ok(fs::remove_dir(path)?));
+        if removed.is_ok() {
+            own.absent(folder);
+            kept.push(folder.clone());
+        }
+    }
+    let completed = recorder.finish_only(record, &kept);
+    let mut undone = undone_pages(&pages);
+    undone.change = change.filter(|_| completed.is_some());
+    Ok(undone)
+}
+
+/// How the undo reverses each entry of a change, once every entry is checked against the world.
+fn check_undo(root: &Path, entries: Vec<Entry>) -> Result<Vec<(String, Reversal)>, AppError> {
+    entries
+        .into_iter()
+        .map(
+            |Entry {
+                 path,
+                 before,
+                 after,
+             }| {
+                let reversal = match (before, after) {
+                    (State::Page(before), State::Page(after)) => {
+                        check_holds(root, &path, &after)?;
+                        Reversal::Restore {
+                            text: page::text_of(&before)?,
+                            before,
+                            after,
+                        }
+                    }
+                    (State::Absent, State::Page(after)) => {
+                        check_holds(root, &path, &after)?;
+                        Reversal::Delete { after }
+                    }
+                    (State::Absent, State::Folder) => {
+                        paths::existing_folder(root, Some(&path))
+                            .map_err(|_| changed_since(&path))?;
+                        Reversal::RemoveFolder
+                    }
+                    _ => return Err(cannot_undo()),
+                };
+                Ok((path, reversal))
+            },
+        )
+        .collect()
+}
+
+/// Refuses, as changed since, the page at `relative` unless it holds exactly `after`.
+fn check_holds(root: &Path, relative: &str, after: &[u8]) -> Result<(), AppError> {
+    let current = match paths::existing_page(root, relative) {
+        Ok(page) => Some(fs::read(page)?),
+        Err(error) if error.kind == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if current.as_deref() == Some(after) {
+        Ok(())
+    } else {
+        Err(changed_since(relative))
+    }
+}
+
+/// The entries of an undo's record: each entry of the change, reversed.
+fn undo_entries(reversals: &[(String, Reversal)]) -> Vec<Entry> {
+    reversals
+        .iter()
+        .map(|(path, reversal)| {
+            let (before, after) = match reversal {
+                Reversal::Restore { before, after, .. } => {
+                    (State::Page(after.clone()), State::Page(before.clone()))
+                }
+                Reversal::Delete { after } => (State::Page(after.clone()), State::Absent),
+                Reversal::RemoveFolder => (State::Folder, State::Absent),
+            };
+            Entry {
+                path: path.clone(),
+                before,
+                after,
+            }
+        })
+        .collect()
+}
+
+/// Undoes one page: puts its bytes before back, or deletes it, if it still holds the bytes after.
+fn undo_page(root: &Path, relative: &str, reversal: &Reversal) -> Result<(), AppError> {
+    let page = paths::existing_page(root, relative)?;
+    let current = fs::read(&page)?;
+    match reversal {
+        Reversal::Restore { before, after, .. } if current == *after => {
+            let permissions = writable_permissions(&page)?;
+            put_bytes(
+                &page,
+                before,
+                permissions,
+                &page::version_of(after),
+                check_and_rename,
+            )
+        }
+        Reversal::Delete { after } if current == *after => Ok(fs::remove_file(page)?),
+        _ => Err(changed_since(relative)),
+    }
+}
+
+/// Rolls back the pages an undo did, `done`, newest first, recording each as the application's
+/// own write again. When a rollback fails, returns its failure with the pages that stay undone.
+fn roll_back<'a>(
+    root: &Path,
+    own: &mut OwnWrites,
+    done: &[&'a (String, Reversal)],
+    step: &mut impl FnMut(UndoStep) -> Result<(), AppError>,
+) -> Result<(), (AppError, Reversals<'a>)> {
+    let mut failure = None;
+    let mut left = Vec::new();
+    for (number, &undone) in done.iter().enumerate().rev() {
+        let (path, reversal) = undone;
+        match step(UndoStep::RollBack(number)).and_then(|()| roll_back_page(root, path, reversal)) {
+            Ok(after) => own.page(path, after),
+            Err(error) => {
+                failure.get_or_insert(error);
+                left.push(undone);
+            }
+        }
+    }
+    left.reverse();
+    failure.map_or(Ok(()), |error| Err((error, left)))
+}
+
+/// Puts back the bytes the change left in a page that the undo restored or deleted, and returns
+/// them.
+fn roll_back_page<'a>(
+    root: &Path,
+    relative: &str,
+    reversal: &'a Reversal,
+) -> Result<&'a [u8], AppError> {
+    match reversal {
+        Reversal::Restore { before, after, .. } => {
+            let page = paths::existing_page(root, relative)?;
+            let permissions = writable_permissions(&page)?;
+            put_bytes(
+                &page,
+                after,
+                permissions,
+                &page::version_of(before),
+                check_and_rename,
+            )?;
+            Ok(after)
+        }
+        Reversal::Delete { after } => {
+            let (page, _) = paths::restorable_page(root, relative)?;
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&page)
+                .map_err(creation_error)?;
+            if let Err(error) = write_new_file(file, after) {
+                // The file is the one this call created, so nothing of anyone else's is removed.
+                let _ = fs::remove_file(&page);
+                return Err(error.into());
+            }
+            Ok(after)
+        }
+        Reversal::RemoveFolder => Ok(&[]),
+    }
+}
+
+/// What an undo of `pages` wrote, before its change and any failure are known.
+fn undone_pages(pages: &[&(String, Reversal)]) -> BatchUndone {
+    let mut undone = BatchUndone {
+        restored: Vec::new(),
+        deleted: Vec::new(),
+        change: None,
+        failure: None,
+    };
+    for (path, reversal) in pages {
+        match reversal {
+            Reversal::Restore { before, text, .. } => undone.restored.push(WrittenPage {
+                path: path.clone(),
+                text: text.clone(),
+                version: page::version_of(before),
+            }),
+            _ => undone.deleted.push(path.clone()),
+        }
+    }
+    undone
+}
+
+/// The path, as it is on disk, and the absolute path of the existing page at `relative`, a page
+/// path in any letter case.
+pub fn existing_page_on_disk(root: &Path, relative: &str) -> Result<(String, PathBuf), AppError> {
+    let (OnDisk::Page(mapped) | OnDisk::Missing(mapped)) = on_disk(root, relative, outside_world)?;
+    let page = paths::existing_page(root, &mapped)?;
+    Ok((mapped, page))
+}
+
+/// The path, with the names on disk, at which a new page `relative` can be created, as a page is
+/// created from search; a page there in any letter case is `exists`.
+pub fn new_page_path(root: &Path, relative: &str) -> Result<String, AppError> {
+    for segment in relative.split('/') {
+        if !paths::is_allowed_name(segment) && !segment.starts_with('.') {
+            names::check_name(segment)?;
+        }
+    }
+    match on_disk(root, relative, outside_world)? {
+        OnDisk::Page(_) => Err(exists()),
+        OnDisk::Missing(path) => Ok(path),
+    }
+}
+
+/// `name` inside the folder at `folder`, both relative to the world; the top level is "".
+fn join_relative(folder: &str, name: &str) -> String {
+    if folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{folder}/{name}")
+    }
+}
+
+/// The absolute path of `relative`, a `/`-separated path inside the world at `root`.
+fn absolute(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, segment| path.join(segment))
+}
+
 /// Creates one missing folder of a restored page. A folder that another program created meanwhile
 /// is used, unless it is a link.
 fn create_restored_folder(folder: &Path) -> Result<(), AppError> {
@@ -970,6 +1695,31 @@ fn conflict() -> AppError {
     AppError::new(
         ErrorKind::Conflict,
         "The page changed on disk since it was last read or saved.",
+    )
+}
+
+fn cannot_undo() -> AppError {
+    AppError::new(ErrorKind::NotFound, "This change cannot be undone.")
+}
+
+/// The page or folder at `relative` no longer holds what the change being undone left.
+fn changed_since(relative: &str) -> AppError {
+    let name = Path::new(relative).file_stem().unwrap_or_default();
+    AppError::new(
+        ErrorKind::Conflict,
+        format!(
+            "“{}” changed since it was written, so nothing was undone. Its history still holds \
+             every version.",
+            name.to_string_lossy()
+        ),
+    )
+}
+
+/// The caller stopped a batch or an undo once its record was begun, before anything was written.
+fn stopped() -> AppError {
+    AppError::new(
+        ErrorKind::Conflict,
+        "Nothing was written, because the change was called off before it began.",
     )
 }
 
@@ -2275,6 +3025,612 @@ mod tests {
                 0
             );
             assert!(recorded(&app_data, &world).is_empty());
+        }
+
+        mod batch {
+            use super::*;
+
+            const LF: &[u8] = b"# Lf\nOld\n";
+            const CRLF: &[u8] = b"\xef\xbb\xbf# Crlf\r\nOld\r\n";
+
+            /// A world with an LF page and a CRLF page with a byte-order mark, and its history.
+            fn batch_world(app_data: &TempDir) -> (TempDir, History) {
+                let world = tempfile::tempdir().unwrap();
+                fs::write(world.path().join("Lf.md"), LF).unwrap();
+                fs::write(world.path().join("Crlf.md"), CRLF).unwrap();
+                let history = history_of(app_data, &world);
+                (world, history)
+            }
+
+            fn new_page(path: &str, text: &str) -> BatchWrite {
+                BatchWrite::NewPage {
+                    path: path.to_owned(),
+                    text: text.to_owned(),
+                }
+            }
+
+            fn edit(path: &str, text: &str, version: &str) -> BatchWrite {
+                BatchWrite::Edit {
+                    path: path.to_owned(),
+                    text: text.to_owned(),
+                    version: version.to_owned(),
+                }
+            }
+
+            /// Two edits and two new pages, one of them in two missing folders.
+            fn four_writes() -> Vec<BatchWrite> {
+                vec![
+                    edit("Lf.md", "# Lf\nNew\n", &page::version_of(LF)),
+                    edit("Crlf.md", "# Crlf\nNew\n", &page::version_of(CRLF)),
+                    new_page("Top.md", "# Top\n"),
+                    new_page("Places/Coast/Harbor.md", "# Harbor\r\n"),
+                ]
+            }
+
+            fn accept(
+                world: &TempDir,
+                history: &mut History,
+                own: &mut OwnWrites,
+                writes: &[BatchWrite],
+            ) -> BatchWritten {
+                let mut recorder = Recorder::new(Some(history), 100);
+                write_batch(world.path(), own, &mut recorder, writes, |_, _| true).unwrap()
+            }
+
+            fn read(world: &TempDir, path: &str) -> Vec<u8> {
+                fs::read(world.path().join(path)).unwrap()
+            }
+
+            fn fail(index: usize) -> impl FnMut(usize) -> Result<(), AppError> {
+                move |at| {
+                    if at == index {
+                        Err(AppError::new(ErrorKind::Io, "The disk is full."))
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+
+            #[test]
+            fn a_batch_writes_edits_and_new_pages_as_one_accepted_change() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                let own = &mut own();
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+                let mut recorded_with = None;
+
+                let batch = write_batch(
+                    world.path(),
+                    own,
+                    &mut recorder,
+                    &four_writes(),
+                    |change, paths| {
+                        // The record is begun and nothing is written yet.
+                        assert_eq!(tree_of(&world), ["Crlf.md", "Lf.md"]);
+                        assert_eq!(read(&world, "Lf.md"), LF);
+                        recorded_with = Some((change, paths.to_vec()));
+                        true
+                    },
+                )
+                .unwrap();
+
+                let change = ChangeId {
+                    id: 1,
+                    started: 100,
+                };
+                let paths = ["Lf.md", "Crlf.md", "Top.md", "Places/Coast/Harbor.md"];
+                assert_eq!(
+                    recorded_with,
+                    Some((Some(change), paths.map(str::to_owned).to_vec()))
+                );
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(read(&world, "Crlf.md"), b"\xef\xbb\xbf# Crlf\r\nNew\r\n");
+                assert_eq!(read(&world, "Top.md"), b"# Top\n");
+                assert_eq!(read(&world, "Places/Coast/Harbor.md"), b"# Harbor\r\n");
+                assert_eq!(batch.change, Some(change));
+                assert!(batch.failure.is_none());
+                let written: Vec<(&str, &str)> = batch
+                    .written
+                    .iter()
+                    .map(|page| (page.path.as_str(), page.text.as_str()))
+                    .collect();
+                assert_eq!(
+                    written,
+                    [
+                        ("Lf.md", "# Lf\nNew\n"),
+                        ("Crlf.md", "# Crlf\nNew\n"),
+                        ("Top.md", "# Top\n"),
+                        ("Places/Coast/Harbor.md", "# Harbor\n"),
+                    ]
+                );
+                for page in &batch.written {
+                    assert_eq!(page.version, page::version_of(&read(&world, &page.path)));
+                }
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "accepted".to_owned(),
+                        vec![
+                            entry(
+                                "Crlf.md",
+                                page(CRLF),
+                                page(b"\xef\xbb\xbf# Crlf\r\nNew\r\n")
+                            ),
+                            entry("Lf.md", page(LF), page(b"# Lf\nNew\n")),
+                            entry("Places", State::Absent, State::Folder),
+                            entry("Places/Coast", State::Absent, State::Folder),
+                            entry(
+                                "Places/Coast/Harbor.md",
+                                State::Absent,
+                                page(b"# Harbor\r\n")
+                            ),
+                            entry("Top.md", State::Absent, page(b"# Top\n")),
+                        ]
+                    )]
+                );
+                for path in paths.into_iter().chain(["Places", "Places/Coast"]) {
+                    assert!(own.is_own(world.path(), path), "{path}");
+                }
+            }
+
+            #[test]
+            fn a_batch_with_a_write_that_fails_its_check_writes_and_records_nothing() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                fs::write(world.path().join("Latin.md"), b"caf\xe9\n").unwrap();
+                let latin = page::version_of(b"caf\xe9\n");
+                let mut cases = vec![
+                    (
+                        edit("Lf.md", "# Lf\nNew\n", &page::version_of(b"before\n")),
+                        ErrorKind::Conflict,
+                        "a stale version",
+                    ),
+                    (
+                        edit("Latin.md", "cafe\n", &latin),
+                        ErrorKind::NotUtf8,
+                        "a page that is not UTF-8",
+                    ),
+                    (
+                        new_page("lf.MD", "# Mine\n"),
+                        ErrorKind::Exists,
+                        "a page in another letter case",
+                    ),
+                    (
+                        new_page(".obsidian/Notes.md", "# Mine\n"),
+                        ErrorKind::InvalidPath,
+                        "a hidden segment",
+                    ),
+                ];
+                let outside = tempfile::tempdir().unwrap();
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(outside.path(), world.path().join("Elsewhere"))
+                        .unwrap();
+                    cases.push((
+                        new_page("Elsewhere/Notes.md", "# Mine\n"),
+                        ErrorKind::InvalidPath,
+                        "a symbolic link",
+                    ));
+                }
+                let before = tree_of(&world);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+
+                for (last, kind, case) in cases {
+                    let writes = [new_page("Places/First.md", "# First\n"), last];
+                    let error =
+                        write_batch(world.path(), &mut own(), &mut recorder, &writes, |_, _| {
+                            panic!("{case}: the record was begun")
+                        })
+                        .unwrap_err();
+                    assert_eq!(error.kind, kind, "{case}");
+                }
+
+                assert_eq!(tree_of(&world), before);
+                assert_eq!(read(&world, "Lf.md"), LF);
+                assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+                assert_eq!(recorder.outcome(), Recording::Nothing);
+                assert!(recorded(&app_data, &world).is_empty());
+            }
+
+            #[test]
+            fn a_read_only_page_at_the_second_write_keeps_the_first_and_records_exactly_it() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                let path = world.path().join("Crlf.md");
+                let mut permissions = fs::metadata(&path).unwrap().permissions();
+                permissions.set_readonly(true);
+                fs::set_permissions(&path, permissions).unwrap();
+
+                let batch = accept(&world, &mut history, &mut own(), &four_writes());
+
+                let failure = batch.failure.unwrap();
+                assert_eq!(
+                    (failure.index, failure.error.message.as_str()),
+                    (1, "The page is read-only.")
+                );
+                assert_eq!(batch.written.len(), 1);
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(read(&world, "Crlf.md"), CRLF);
+                assert_eq!(tree_of(&world), ["Crlf.md", "Lf.md"]);
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "accepted".to_owned(),
+                        vec![entry("Lf.md", page(LF), page(b"# Lf\nNew\n"))]
+                    )]
+                );
+            }
+
+            #[test]
+            fn an_edit_in_another_letter_case_writes_the_page_under_its_own_spelling() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+                let mut paths = Vec::new();
+
+                let batch = write_batch(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    &[edit("lf.md", "# Lf\nNew\n", &page::version_of(LF))],
+                    |_, given| {
+                        paths = given.to_vec();
+                        true
+                    },
+                )
+                .unwrap();
+
+                assert_eq!(paths, ["Lf.md"]);
+                assert_eq!(batch.written[0].path, "Lf.md");
+                assert_eq!(tree_of(&world), ["Crlf.md", "Lf.md"]);
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "accepted".to_owned(),
+                        vec![entry("Lf.md", page(LF), page(b"# Lf\nNew\n"))]
+                    )]
+                );
+            }
+
+            #[test]
+            fn a_failure_at_the_third_write_keeps_the_first_two_with_their_folders() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                let writes = [
+                    new_page("Places/Coast/Harbor.md", "# Harbor\n"),
+                    edit("Lf.md", "# Lf\nNew\n", &page::version_of(LF)),
+                    new_page("Top.md", "# Top\n"),
+                ];
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+
+                let batch = write_batch_with(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    &writes,
+                    |_, _| true,
+                    fail(2),
+                )
+                .unwrap();
+
+                assert_eq!(batch.failure.unwrap().index, 2);
+                assert_eq!(batch.written.len(), 2);
+                assert_eq!(batch.change.map(|change| change.id), Some(1));
+                assert_eq!(
+                    tree_of(&world),
+                    [
+                        "Crlf.md",
+                        "Lf.md",
+                        "Places",
+                        "Places/Coast",
+                        "Places/Coast/Harbor.md"
+                    ]
+                );
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "accepted".to_owned(),
+                        vec![
+                            entry("Lf.md", page(LF), page(b"# Lf\nNew\n")),
+                            entry("Places", State::Absent, State::Folder),
+                            entry("Places/Coast", State::Absent, State::Folder),
+                            entry("Places/Coast/Harbor.md", State::Absent, page(b"# Harbor\n")),
+                        ]
+                    )]
+                );
+            }
+
+            #[test]
+            fn a_failure_at_a_first_new_page_s_file_removes_its_folders_and_records_nothing() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+
+                let batch = write_batch_with(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    &[new_page("Places/Coast/Harbor.md", "# Harbor\n")],
+                    |_, _| true,
+                    |_| {
+                        assert!(world.path().join("Places/Coast").is_dir());
+                        Err(AppError::new(ErrorKind::Io, "The disk is full."))
+                    },
+                )
+                .unwrap();
+
+                assert_eq!(batch.failure.unwrap().index, 0);
+                assert!(batch.written.is_empty());
+                assert_eq!(batch.change, None);
+                assert_eq!(tree_of(&world), ["Crlf.md", "Lf.md"]);
+                assert!(recorded(&app_data, &world).is_empty());
+            }
+
+            #[test]
+            fn new_pages_under_one_missing_folder_in_two_letter_cases_share_it() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+
+                let batch = accept(
+                    &world,
+                    &mut history,
+                    &mut own(),
+                    &[
+                        new_page("Places/A.md", "a\n"),
+                        new_page("places/B.md", "b\n"),
+                    ],
+                );
+
+                let paths: Vec<&str> = batch
+                    .written
+                    .iter()
+                    .map(|page| page.path.as_str())
+                    .collect();
+                assert_eq!(paths, ["Places/A.md", "Places/B.md"]);
+                assert_eq!(
+                    tree_of(&world),
+                    ["Crlf.md", "Lf.md", "Places", "Places/A.md", "Places/B.md"]
+                );
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "accepted".to_owned(),
+                        vec![
+                            entry("Places", State::Absent, State::Folder),
+                            entry("Places/A.md", State::Absent, page(b"a\n")),
+                            entry("Places/B.md", State::Absent, page(b"b\n")),
+                        ]
+                    )]
+                );
+            }
+
+            /// The world after the four writes were accepted as change 1, which started at 100.
+            fn accepted(app_data: &TempDir) -> (TempDir, History, ChangeId) {
+                let (world, mut history) = batch_world(app_data);
+                let batch = accept(&world, &mut history, &mut own(), &four_writes());
+                (world, history, batch.change.unwrap())
+            }
+
+            fn undo_with(
+                world: &TempDir,
+                history: &mut History,
+                change: ChangeId,
+                step: impl FnMut(UndoStep) -> Result<(), AppError>,
+            ) -> Result<BatchUndone, AppError> {
+                let mut recorder = Recorder::new(Some(history), 200);
+                let target = UndoTarget::Accepted(change);
+                undo_change_with(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    target,
+                    |_, _| true,
+                    step,
+                )
+            }
+
+            /// The kinds of the recorded changes, oldest first.
+            fn kinds(app_data: &TempDir, world: &TempDir) -> Vec<String> {
+                stored(app_data.path(), world.path())
+                    .into_iter()
+                    .map(|change| change.kind)
+                    .collect()
+            }
+
+            #[test]
+            fn undoing_a_batch_restores_and_deletes_its_pages_and_removes_its_empty_folders() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history, change) = accepted(&app_data);
+                fs::write(world.path().join("Places/Kept.md"), b"theirs\n").unwrap();
+                let own = &mut own();
+                let mut recorder = Recorder::new(Some(&mut history), 200);
+
+                let undone = undo_change(
+                    world.path(),
+                    own,
+                    &mut recorder,
+                    UndoTarget::Accepted(change),
+                    |_, _| true,
+                )
+                .unwrap();
+
+                assert_eq!(read(&world, "Lf.md"), LF);
+                assert_eq!(read(&world, "Crlf.md"), CRLF);
+                assert_eq!(
+                    tree_of(&world),
+                    ["Crlf.md", "Lf.md", "Places", "Places/Kept.md"]
+                );
+                let restored: Vec<(&str, &str)> = undone
+                    .restored
+                    .iter()
+                    .map(|page| (page.path.as_str(), page.text.as_str()))
+                    .collect();
+                assert_eq!(
+                    restored,
+                    [("Crlf.md", "# Crlf\nOld\n"), ("Lf.md", "# Lf\nOld\n")]
+                );
+                assert_eq!(undone.deleted, ["Places/Coast/Harbor.md", "Top.md"]);
+                assert_eq!(
+                    undone.change,
+                    Some(ChangeId {
+                        id: 2,
+                        started: 200
+                    })
+                );
+                assert!(undone.failure.is_none());
+                assert_eq!(
+                    recorded(&app_data, &world)[1],
+                    (
+                        "undo".to_owned(),
+                        vec![
+                            entry(
+                                "Crlf.md",
+                                page(b"\xef\xbb\xbf# Crlf\r\nNew\r\n"),
+                                page(CRLF)
+                            ),
+                            entry("Lf.md", page(b"# Lf\nNew\n"), page(LF)),
+                            entry("Places/Coast", State::Folder, State::Absent),
+                            entry(
+                                "Places/Coast/Harbor.md",
+                                page(b"# Harbor\r\n"),
+                                State::Absent
+                            ),
+                            entry("Top.md", page(b"# Top\n"), State::Absent),
+                        ]
+                    )
+                );
+                for path in ["Lf.md", "Top.md", "Places/Coast", "Places/Coast/Harbor.md"] {
+                    assert!(own.is_own(world.path(), path), "{path}");
+                }
+            }
+
+            #[test]
+            fn an_undo_after_a_page_changed_writes_nothing_and_names_the_page() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history, change) = accepted(&app_data);
+                fs::write(world.path().join("Top.md"), b"# Top\nMore\n").unwrap();
+                let before = tree_of(&world);
+                let mut recorder = Recorder::new(Some(&mut history), 200);
+
+                // The changed page is the last the undo would write, so only the check made
+                // before the record begins refuses it before anything is written.
+                let error = undo_change(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    UndoTarget::Accepted(change),
+                    |_, _| panic!("the undo was begun"),
+                )
+                .unwrap_err();
+
+                assert_eq!(error.kind, ErrorKind::Conflict);
+                assert_eq!(
+                    error.message,
+                    "“Top” changed since it was written, so nothing was undone. Its history \
+                     still holds every version."
+                );
+                assert_eq!(tree_of(&world), before);
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(kinds(&app_data, &world), ["accepted"]);
+            }
+
+            #[test]
+            fn a_failed_undo_step_rolls_back_what_was_undone_and_records_nothing() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history, change) = accepted(&app_data);
+
+                let error = undo_with(&world, &mut history, change, |step| match step {
+                    UndoStep::Undo(1) => Err(AppError::new(ErrorKind::Io, "The disk is full.")),
+                    _ => Ok(()),
+                })
+                .unwrap_err();
+
+                assert_eq!(error.message, "The disk is full.");
+                assert_eq!(read(&world, "Crlf.md"), b"\xef\xbb\xbf# Crlf\r\nNew\r\n");
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(read(&world, "Top.md"), b"# Top\n");
+                assert_eq!(kinds(&app_data, &world), ["accepted"]);
+            }
+
+            #[test]
+            fn a_failed_rollback_leaves_a_completed_record_of_what_stays_undone() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history, change) = accepted(&app_data);
+
+                let undone = undo_with(&world, &mut history, change, |step| match step {
+                    UndoStep::Undo(1) => Err(AppError::new(ErrorKind::Io, "The disk is full.")),
+                    UndoStep::RollBack(0) => {
+                        Err(AppError::new(ErrorKind::Io, "Permission denied."))
+                    }
+                    _ => Ok(()),
+                })
+                .unwrap();
+
+                assert_eq!(
+                    undone.failure.unwrap().message,
+                    "The disk is full. The pages undone before it could not all be put back: \
+                     Permission denied."
+                );
+                assert_eq!(undone.restored[0].path, "Crlf.md");
+                assert!(undone.deleted.is_empty());
+                assert_eq!(read(&world, "Crlf.md"), CRLF);
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(
+                    recorded(&app_data, &world)[1],
+                    (
+                        "undo".to_owned(),
+                        vec![entry(
+                            "Crlf.md",
+                            page(b"\xef\xbb\xbf# Crlf\r\nNew\r\n"),
+                            page(CRLF)
+                        )]
+                    )
+                );
+            }
+
+            #[test]
+            fn on_record_saying_stop_leaves_nothing_written_for_a_batch_and_for_an_undo() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = batch_world(&app_data);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+
+                let refused = write_batch(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    &four_writes(),
+                    |_, _| false,
+                )
+                .unwrap_err();
+
+                assert_eq!(refused.kind, ErrorKind::Conflict);
+                assert_eq!(tree_of(&world), ["Crlf.md", "Lf.md"]);
+                assert!(recorded(&app_data, &world).is_empty());
+
+                let batch = write_batch(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    &four_writes(),
+                    |_, _| true,
+                )
+                .unwrap();
+                let after = tree_of(&world);
+                let refused = undo_change(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    UndoTarget::Accepted(batch.change.unwrap()),
+                    |_, _| false,
+                )
+                .unwrap_err();
+
+                assert_eq!(refused.kind, ErrorKind::Conflict);
+                assert_eq!(tree_of(&world), after);
+                assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
+                assert_eq!(kinds(&app_data, &world), ["accepted"]);
+            }
         }
     }
 

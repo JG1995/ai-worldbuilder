@@ -28,11 +28,19 @@ use crate::index::{
     self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches, Stamp,
     TextMatches,
 };
-use page::{DiffLine, PageText};
+#[expect(
+    unused_imports,
+    reason = "called by proposals from PR proposals-in-core"
+)]
+pub(crate) use page::compare;
+pub(crate) use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
 pub use watch::{EventSink, WorldEvent};
-use write::{LinkedPage, NewEntry, OwnWrites, PageVersion, Recorder, Recording, RestoredPage};
+pub(crate) use write::{BatchUndone, BatchWrite, BatchWritten, ChangeId};
+use write::{
+    LinkedPage, NewEntry, OwnWrites, PageVersion, Recorder, Recording, RestoredPage, UndoTarget,
+};
 
 const APP_TITLE: &str = "Grimoire.md";
 /// Why an opening has no history when the application has no data folder to keep it in.
@@ -88,30 +96,46 @@ struct OpenWorld {
     index: Arc<Mutex<Index>>,
 }
 
+/// What an application write left in the world, for the index: each page it wrote, by path with
+/// the text it left there, and each page it deleted.
+#[derive(Default)]
+struct Touched {
+    written: Vec<(String, String)>,
+    deleted: Vec<String>,
+}
+
 impl OpenWorld {
-    /// Takes the application's write of the page at `path`, which left `text` in it, into the index,
+    /// Takes the application's write into the index: the pages it wrote and the pages it deleted,
     /// and returns whether the index changed. The caller holds the world lock, so no other write
-    /// of the application's runs; the page's stamp is compared again under the index lock, so an
+    /// of the application's runs; each page's stamp is compared again under the index lock, so an
     /// outside change since the write is never overwritten (the watcher reports it).
-    fn index_written(&self, path: &str, text: &str) -> bool {
-        let Some(stamp) = stamp_of(&self.root, path) else {
+    fn index_touched(&self, touched: &Touched) -> bool {
+        let pages: Vec<index::Page> = touched
+            .written
+            .iter()
+            .filter_map(|(path, text)| {
+                Some(index::Page {
+                    path: path.clone(),
+                    stamp: stamp_of(&self.root, path)?,
+                    content: Content::Text {
+                        text: text.clone(),
+                        parsed: index::parse(text, index::page_name(path)),
+                    },
+                })
+            })
+            .collect();
+        if pages.is_empty() && touched.deleted.is_empty() {
             return false;
-        };
-        let page = index::Page {
-            path: path.to_owned(),
-            stamp,
-            content: Content::Text {
-                text: text.to_owned(),
-                parsed: index::parse(text, index::page_name(path)),
-            },
-        };
+        }
         let (changed, needs_worker) = {
             let mut index = lock_index(&self.index);
-            let applied = index.apply(&[page], |path| stamp_of(&self.root, path));
-            (
-                applied.is_ok_and(|applied| applied.changed),
-                index.needs_worker(),
-            )
+            let applied = !pages.is_empty()
+                && index
+                    .apply(&pages, |path| stamp_of(&self.root, path))
+                    .is_ok_and(|applied| applied.changed);
+            let removed =
+                !touched.deleted.is_empty() && index.remove(&touched.deleted).unwrap_or(false);
+            (applied || removed, index.needs_worker())
         };
         if needs_worker {
             self.worker.send(Request::Wake);
@@ -437,6 +461,100 @@ impl WorldState {
         .unwrap_or_else(|| Err(no_world()))
     }
 
+    /// The page at `path`, a page path in any letter case, as `page_read` reads it, with its path
+    /// as it is on disk, but only while the opening `session` is still the open world, and
+    /// `no_world` otherwise.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+    )]
+    pub(crate) fn page_in(&self, session: u64, path: &str) -> Result<(String, PageText), AppError> {
+        self.while_open(session, |root| {
+            let (mapped, page) = write::existing_page_on_disk(root, path)?;
+            Ok((mapped, page::read(&page)?))
+        })
+        .unwrap_or_else(|| Err(no_world()))
+    }
+
+    /// The path, with the names on disk, at which a new page `path` can be created in the opening
+    /// `session`, or why it cannot be; nothing is created.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+    )]
+    pub(crate) fn new_page_free(&self, session: u64, path: &str) -> Result<String, AppError> {
+        self.while_open(session, |root| write::new_page_path(root, path))
+            .unwrap_or_else(|| Err(no_world()))
+    }
+
+    /// Writes `writes` as one accepted change while the opening `session` is the open world, under
+    /// the world lock like a save, and takes every page written into the index.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+    )]
+    pub(crate) fn accept_batch(
+        &self,
+        session: u64,
+        writes: &[BatchWrite],
+        on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+    ) -> Result<BatchWritten, AppError> {
+        self.write_in(Some(session), |root, own, recorder, _| {
+            let batch = write::write_batch(root, own, recorder, writes, on_record)?;
+            let touched = Touched {
+                written: batch
+                    .written
+                    .iter()
+                    .map(|page| (page.path.clone(), page.text.clone()))
+                    .collect(),
+                deleted: Vec::new(),
+            };
+            Ok((batch, touched))
+        })
+    }
+
+    /// Undoes the accepted change `change` while the opening `session` is the open world, under the
+    /// world lock like a save, and takes every page it restored or deleted into the index.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+    )]
+    pub(crate) fn undo_batch(
+        &self,
+        session: u64,
+        change: ChangeId,
+        on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+    ) -> Result<BatchUndone, AppError> {
+        self.write_in(Some(session), |root, own, recorder, _| {
+            let target = UndoTarget::Accepted(change);
+            let undone = write::undo_change(root, own, recorder, target, on_record)?;
+            let touched = Touched {
+                written: undone
+                    .restored
+                    .iter()
+                    .map(|page| (page.path.clone(), page.text.clone()))
+                    .collect(),
+                deleted: undone.deleted.clone(),
+            };
+            Ok((undone, touched))
+        })
+    }
+
+    /// Whether the history of the opening `session` holds the accepted change `change`; false when
+    /// the opening has no history.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
+    )]
+    pub(crate) fn holds_change(&self, session: u64, change: ChangeId) -> Result<bool, AppError> {
+        let inner = self.lock();
+        let world = inner.world.as_ref().filter(|_| inner.session == session);
+        match &world.ok_or_else(no_world)?.history {
+            Ok(history) => Ok(history.holds(change.id, Kind::Accepted, change.started)?),
+            Err(_) => Ok(false),
+        }
+    }
+
     /// The page on disk, line by line, against the editor's `text`, with the version on disk.
     fn compare_page(&self, path: &str, text: &str) -> Result<Comparison, AppError> {
         let page = self.read_page(path)?;
@@ -602,8 +720,34 @@ impl WorldState {
             &Mutex<Index>,
         ) -> Result<(T, Option<(String, String)>), AppError>,
     ) -> Result<T, AppError> {
+        self.write_in(None, |root, own, recorder, index| {
+            let (value, written) = write(root, own, recorder, index)?;
+            let touched = Touched {
+                written: written.into_iter().collect(),
+                deleted: Vec::new(),
+            };
+            Ok((value, touched))
+        })
+    }
+
+    /// `write_with_index` for a write that may leave several pages and delete some, which the index
+    /// takes in, while the opening `session` is the open world when one is given.
+    fn write_in<T>(
+        &self,
+        session: Option<u64>,
+        write: impl FnOnce(
+            &Path,
+            &mut OwnWrites,
+            &mut Recorder,
+            &Mutex<Index>,
+        ) -> Result<(T, Touched), AppError>,
+    ) -> Result<T, AppError> {
         let mut inner = self.lock();
-        let session = inner.session;
+        let current = inner.session;
+        if session.is_some_and(|session| session != current) {
+            return Err(no_world());
+        }
+        let session = current;
         let world = inner.world.as_mut().ok_or_else(no_world)?;
         let mut recorder = Recorder::new(world.history.as_mut().ok(), now());
         let result = write(
@@ -619,9 +763,8 @@ impl WorldState {
         {
             sink(event);
         }
-        let (value, written) = result?;
-        if let Some((path, text)) = written
-            && world.index_written(&path, &text)
+        let (value, touched) = result?;
+        if world.index_touched(&touched)
             && let Some(sink) = sink
         {
             sink(WorldEvent::IndexChanged { session });
@@ -2329,6 +2472,45 @@ mod tests {
         }
 
         #[test]
+        fn a_batch_s_pages_reach_the_index_and_its_undo_takes_out_the_pages_it_deletes() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = kesh();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            ready(&state, &events, session);
+            let kesh_tor = state.read_page("Kesh Tor.md").unwrap();
+            let writes = [
+                BatchWrite::NewPage {
+                    path: "Places/Docks.md".to_owned(),
+                    text: "[[Mirela]] at the docks\n".to_owned(),
+                },
+                BatchWrite::Edit {
+                    path: "Kesh Tor.md".to_owned(),
+                    text: "# Kesh Tor\n\nRuled by [[Mirela]].\n".to_owned(),
+                    version: kesh_tor.version,
+                },
+            ];
+
+            let batch = state.accept_batch(session, &writes, |_, _| true).unwrap();
+
+            assert!(
+                events
+                    .try_iter()
+                    .any(|event| event == WorldEvent::IndexChanged { session })
+            );
+            assert_eq!(
+                linking(&state, "Mirela.md"),
+                ["Places/Docks.md", "Kesh Tor.md", "Places/Saltmere.md"]
+            );
+
+            state
+                .undo_batch(session, batch.change.unwrap(), |_, _| true)
+                .unwrap();
+
+            assert_eq!(linking(&state, "Mirela.md"), ["Places/Saltmere.md"]);
+        }
+
+        #[test]
         fn a_reopen_with_nothing_changed_reads_no_page_and_keeps_the_backlinks() {
             let app_data = tempfile::tempdir().unwrap();
             let world = kesh();
@@ -3715,6 +3897,150 @@ mod tests {
             assert_eq!(
                 fs::read(world.path().join(SALTMERE)).unwrap(),
                 "\u{feff}# Saltmere\r\n".as_bytes()
+            );
+        }
+
+        fn new_page(path: &str, text: &str) -> BatchWrite {
+            BatchWrite::NewPage {
+                path: path.to_owned(),
+                text: text.to_owned(),
+            }
+        }
+
+        #[test]
+        fn a_page_is_read_and_a_new_page_mapped_in_any_letter_case_to_the_names_on_disk() {
+            let state = WorldState::default();
+            let world = world();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+
+            let (path, page) = state.page_in(session, "places/SALTMERE.md").unwrap();
+            let free = state.new_page_free(session, "PLACES/Docks.md").unwrap();
+
+            assert_eq!(path, SALTMERE);
+            assert_eq!(page, state.read_page(SALTMERE).unwrap());
+            assert_eq!(free, "Places/Docks.md");
+            assert_eq!(
+                state
+                    .new_page_free(session, "places/saltmere.md")
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Exists
+            );
+            assert!(!world.path().join("Places/Docks.md").exists());
+        }
+
+        #[test]
+        fn a_batch_its_undo_and_its_change_need_their_opening_to_be_the_open_world() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            let first = state.open(world.path().to_path_buf()).unwrap().session;
+            let change = state
+                .accept_batch(first, &[new_page("Docks.md", "# Docks\n")], |_, _| true)
+                .unwrap()
+                .change
+                .unwrap();
+            let second = state.open(world.path().to_path_buf()).unwrap().session;
+
+            let accept = state
+                .accept_batch(first, &[new_page("Harbor.md", "# Harbor\n")], |_, _| true)
+                .unwrap_err();
+            let undo = state.undo_batch(first, change, |_, _| true).unwrap_err();
+            let holds = state.holds_change(first, change).unwrap_err();
+
+            for error in [accept, undo, holds] {
+                assert_eq!(error.kind, ErrorKind::NoWorld);
+            }
+            assert!(!world.path().join("Harbor.md").exists());
+            assert!(world.path().join("Docks.md").exists());
+            assert!(state.holds_change(second, change).unwrap());
+        }
+
+        #[test]
+        fn a_change_is_held_by_its_id_and_start_time_so_a_replaced_history_s_change_is_not_undone()
+        {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            let old = state
+                .accept_batch(session, &[new_page("Docks.md", "# Docks\n")], |_, _| true)
+                .unwrap()
+                .change
+                .unwrap();
+            assert!(state.holds_change(session, old).unwrap());
+            let unknown = ChangeId {
+                id: old.id + 1,
+                ..old
+            };
+            assert!(!state.holds_change(session, unknown).unwrap());
+            state.close();
+
+            // The database is damaged, so the next opening sets it aside and starts a new one,
+            // whose first change takes the old change's id.
+            let database = file(app_data.path(), world.path());
+            fs::write(&database, [7u8; 4096]).unwrap();
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            let new = state
+                .accept_batch(session, &[new_page("Harbor.md", "# Harbor\n")], |_, _| true)
+                .unwrap()
+                .change
+                .unwrap();
+            assert_eq!(new.id, old.id);
+            // The clock moved on: the new change started a second after the old one.
+            let started = old.started as i64 + 1;
+            rusqlite::Connection::open(&database)
+                .unwrap()
+                .execute(
+                    "UPDATE changes SET started = ?1 WHERE id = ?2",
+                    [started, new.id],
+                )
+                .unwrap();
+
+            let new = ChangeId {
+                started: started as u64,
+                ..new
+            };
+            assert!(state.holds_change(session, new).unwrap());
+            assert!(!state.holds_change(session, old).unwrap());
+            let error = state.undo_batch(session, old, |_, _| true).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::NotFound);
+            assert!(world.path().join("Docks.md").exists());
+            assert!(world.path().join("Harbor.md").exists());
+            assert_eq!(stored(app_data.path(), world.path()).len(), 1);
+        }
+
+        #[test]
+        fn the_watcher_leaves_out_a_batch_s_writes_and_its_undo_s_deletions() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let (state, events) = launched_and_watched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            let saltmere = state.read_page(SALTMERE).unwrap();
+            let writes = [
+                BatchWrite::Edit {
+                    path: SALTMERE.to_owned(),
+                    text: "# Saltmere harbour\n".to_owned(),
+                    version: saltmere.version,
+                },
+                new_page("Places/Coast/Harbor.md", "# Harbor\n"),
+            ];
+
+            let batch = state.accept_batch(session, &writes, |_, _| true).unwrap();
+            fs::write(world.path().join("Sentinel.md"), "").unwrap();
+            assert_eq!(
+                next_event(&events),
+                changed(session, true, &["Sentinel.md"])
+            );
+
+            state
+                .undo_batch(session, batch.change.unwrap(), |_, _| true)
+                .unwrap();
+            assert!(!world.path().join("Places/Coast").exists());
+            fs::write(world.path().join("Second sentinel.md"), "").unwrap();
+            assert_eq!(
+                next_event(&events),
+                changed(session, true, &["Second sentinel.md"])
             );
         }
 

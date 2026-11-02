@@ -5,8 +5,9 @@
 //!
 //! A write that replaces something commits a pending record of the states before and after, then
 //! writes, then completes the record, or abandons it when the write fails. When the world next
-//! opens, a pending record left by a crash is removed only when every path it touched still holds
-//! its state before; otherwise it is completed, so the bytes a write replaced are never lost.
+//! opens, a pending record left by a crash loses the entries of the paths that still hold their
+//! state before, which were never written; it is removed when none is left, and completed with the
+//! rest otherwise, so the bytes a write replaced are never lost.
 
 mod database;
 
@@ -110,6 +111,8 @@ pub enum Kind {
     KeepMine,
     Restore,
     Undo,
+    /// Changes the user accepted from the assistant, written together.
+    Accepted,
 }
 
 impl Kind {
@@ -122,6 +125,7 @@ impl Kind {
             Self::KeepMine => "keep_mine",
             Self::Restore => "restore",
             Self::Undo => "undo",
+            Self::Accepted => "accepted",
         }
     }
 }
@@ -316,6 +320,28 @@ impl History {
         Ok(transaction.commit()?)
     }
 
+    /// Completes a record whose write stopped partway, keeping only the entries of `paths`, the
+    /// ones written, and removes it when `paths` is empty, as `abandon` does. A record that extends
+    /// an editing session holds one path, so it never stops partway.
+    pub fn complete_only(&mut self, record: Record, paths: &[String]) -> Result<(), Failure> {
+        if paths.is_empty() {
+            return self.abandon(record);
+        }
+        let transaction = self.connection.transaction()?;
+        let stored: Vec<String> = transaction
+            .prepare("SELECT path FROM entries WHERE change_id = ?1")?
+            .query_map([record.change], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for path in stored.iter().filter(|path| !paths.contains(path)) {
+            transaction.execute(
+                "DELETE FROM entries WHERE change_id = ?1 AND path = ?2",
+                params![record.change, path],
+            )?;
+        }
+        set_pending(&transaction, record.change, false)?;
+        Ok(transaction.commit()?)
+    }
+
     /// Removes a record whose write failed, so history shows no change for it. A save that extended
     /// a session leaves the session's change as it was.
     pub fn abandon(&mut self, record: Record) -> Result<(), Failure> {
@@ -441,6 +467,20 @@ impl History {
         Ok((!entries.is_empty()).then_some(entries))
     }
 
+    /// Whether history holds the change `id` of `kind` that started at `started`. Ids start again
+    /// in a database that replaced a damaged one, so an id alone could name an unrelated change.
+    pub fn holds(&self, id: i64, kind: Kind, started: u64) -> Result<bool, Failure> {
+        let held = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM changes WHERE id = ?1 AND kind = ?2 AND started = ?3",
+                params![id, kind.name(), started as i64],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(held.is_some())
+    }
+
     /// Inserts a change with its entries in one commit. Any change but an edit's ends the editing
     /// sessions of its paths.
     fn insert(
@@ -496,9 +536,9 @@ impl History {
     }
 
     /// Resolves the records that writes left pending, in one commit. A save that extended a
-    /// session keeps its bytes when the page holds them. A pending change is removed when every
-    /// path it touched still holds its state before, so the write did not happen, and is completed
-    /// otherwise.
+    /// session keeps its bytes when the page holds them. Any other pending change loses the
+    /// entries of the paths that still hold their state before, which its writes never reached; it
+    /// is removed when none is left, and completed with the rest otherwise.
     fn recover(&mut self, mut state_of: impl FnMut(&str) -> State) -> Result<(), Failure> {
         let transaction = self.connection.transaction()?;
         let pending: Vec<i64> = transaction
@@ -529,10 +569,20 @@ impl History {
                     transaction.execute(promote, params![change, path])?;
                 }
                 set_pending(&transaction, change, false)?;
-            } else if entries
-                .iter()
-                .all(|(path, before, _)| state_of(path) == *before)
-            {
+                continue;
+            }
+            let mut kept = 0;
+            for (path, before, _) in entries {
+                if state_of(&path) == before {
+                    transaction.execute(
+                        "DELETE FROM entries WHERE change_id = ?1 AND path = ?2",
+                        params![change, path],
+                    )?;
+                } else {
+                    kept += 1;
+                }
+            }
+            if kept == 0 {
                 transaction.execute("DELETE FROM changes WHERE id = ?1", [change])?;
             } else {
                 set_pending(&transaction, change, false)?;
@@ -881,6 +931,86 @@ mod tests {
 
             assert_eq!(fixture.stored().len(), kept);
         }
+    }
+
+    fn entry(path: &str, before: State, after: State) -> Entry {
+        Entry {
+            path: path.to_owned(),
+            before,
+            after,
+        }
+    }
+
+    /// Entries of an accepted change: a folder and a new page in it, and an edit of another page.
+    fn accepted_entries() -> [Entry; 3] {
+        [
+            entry("Places", State::Absent, State::Folder),
+            entry("Places/Kesh.md", State::Absent, page(b"# Kesh\n")),
+            entry("Saltmere.md", page(b"old"), page(b"new")),
+        ]
+    }
+
+    #[test]
+    fn recovery_keeps_only_the_entries_of_the_paths_a_crashed_change_wrote() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        history
+            .begin(Kind::Accepted, &accepted_entries(), 0)
+            .unwrap();
+        drop(history);
+
+        // The crash came after the folder and the edit, before the new page.
+        fixture.open_with(10, |path| match path {
+            "Places" => State::Folder,
+            "Saltmere.md" => page(b"new"),
+            _ => State::Absent,
+        });
+
+        let changes = fixture.stored();
+        let [first, _, third] = accepted_entries();
+        assert_eq!(
+            kinds_and_entries(&changes),
+            [("accepted", vec![first, third])]
+        );
+        assert!(!changes[0].pending);
+    }
+
+    #[test]
+    fn completing_only_some_paths_keeps_exactly_their_entries_and_none_removes_the_change() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        let record = history
+            .begin(Kind::Accepted, &accepted_entries(), 0)
+            .unwrap();
+        history
+            .complete_only(record, &["Places".to_owned(), "Saltmere.md".to_owned()])
+            .unwrap();
+        let record = history
+            .begin(Kind::Accepted, &accepted_entries(), 10)
+            .unwrap();
+        history.complete_only(record, &[]).unwrap();
+
+        let changes = fixture.stored();
+        let [first, _, third] = accepted_entries();
+        assert_eq!(
+            kinds_and_entries(&changes),
+            [("accepted", vec![first, third])]
+        );
+        assert!(!changes[0].pending);
+    }
+
+    #[test]
+    fn history_holds_a_change_only_with_its_kind_and_start_time() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        history
+            .add(Kind::Accepted, &accepted_entries(), 100)
+            .unwrap();
+
+        assert!(history.holds(1, Kind::Accepted, 100).unwrap());
+        assert!(!history.holds(1, Kind::Accepted, 101).unwrap());
+        assert!(!history.holds(1, Kind::Edit, 100).unwrap());
+        assert!(!history.holds(2, Kind::Accepted, 100).unwrap());
     }
 
     #[test]
