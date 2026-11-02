@@ -8,11 +8,11 @@ import { autosaveDelay } from "../logic/saving";
 import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
-function renderWorld() {
+function renderWorld(onOpenSettings?: () => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <World />
+      <World onOpenSettings={onOpenSettings} />
     </QueryClientProvider>,
   );
 }
@@ -487,5 +487,65 @@ describe("changing worlds", () => {
     expect(isInert(next)).toBe(false);
     await act(() => new Promise((resolve) => setTimeout(resolve, autosaveDelay + 100)));
     expect(writesOf(calls)).toEqual([]);
+  });
+});
+
+describe("opening Settings", () => {
+  const pressSettingsShortcut = () =>
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: ",", ctrlKey: true });
+
+  it("opens from Ctrl+, and the Settings button on the welcome screen", async () => {
+    mockWorldIpc();
+    const onOpenSettings = vi.fn();
+    renderWorld(onOpenSettings);
+    await openWorldButton();
+
+    expect(pressSettingsShortcut()).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(onOpenSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens from Ctrl+, and the world menu's Settings… in a world, after Close world", async () => {
+    mockWorldIpc();
+    const onOpenSettings = vi.fn();
+    renderWorld(onOpenSettings);
+    fireEvent.click(await openWorldButton());
+    await tree();
+
+    pressSettingsShortcut();
+    fireEvent.click(screen.getByRole("button", { name: "World menu" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent).slice(-2)).toEqual([
+      "Close world",
+      "Settings…Ctrl+,",
+    ]);
+    fireEvent.click(items.at(-1) as HTMLElement);
+
+    expect(onOpenSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not open while a modal dialog has focus or a world change runs", async () => {
+    let pick: (world: WorldOpened) => void = () => {};
+    const calls = mockWorldIpc({
+      world_open: () => new Promise<WorldOpened>((resolve) => (pick = resolve)),
+    });
+    const onOpenSettings = vi.fn();
+    renderWorld(onOpenSettings);
+
+    // The folder dialog stays open, so the world change runs.
+    fireEvent.click(await openWorldButton());
+    await waitFor(() => expect(commandsOf(calls)).toContain("world_open"));
+    pressSettingsShortcut();
+    await act(async () => pick(testWorld));
+    await tree();
+
+    await chooseFromWorldMenu("New world…");
+    await waitFor(() =>
+      expect(document.activeElement?.closest('[aria-modal="true"]')).not.toBeNull(),
+    );
+    pressSettingsShortcut();
+
+    expect(onOpenSettings).not.toHaveBeenCalled();
   });
 });

@@ -10,14 +10,17 @@ import type {
   EditorLink,
   EditorLinks,
   HistoryVersion,
+  KeyStorage,
   LinkedPage,
   LinkSuggestions,
   PageMatch,
   PageMatches,
   PageText,
   PageVersion,
+  ProviderSaved,
   RecentWorld,
   RestoredPage,
+  Settings,
   TextLine,
   TextMatch,
   TextMatches,
@@ -617,6 +620,65 @@ let newLocation = previewLocations[0];
 /** The worlds created in each location this session, by name. */
 const createdWorlds: Record<string, string[]> = {};
 
+/** The preview's settings, in memory. They hold where a key is stored, never a key. */
+let previewSettings: Settings = { ai: true, textProvider: null };
+
+function requireAi() {
+  if (!previewSettings.ai) throw { kind: "ai_off", message: "AI features are off." };
+}
+
+/**
+ * Saves the text provider like the core. An approximation for the preview: of the base URL rules
+ * it checks only that the text is an `https` URL or an `http` URL on `localhost`, and every typed
+ * key is stored in the keychain, except the key `no-keychain`, which answers as if no keychain
+ * could be reached and, with `keyFile`, is stored in the key file.
+ */
+function saveProvider(args: InvokeArgs | undefined): ProviderSaved {
+  requireAi();
+  const { baseUrl, model, key, keyFile } = args as {
+    baseUrl: string;
+    model: string;
+    key: string | null;
+    keyFile: boolean;
+  };
+  const trimmed = baseUrl.trim().replace(/\/$/, "");
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return {
+      state: "invalid",
+      field: "base_url",
+      message: "Enter the full address of the provider, starting with https://.",
+    };
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "localhost")) {
+    return {
+      state: "invalid",
+      field: "base_url",
+      message:
+        "The address must start with https://, or with http:// for a server on this computer.",
+    };
+  }
+  if (model.trim() === "") {
+    return { state: "invalid", field: "model", message: "Enter the model's ID." };
+  }
+  const typed = key?.trim() || null;
+  const previous = previewSettings.textProvider;
+  let storage: KeyStorage;
+  if (typed === "no-keychain") {
+    if (!keyFile) return { state: "no_keychain" };
+    storage = "file";
+  } else if (typed) storage = "keychain";
+  else if (previous && new URL(previous.baseUrl).origin === url.origin) storage = previous.key;
+  else storage = "none";
+  previewSettings = {
+    ai: true,
+    textProvider: { baseUrl: trimmed, model: model.trim(), key: storage, host: url.host },
+  };
+  return { state: "saved", settings: previewSettings };
+}
+
 /** Sample command results: values, or functions of the arguments that throw like the core. */
 export const previewFixtures: Record<string, unknown> = {
   // Opens the sample world at once: the preview has no folder dialog.
@@ -781,4 +843,19 @@ export const previewFixtures: Record<string, unknown> = {
     return textMatchesOf(requireWorld(), query);
   },
   search_create: (args?: InvokeArgs) => createSearched(args),
+  settings_get: (): Settings => previewSettings,
+  settings_ai_set: (args?: InvokeArgs): Settings => {
+    const { on } = args as { on: boolean };
+    previewSettings = { ...previewSettings, ai: on };
+    return previewSettings;
+  },
+  provider_save: (args?: InvokeArgs) => saveProvider(args),
+  provider_key_remove: (): Settings => {
+    requireAi();
+    const provider = previewSettings.textProvider;
+    if (provider) {
+      previewSettings = { ...previewSettings, textProvider: { ...provider, key: "none" } };
+    }
+    return previewSettings;
+  },
 };

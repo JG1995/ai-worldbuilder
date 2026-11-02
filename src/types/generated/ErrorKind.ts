@@ -3,4 +3,4 @@
 /**
  * Stable error categories that the interface can branch on.
  */
-export type ErrorKind = "internal" | "no_world" | "invalid_path" | "not_found" | "not_utf8" | "world_missing" | "io" | "conflict" | "invalid_name" | "exists";
+export type ErrorKind = "internal" | "no_world" | "invalid_path" | "not_found" | "not_utf8" | "world_missing" | "io" | "conflict" | "invalid_name" | "exists" | "ai_off" | "keychain";

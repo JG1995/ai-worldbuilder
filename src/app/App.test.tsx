@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { mockWorldIpc } from "@/features/world/api/test-ipc";
 import { App } from "./App";
@@ -11,6 +11,21 @@ it("launches on the welcome screen when the core has no world to reopen", async 
   expect(await screen.findByRole("button", { name: "Open world…" })).toBeInTheDocument();
   expect(screen.getByText("No worlds yet.")).toBeInTheDocument();
   expect(calls.map(({ command }) => command)).toEqual(["world_restore", "recent_list"]);
+});
+
+it("opens Settings with Ctrl+, and Escape closes it, returning focus", async () => {
+  mockWorldIpc({ settings_get: () => ({ ai: true, textProvider: null }) });
+  render(<App />);
+  const openWorld = await screen.findByRole("button", { name: "Open world…" });
+  act(() => openWorld.focus());
+
+  fireEvent.keyDown(openWorld, { key: ",", ctrlKey: true });
+  const settings = await screen.findByRole("dialog", { name: "Settings" });
+  expect(within(settings).getByRole("switch", { name: "AI features" })).toHaveFocus();
+  fireEvent.keyDown(settings, { key: "Escape" });
+
+  expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
+  expect(openWorld).toHaveFocus();
 });
 
 it("opens a page from quick open: Ctrl+O, typing part of its name and Enter", async () => {

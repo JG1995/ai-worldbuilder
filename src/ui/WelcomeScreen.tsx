@@ -10,6 +10,8 @@ type WelcomeScreenProps = {
   onNewWorld: () => void;
   onChooseRecent: (id: string) => void;
   onRemoveRecent: (id: string) => void;
+  /** Opens Settings; without it, there is no Settings button. */
+  onOpenSettings?: () => void;
 };
 
 /** The screen shown when no world is open. It fills its container. */
@@ -19,6 +21,7 @@ export function WelcomeScreen({
   onNewWorld,
   onChooseRecent,
   onRemoveRecent,
+  onOpenSettings,
 }: WelcomeScreenProps) {
   const headingId = useId();
 
@@ -35,6 +38,11 @@ export function WelcomeScreen({
           <Button variant="secondary" onClick={onNewWorld}>
             New world…
           </Button>
+          {onOpenSettings && (
+            <Button variant="ghost" onClick={onOpenSettings}>
+              Settings
+            </Button>
+          )}
         </div>
         <section aria-labelledby={headingId} className="flex flex-col gap-2">
           <h2 id={headingId} className="label-caps px-2 text-text-muted">

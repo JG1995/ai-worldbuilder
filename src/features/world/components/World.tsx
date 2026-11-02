@@ -42,6 +42,11 @@ type WorldProps = {
    * Ctrl/Cmd+K and the tree's Search button. Without it, there is no quick open.
    */
   quickOpen?: (ports: QuickOpenPorts) => ReactNode;
+  /**
+   * Opens Settings, which Ctrl/Cmd+, the welcome screen's Settings button and the world menu's
+   * Settings… item do. Without it, none of them exists.
+   */
+  onOpenSettings?: () => void;
 };
 
 /**
@@ -50,7 +55,7 @@ type WorldProps = {
  * closes, every open page saves, with the failed-save dialog for each one that cannot, and then
  * the workspace saves.
  */
-export function World({ quickOpen }: WorldProps) {
+export function World({ quickOpen, onOpenSettings }: WorldProps) {
   const world = useWorldStore((store) => store.world);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const { opened, closed, setChangingWorld, holdSaving } = useWorldStore.getState();
@@ -168,6 +173,24 @@ export function World({ quickOpen }: WorldProps) {
 
   useEffect(() => listenEvent(closeRequestedEvent, () => void closeWindow()), []);
 
+  /**
+   * Ctrl/Cmd+, opens Settings on either screen, unless a modal dialog has focus, a world change
+   * runs or the launch is still restoring the last world.
+   */
+  const settingsShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (!onOpenSettings || !(event.ctrlKey || event.metaKey) || event.altKey || event.key !== ",") {
+      return;
+    }
+    event.preventDefault();
+    const busy = launching || useWorldStore.getState().changingWorld;
+    if (!busy && !document.activeElement?.closest('[aria-modal="true"]')) onOpenSettings();
+  });
+
+  useEffect(() => {
+    window.addEventListener("keydown", settingsShortcut);
+    return () => window.removeEventListener("keydown", settingsShortcut);
+  }, []);
+
   const openWorld = () =>
     changeWorld(async () => {
       try {
@@ -247,6 +270,7 @@ export function World({ quickOpen }: WorldProps) {
           onCloseWorld={closeWorld}
           confirmSaved={confirmSaved}
           quickOpen={quickOpen}
+          onOpenSettings={onOpenSettings}
         />
       );
     }
@@ -260,6 +284,7 @@ export function World({ quickOpen }: WorldProps) {
           onNewWorld={() => setNewWorldOpen(true)}
           onChooseRecent={openRecent}
           onRemoveRecent={removeRecent}
+          onOpenSettings={onOpenSettings}
         />
         {import.meta.env.DEV && (
           <a href="/showcase.html" className="ui absolute top-3 right-4 text-accent underline">

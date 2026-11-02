@@ -6,13 +6,14 @@
 //! save. Nothing is ever written at the root of the app data folder, where the webview keeps its
 //! profile.
 
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::data_file::write_atomically;
 
 const FORMAT: u32 = 1;
 /// How many worlds the list keeps. The world opened longest ago drops off first.
@@ -217,30 +218,11 @@ impl Recent {
         let Some(file) = &self.file else { return };
         let result = serde_json::to_vec_pretty(&self.document)
             .map_err(io::Error::other)
-            .and_then(|bytes| write_atomically(file, &bytes));
+            .and_then(|bytes| write_atomically(file, &bytes, false));
         if let Err(error) = result {
             eprintln!("Grimoire.md could not save its recent worlds: {error}");
         }
     }
-}
-
-/// Writes `bytes` to a temporary file next to `file` and then renames it over `file`, so the file
-/// always holds either its old or its new content. Creates the folder if needed.
-fn write_atomically(file: &Path, bytes: &[u8]) -> io::Result<()> {
-    let folder = file.parent().expect("the data file is inside a folder");
-    fs::create_dir_all(folder)?;
-    let temporary = folder.join(format!(".worlds.json.{}.tmp", process::id()));
-    let result = File::create(&temporary)
-        .and_then(|mut out| {
-            out.write_all(bytes)?;
-            out.sync_all()
-        })
-        .and_then(|()| fs::rename(&temporary, file));
-    if result.is_err() {
-        // The failure being reported matters more than one that removing the file might add.
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 fn now() -> u64 {

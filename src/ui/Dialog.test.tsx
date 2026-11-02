@@ -1,6 +1,6 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { useRef, useState } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Button } from "./Button";
 import { Dialog } from "./Dialog";
 
@@ -59,6 +59,20 @@ describe("Dialog", () => {
     expect(first).toHaveFocus();
     fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
     expect(last).toHaveFocus();
+  });
+
+  it("is wide on request, and its close button cancels it", () => {
+    const onCancel = vi.fn();
+    render(
+      <Dialog title="Settings" wide closeButton onCancel={onCancel}>
+        Content
+      </Dialog>,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(dialog).toHaveClass("w-[560px]");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 
   it("cancels on Escape and returns focus to the element that opened it", () => {
