@@ -283,30 +283,28 @@ fn first_whole(text: &str, name: &str) -> Option<usize> {
 const MATCH_WORDS: usize = 32;
 
 /// The full-text expression that selects the pages holding any of the first 32 distinct words of
-/// `text` as a whole word, with letter case and accents ignored: each word's search form quoted,
-/// joined by `OR`. `None` when `text` has no words. Whatever else `text` holds, such as quotes or
-/// the expression's operators, separates words.
+/// `text` as a whole word, with letter case and accents ignored: each word quoted, joined by `OR`.
+/// Words are distinct by their search form, and SQLite's tokenizer folds each as it folded the
+/// pages' text. `None` when `text` has no words. Whatever else `text` holds, such as quotes or the
+/// expression's operators, separates words.
 pub fn any_word_expression(text: &str) -> Option<String> {
-    let mut terms: Vec<String> = Vec::new();
+    let mut forms: Vec<String> = Vec::new();
+    let mut terms = Vec::new();
     for range in words(text) {
-        let form = fold(&text[range]).text;
+        let word = &text[range];
+        let form = fold(word).text;
         // A word of marks alone has no search form.
-        if form.is_empty() || terms.contains(&form) {
+        if form.is_empty() || forms.contains(&form) {
             continue;
         }
-        terms.push(form);
+        forms.push(form);
+        // Letters, digits and marks only, so the quotes hold no syntax and no quote.
+        terms.push(format!("\"{word}\""));
         if terms.len() == MATCH_WORDS {
             break;
         }
     }
-    // Letters, digits and marks only, so the quotes hold no syntax and no quote.
-    (!terms.is_empty()).then(|| {
-        terms
-            .iter()
-            .map(|term| format!("\"{term}\""))
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    })
+    (!terms.is_empty()).then(|| terms.join(" OR "))
 }
 
 /// A page path without its `.md`, in any letter case.

@@ -1573,6 +1573,21 @@ mod tests {
     }
 
     #[test]
+    fn text_matches_find_words_in_scripts_whose_accents_sqlite_keeps() {
+        let mut index = ready(&[
+            page("Greek.md", "Ταξίδι στην Αθήνα."),
+            page("Russian.md", "Это мой дом."),
+            page("Korean.md", "한국 지도"),
+            page("Dry.md", "Nothing to see."),
+        ]);
+
+        // SQLite folds accents only on Latin letters and keeps Hangul syllables whole.
+        assert_eq!(index.matching_text("αθήνα", 5).unwrap(), ["Greek.md"]);
+        assert_eq!(index.matching_text("Мой", 5).unwrap(), ["Russian.md"]);
+        assert_eq!(index.matching_text("한국", 5).unwrap(), ["Korean.md"]);
+    }
+
+    #[test]
     fn the_context_queries_answer_from_what_is_stored_while_the_index_is_built() {
         let mut index = Index::open(None, WORLD);
         apply(
