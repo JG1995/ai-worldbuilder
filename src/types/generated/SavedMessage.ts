@@ -5,4 +5,4 @@ import type { ContextPage } from "./ContextPage";
 /**
  * A saved message. Times are in seconds since the Unix epoch.
  */
-export type SavedMessage = { "role": "user", text: string, time: number, } | { "role": "answer", text: string, time: number, state: AnswerState, pages: Array<ContextPage>, leftOut: number, indexing: boolean, };
+export type SavedMessage = { "role": "user", text: string, time: number, } | { "role": "answer", id: number, text: string, time: number, state: AnswerState, pages: Array<ContextPage>, leftOut: number, indexing: boolean, };

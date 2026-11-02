@@ -103,6 +103,10 @@ pub fn run() {
             assistant::assistant_conversations,
             assistant::assistant_conversation,
             assistant::assistant_delete,
+            assistant::assistant_review,
+            assistant::assistant_accept,
+            assistant::assistant_reject,
+            assistant::assistant_undo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

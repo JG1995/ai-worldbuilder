@@ -12,6 +12,7 @@
 mod database;
 
 pub use database::file_name;
+pub(crate) use database::fnv1a_64;
 
 use std::collections::HashMap;
 use std::path::Path;

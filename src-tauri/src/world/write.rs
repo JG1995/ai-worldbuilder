@@ -900,10 +900,6 @@ pub struct ChangeId {
 }
 
 /// One write of a batch.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-)]
 #[derive(Debug, Clone)]
 pub enum BatchWrite {
     /// A page to create at `path` with `text`, written as it is.
@@ -926,10 +922,6 @@ pub struct WrittenPage {
 }
 
 /// The write that stopped a batch partway, by its index in the batch, and why.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-)]
 #[derive(Debug)]
 pub struct BatchFailure {
     pub index: usize,
@@ -937,10 +929,6 @@ pub struct BatchFailure {
 }
 
 /// What a batch wrote, in order.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-)]
 #[derive(Debug)]
 pub struct BatchWritten {
     pub written: Vec<WrittenPage>,

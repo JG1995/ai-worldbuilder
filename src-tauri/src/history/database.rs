@@ -129,7 +129,7 @@ pub fn file_name(world: &str) -> String {
 
 /// The 64-bit FNV-1a hash. It is written out here because std's `DefaultHasher` may change between
 /// Rust releases, and the hash names a file that must be found again.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     bytes.iter().fold(OFFSET_BASIS, |hash, byte| {

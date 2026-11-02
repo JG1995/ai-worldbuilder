@@ -3,6 +3,6 @@ import type { ProviderFailure } from "./ProviderFailure";
 
 /**
  * How an answer ended. Each carries the conversation, which is new when the message started one,
- * and the answer's final text.
+ * the answer's final prose, and the saved answer's id, or none when no answer was saved.
  */
-export type AnswerEnd = { "state": "complete", conversation: number, text: string, } | { "state": "stopped", conversation: number, text: string, } | { "state": "cut_off", conversation: number, text: string, } | { "state": "failed", conversation: number, text: string, reason: ProviderFailure, detail: string | null, providerMessage: string | null, };
+export type AnswerEnd = { "state": "complete", conversation: number, text: string, answer: number | null, } | { "state": "stopped", conversation: number, text: string, answer: number | null, } | { "state": "cut_off", conversation: number, text: string, answer: number | null, } | { "state": "failed", conversation: number, text: string, answer: number | null, reason: ProviderFailure, detail: string | null, providerMessage: string | null, };

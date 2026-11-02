@@ -28,10 +28,6 @@ use crate::index::{
     self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches, Stamp,
     TextMatches,
 };
-#[expect(
-    unused_imports,
-    reason = "called by proposals from PR proposals-in-core"
-)]
 pub(crate) use page::compare;
 pub(crate) use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
@@ -464,10 +460,6 @@ impl WorldState {
     /// The page at `path`, a page path in any letter case, as `page_read` reads it, with its path
     /// as it is on disk, but only while the opening `session` is still the open world, and
     /// `no_world` otherwise.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-    )]
     pub(crate) fn page_in(&self, session: u64, path: &str) -> Result<(String, PageText), AppError> {
         self.while_open(session, |root| {
             let (mapped, page) = write::existing_page_on_disk(root, path)?;
@@ -478,10 +470,6 @@ impl WorldState {
 
     /// The path, with the names on disk, at which a new page `path` can be created in the opening
     /// `session`, or why it cannot be; nothing is created.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-    )]
     pub(crate) fn new_page_free(&self, session: u64, path: &str) -> Result<String, AppError> {
         self.while_open(session, |root| write::new_page_path(root, path))
             .unwrap_or_else(|| Err(no_world()))
@@ -489,10 +477,6 @@ impl WorldState {
 
     /// Writes `writes` as one accepted change while the opening `session` is the open world, under
     /// the world lock like a save, and takes every page written into the index.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-    )]
     pub(crate) fn accept_batch(
         &self,
         session: u64,
@@ -515,10 +499,6 @@ impl WorldState {
 
     /// Undoes the accepted change `change` while the opening `session` is the open world, under the
     /// world lock like a save, and takes every page it restored or deleted into the index.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-    )]
     pub(crate) fn undo_batch(
         &self,
         session: u64,
@@ -542,10 +522,6 @@ impl WorldState {
 
     /// Whether the history of the opening `session` holds the accepted change `change`; false when
     /// the opening has no history.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by proposals from PR proposals-in-core")
-    )]
     pub(crate) fn holds_change(&self, session: u64, change: ChangeId) -> Result<bool, AppError> {
         let inner = self.lock();
         let world = inner.world.as_ref().filter(|_| inner.session == session);
