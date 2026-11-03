@@ -19,6 +19,7 @@ import type {
   HistoryVersion,
   ImageEmbed,
   ImageRequest,
+  ImageTestOutcome,
   KeyStorage,
   LinkedPage,
   LinkSuggestions,
@@ -916,6 +917,53 @@ async function testProvider(): Promise<TestOutcome> {
 }
 
 /**
+ * Saves the image provider like the core. As for the text provider, every typed key is stored in
+ * the keychain, except the key `no-keychain`, which answers as if no keychain could be reached and,
+ * with `keyFile`, is stored in the key file.
+ */
+function saveImageProvider(args: InvokeArgs | undefined): ProviderSaved {
+  requireAi();
+  const { model, key, keyFile } = args as { model: string; key: string | null; keyFile: boolean };
+  if (model.trim() === "") {
+    return { state: "invalid", field: "model", message: "Enter the model's ID." };
+  }
+  const typed = key?.trim() || null;
+  const stored = previewSettings.imageProvider?.key ?? "none";
+  let storage: KeyStorage;
+  if (typed === "no-keychain") {
+    if (!keyFile) return { state: "no_keychain" };
+    storage = "file";
+  } else if (typed) storage = "keychain";
+  else if (stored !== "none") storage = stored;
+  else return { state: "invalid", field: "key", message: "Enter the API key." };
+  previewSettings = {
+    ...previewSettings,
+    imageProvider: { model: model.trim(), key: storage, host: "openrouter.ai" },
+  };
+  return { state: "saved", settings: previewSettings };
+}
+
+/**
+ * Tests the saved image provider without a network. An approximation for the preview: it answers
+ * after a short delay, and fails as an unknown model when the saved model contains `unknown`.
+ */
+async function testImageProvider(): Promise<ImageTestOutcome> {
+  requireAi();
+  const provider = previewSettings.imageProvider;
+  if (!provider || provider.key === "none") {
+    throw { kind: "not_found", message: "No image provider is saved." };
+  }
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  if (!provider.model.includes("unknown")) return { state: "success" };
+  return {
+    state: "failed",
+    reason: "unknown_model",
+    detail: null,
+    providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
+  };
+}
+
+/**
  * A proposal kept with its answer: a new page's text, or an edit's passages, with the page's text
  * when the answer ended. An approximation for the preview: the core keeps a hash of that text.
  */
@@ -1614,6 +1662,19 @@ export const previewFixtures: Record<string, unknown> = {
   },
   provider_test: () => testProvider(),
   provider_test_cancel: () => null,
+  image_provider_save: (args?: InvokeArgs) => saveImageProvider(args),
+  image_provider_key_remove: (): Settings => {
+    requireAi();
+    const provider = previewSettings.imageProvider;
+    if (provider)
+      previewSettings = { ...previewSettings, imageProvider: { ...provider, key: "none" } };
+    return previewSettings;
+  },
+  image_provider_test: () => testImageProvider(),
+  image_provider_test_cancel: () => {
+    requireAi();
+    return null;
+  },
   // A streaming command: `invokeStreaming` calls it with the event handler too.
   assistant_send: sendAnswer,
   // Resolves by page name only, as `links_in` does in the preview, from the world's top level.

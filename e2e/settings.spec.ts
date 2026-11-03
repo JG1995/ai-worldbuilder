@@ -9,7 +9,9 @@ async function openFromWelcome(page: Page) {
   await button.click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await expect(settings).toBeVisible();
-  return { button, settings };
+  const text = settings.getByRole("group", { name: "Text provider" });
+  const image = settings.getByRole("group", { name: "Image provider" });
+  return { button, settings, text, image };
 }
 
 test("switching AI off leaves only the switch, and switching it on brings the provider back", async ({
@@ -33,14 +35,14 @@ test("switching AI off leaves only the switch, and switching it on brings the pr
 test("saving a provider shows where its key is stored, and Escape returns focus", async ({
   page,
 }) => {
-  const { button, settings } = await openFromWelcome(page);
+  const { button, settings, text } = await openFromWelcome(page);
 
-  await settings.getByLabel("Base URL").fill("https://openrouter.ai/api/v1/");
-  await settings.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
-  await settings.getByLabel("API key").fill("sk-preview");
-  await settings.getByRole("button", { name: "Save" }).click();
+  await text.getByLabel("Base URL").fill("https://openrouter.ai/api/v1/");
+  await text.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
+  await text.getByLabel("API key").fill("sk-preview");
+  await text.getByRole("button", { name: "Save" }).click();
 
-  const key = settings.getByLabel("API key");
+  const key = text.getByLabel("API key");
   await expect(key).toHaveAccessibleDescription(
     "Stored in the system keychain. Sent only to openrouter.ai.",
   );
@@ -54,18 +56,18 @@ test("saving a provider shows where its key is stored, and Escape returns focus"
 });
 
 test("without a keychain, the key is stored in a file only after the warning", async ({ page }) => {
-  const { settings } = await openFromWelcome(page);
-  await settings.getByLabel("Base URL").fill("https://openrouter.ai/api/v1");
-  await settings.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
+  const { settings, text } = await openFromWelcome(page);
+  await text.getByLabel("Base URL").fill("https://openrouter.ai/api/v1");
+  await text.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
   // The preview's stand-in for a computer without a keychain.
-  await settings.getByLabel("API key").fill("no-keychain");
+  await text.getByLabel("API key").fill("no-keychain");
 
-  await settings.getByRole("button", { name: "Save" }).click();
+  await text.getByRole("button", { name: "Save" }).click();
   const warning = settings.getByRole("alert");
   await expect(warning).toContainText("No system keychain is available");
   await warning.getByRole("button", { name: "Store in a file" }).click();
 
-  await expect(settings.getByLabel("API key")).toHaveAccessibleDescription(
+  await expect(text.getByLabel("API key")).toHaveAccessibleDescription(
     "Stored in a file only your account can read. Sent only to openrouter.ai.",
   );
   await expect(settings.getByRole("alert")).toHaveCount(0);
@@ -74,12 +76,12 @@ test("without a keychain, the key is stored in a file only after the warning", a
 test("Test connection shows success, and the preview's rate-limited model a warning", async ({
   page,
 }) => {
-  const { settings } = await openFromWelcome(page);
-  const testButton = settings.getByRole("button", { name: "Test connection" });
+  const { settings, text } = await openFromWelcome(page);
+  const testButton = text.getByRole("button", { name: "Test connection" });
   await expect(testButton).toBeDisabled();
-  await settings.getByLabel("Base URL").fill("https://openrouter.ai/api/v1");
-  await settings.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
-  await settings.getByRole("button", { name: "Save" }).click();
+  await text.getByLabel("Base URL").fill("https://openrouter.ai/api/v1");
+  await text.getByLabel("Model").fill("anthropic/claude-sonnet-4.5");
+  await text.getByRole("button", { name: "Save" }).click();
   await expect(testButton).toBeEnabled();
 
   await testButton.click();
@@ -89,15 +91,41 @@ test("Test connection shows success, and the preview's rate-limited model a warn
   );
 
   // The preview's stand-in for a provider that limits requests.
-  await settings.getByLabel("Model").fill("fail:rate_limited");
+  await text.getByLabel("Model").fill("fail:rate_limited");
   await expect(testButton).toBeDisabled();
-  await settings.getByRole("button", { name: "Save" }).click();
+  await text.getByRole("button", { name: "Save" }).click();
   await expect(settings.getByRole("status")).toHaveCount(0);
   await testButton.click();
 
   await expect(settings.getByRole("alert")).toContainText(
     "The provider is limiting requests. Try again later.",
   );
+});
+
+test("an image provider is saved and tested in its own group, which AI off hides", async ({
+  page,
+}) => {
+  const { settings, image } = await openFromWelcome(page);
+  const testButton = image.getByRole("button", { name: "Test connection" });
+  await expect(testButton).toBeDisabled();
+
+  await image.getByLabel("Model").fill("google/gemini-2.5-flash-image");
+  await image.getByLabel("API key").fill("sk-or-preview");
+  await image.getByRole("button", { name: "Save" }).click();
+
+  const key = image.getByLabel("API key");
+  await expect(key).toHaveAccessibleDescription(
+    "Stored in the system keychain. Sent only to openrouter.ai.",
+  );
+  await expect(key).toHaveValue("");
+  await expect(key).toBeFocused();
+  await testButton.click();
+  await expect(image.getByRole("status")).toContainText(
+    "The connection works. OpenRouter accepted the key and lists google/gemini-2.5-flash-image as an image model.",
+  );
+
+  await settings.getByRole("switch", { name: "AI features" }).click();
+  await expect(image).toHaveCount(0);
 });
 
 test("Ctrl+, opens Settings from a world", async ({ page }) => {

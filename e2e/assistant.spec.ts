@@ -128,8 +128,9 @@ async function openWithProvider(page: Page) {
   await pane(page).getByRole("button", { name: "Settings" }).click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByLabel("Base URL").fill("https://api.mistral.ai/v1");
-  await settings.getByLabel("Model").fill("mistral-small-latest");
-  await settings.getByRole("button", { name: "Save" }).click();
+  const text = settings.getByRole("group", { name: "Text provider" });
+  await text.getByLabel("Model").fill("mistral-small-latest");
+  await text.getByRole("button", { name: "Save" }).click();
   await expect(pane(page)).toContainText("mistral-small-latest");
   await page.keyboard.press("Escape");
   await expect(settings).toHaveCount(0);
