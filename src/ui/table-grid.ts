@@ -258,38 +258,68 @@ function revealedKey(state: EditorState, tables: Lines[]) {
 
 type Grids = { decorations: DecorationSet; tables: Lines[]; revealed: string };
 
-function grids(state: EditorState): Grids {
+/**
+ * The grids of the tables none of whose lines is revealed. A grid in `kept`, the previous grids
+ * moved to this text, stays when its table still spans the same lines and none of `changed`, the
+ * edited ranges, touches them; the others are built again.
+ */
+function grids(
+  state: EditorState,
+  kept: DecorationSet = Decoration.none,
+  changed: readonly [number, number][] = [],
+): Grids {
   const tables = tablesIn(state);
   const revealed = revealedKey(state, tables);
-  const decorate = inlineDecorator(state);
+  let decorate: ReturnType<typeof inlineDecorator> | null = null;
   const links = state.field(editorLinks, false)?.marks ?? Decoration.none;
   const ranges = tables.flatMap(({ node, first, last }, index) => {
     if (revealed[index] === "1") return [];
     const from = state.doc.line(first).from;
-    const widget = new GridWidget(gridOf(state, node, from, decorate, links));
-    return [Decoration.replace({ block: true, widget }).range(from, state.doc.line(last).to)];
+    const to = state.doc.line(last).to;
+    let grid: Decoration | null = null;
+    if (!changed.some(([changeFrom, changeTo]) => changeFrom <= to && changeTo >= from)) {
+      kept.between(from, to, (keptFrom, keptTo, decoration) => {
+        if (keptFrom !== from || keptTo !== to) return;
+        grid = decoration;
+        return false;
+      });
+    }
+    if (!grid) {
+      decorate ??= inlineDecorator(state);
+      const widget = new GridWidget(gridOf(state, node, from, decorate, links));
+      grid = Decoration.replace({ block: true, widget });
+    }
+    return [grid.range(from, to)];
   });
   return { decorations: Decoration.set(ranges), tables, revealed };
 }
 
-/** Whether what a grid draws may have changed: the text, its parse, the core's links or the view. */
-function redraws(transaction: Transaction) {
+/**
+ * Whether every grid may draw differently: the core reported new links, or the view changed. An
+ * edit's own moving of the links changes only the grids of the tables it touches.
+ */
+function redrawsAll(transaction: Transaction) {
   const { startState, state } = transaction;
+  const linksChanged = startState.field(editorLinks, false) !== state.field(editorLinks, false);
   return (
-    transaction.docChanged ||
-    syntaxTree(startState) !== syntaxTree(state) ||
-    startState.field(editorLinks, false) !== state.field(editorLinks, false) ||
+    (linksChanged && (!transaction.docChanged || transaction.effects.length > 0)) ||
     startState.facet(previewView) !== state.facet(previewView)
   );
 }
 
 const gridField = StateField.define<Grids>({
-  create: grids,
+  create: (state) => grids(state),
   update: (value, transaction) => {
-    if (redraws(transaction)) return grids(transaction.state);
+    const { startState, state, changes } = transaction;
+    if (redrawsAll(transaction)) return grids(state);
+    if (transaction.docChanged || syntaxTree(startState) !== syntaxTree(state)) {
+      const changed: [number, number][] = [];
+      changes.iterChangedRanges((_fromA, _toA, fromB, toB) => changed.push([fromB, toB]));
+      return grids(state, value.decorations.map(changes), changed);
+    }
     if (!transaction.selection) return value;
-    const revealed = revealedKey(transaction.state, value.tables);
-    return revealed === value.revealed ? value : grids(transaction.state);
+    const revealed = revealedKey(state, value.tables);
+    return revealed === value.revealed ? value : grids(state, value.decorations);
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.decorations),
 });

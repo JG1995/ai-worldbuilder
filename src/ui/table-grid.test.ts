@@ -116,3 +116,56 @@ describe("away from the cursor, a table", () => {
     expect(editor.state.doc.toString()).toBe(`${stones.join("\n")}\n`);
   });
 });
+
+describe("an edit", () => {
+  const twoTables = ["Above", ...stones, "", "Between", "", ...stones];
+
+  /** The grid widgets the editor draws, in the order of their tables. */
+  function gridWidgets(editor: EditorView) {
+    const widgets: unknown[] = [];
+    for (const source of editor.state.facet(EditorView.decorations)) {
+      const set = typeof source === "function" ? source(editor) : source;
+      set.between(0, editor.state.doc.length, (_from, _to, decoration) => {
+        const { widget } = decoration.spec;
+        if (decoration.spec.block && widget && "grid" in widget) widgets.push(widget);
+      });
+    }
+    return widgets;
+  }
+
+  it("away from every table keeps each table's grid as it was built", () => {
+    const editor = show(twoTables);
+    const before = gridWidgets(editor);
+    const between = editor.state.doc.toString().indexOf("Between");
+
+    editor.dispatch({ changes: { from: between, insert: "Still " } });
+
+    expect(before).toHaveLength(2);
+    const after = gridWidgets(editor);
+    expect(after).toHaveLength(2);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+  });
+
+  it("that completes a table shows its grid, and one that breaks a table shows its lines", () => {
+    const editor = show(["| Name | Place |", "", "Between", "", ...stones]);
+    expect(cellTexts(editor)).toEqual([
+      ["Stone", "Weight", "Found"],
+      ["Granite", "9 kg", "quarry"],
+      ["Slate", "4 kg", ""],
+      ["Flint", "2 kg", "river"],
+    ]);
+
+    editor.dispatch({ changes: { from: "| Name | Place |".length, insert: "\n| - | - |" } });
+    const grids = () => [...editor.contentDOM.querySelectorAll("table")];
+    expect(grids()).toHaveLength(2);
+    expect(grids()[0].textContent).toBe("NamePlace");
+
+    // A fence opened above a table makes the rest of the page code, far from where it was typed.
+    const between = editor.state.doc.toString().indexOf("Between");
+    editor.dispatch({ changes: { from: between, insert: "```\n" } });
+    expect(grids()).toHaveLength(1);
+    expect(grids()[0].textContent).toBe("NamePlace");
+    expect(drawnLines(editor).slice(-6, -1)).toEqual(stones);
+  });
+});
