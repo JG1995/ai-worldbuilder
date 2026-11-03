@@ -18,7 +18,6 @@ const versionLabels: Record<VersionKind, string> = {
   outside: "Changed outside Grimoire.md",
   accepted_new_page: "New page",
   accepted_edit: "Edit",
-  links_updated: "Links updated",
 };
 
 /** A version's label: one an accept wrote says so while AI is on, and reads as any other without. */
