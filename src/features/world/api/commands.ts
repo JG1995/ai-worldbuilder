@@ -5,6 +5,8 @@ import type {
   DiffLine,
   EditorLinks,
   HistoryVersion,
+  ImageEmbed,
+  ImageRequest,
   LinkedPage,
   LinkSuggestions,
   NewEntry,
@@ -111,6 +113,13 @@ export const pageProperties = (text: string) =>
  */
 export const linksIn = (path: string, text: string) =>
   invokeCommand<EditorLinks>("links_in", { path, text });
+
+/**
+ * What each of `embeds`, the image embeds of the page at `path`, resolves to among the open
+ * world's image files, in the same order.
+ */
+export const imagesResolve = (path: string, embeds: ImageRequest[]) =>
+  invokeCommand<ImageEmbed[]>("images_resolve", { path, embeds });
 
 /**
  * Creates an empty page for the unresolved link in the page at `from` to `target`, the link's page

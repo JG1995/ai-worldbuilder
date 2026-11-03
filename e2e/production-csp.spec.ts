@@ -26,6 +26,14 @@ function withStyleNonce(html: string) {
   return { csp, html: html.replaceAll("<style>", `<style nonce="${nonce}">`) };
 }
 
+/** A 120 × 160 PNG, the world image the core serves through its scheme. */
+const worldImage = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAIAAABIaz/HAAAA/ElEQVR42u3QQREAEBAAwIvjKYAAAgggiijCCKaC1z3MzmyCjVYLCUKBaNGIFi3agmjRiBYt2oJo0YgWLRrRohEtWjSiRSNatGhEi0a0aNGIFo1o0aIRLRrRokUjWjSiRYtGtGhEixaNaNE8R5+9SCBatGhEixatQLRoRIsWbUG0aESLFm1BtGhEixaNaNGIFi0a0aIRLVo0okUjWrRoRItGtGjRiBaNaNGiES0a0aJFI/qL6DE7CUSLFo1o0aIViBaNaNGiLYgWjWjRoi2IFo1o0aIRLRrRokUjWjSiRYtGtGhEixaNaNGIFi0a0aIRLVo0okUjWrRoRP/gAp3PFEved0J+AAAAAElFTkSuQmCC",
+  "base64",
+);
+/** The URL `convertFileSrc` gives the image on Windows, with the stamp `images_resolve` gave it. */
+const worldImageUrl = "http://grimoire-image.localhost/1%2FMaps%2FKesh%20map.png?v=7-1700000000";
+
 const contentTypes: Record<string, string> = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -90,15 +98,24 @@ test("the production build renders a page in the editor under the production CSP
           "| --- | ---: |",
           "| Water | 3 |",
           "",
+          "![[Kesh map.png]] beside ![a web image](https://example.com/a.png)",
+          "",
         ].join("\n"),
         version: "1",
       },
+      images_resolve: [
+        { state: "found", path: "Maps/Kesh map.png", stamp: "7-1700000000" },
+        { state: "web" },
+      ],
     };
     Object.assign(window, {
       isTauri: true,
       __TAURI_INTERNALS__: {
         invoke: async (command: string) => responses[command],
         transformCallback: () => ++callbacks,
+        // As Tauri builds a custom scheme's URL on Windows.
+        convertFileSrc: (path: string, protocol: string) =>
+          `http://${protocol}.localhost/${encodeURIComponent(path)}`,
       },
       // `@tauri-apps/api` calls it before it asks the core to unlisten.
       __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
@@ -117,6 +134,10 @@ test("the production build renders a page in the editor under the production CSP
     });
   });
 
+  await page.route("http://grimoire-image.localhost/**", (route) =>
+    route.fulfill({ body: worldImage, headers: { "Content-Type": "image/png" } }),
+  );
+
   await page.goto(`${origin}/`);
 
   await page.getByRole("button", { name: "Open world…" }).click();
@@ -130,6 +151,13 @@ test("the production build renders a page in the editor under the production CSP
   await expect(editor.locator(".cm-callout-title")).toHaveText("Shelter");
   await expect(editor.getByRole("checkbox", { name: "Bring water" })).toBeVisible();
   await expect(editor.getByRole("table").getByRole("cell")).toHaveText(["Water", "3"]);
+  // The world's image loads through the core's scheme; the web image is never asked for.
+  const image = editor.locator(".cm-image img");
+  await expect(image).toHaveAttribute("alt", "Kesh map");
+  await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(120);
+  await expect(editor.locator(".cm-image-placeholder")).toContainText(
+    "Web images are not loaded: https://example.com/a.png",
+  );
   // Only CodeMirror's own base theme, in the <style> element that carries the nonce, makes the
   // editor a flex box; the theme's editor section supplies the mono family.
   await expect(page.locator(".cm-editor")).toHaveCSS("display", "flex");
@@ -156,7 +184,8 @@ test("the production build renders a page in the editor under the production CSP
   const violations = () =>
     page.evaluate(() => (window as unknown as { violations: string[] }).violations);
   expect(await violations()).toEqual([]);
-  expect(requests.filter((url) => new URL(url).origin !== origin)).toEqual([]);
+  const offOrigin = requests.filter((url) => new URL(url).origin !== origin);
+  expect([...new Set(offOrigin)]).toEqual([worldImageUrl]);
 
   // A <style> element without the nonce, as injected HTML would add, is still blocked.
   const injectedApplies = await page.evaluate(() => {

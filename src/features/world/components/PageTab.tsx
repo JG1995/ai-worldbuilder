@@ -4,7 +4,7 @@ import { EditorView } from "@codemirror/view";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import type { IpcError } from "@/lib/ipc";
+import { type IpcError, imageUrl } from "@/lib/ipc";
 import type { EditorLink, HistoryVersion, Properties } from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
@@ -30,6 +30,7 @@ import {
   pageWrite,
   worldTreeKey,
 } from "../api/commands";
+import { usePageImages } from "../logic/images";
 import { followLink, usePageLinks } from "../logic/links";
 import { reloadToast } from "../logic/outside-changes";
 import {
@@ -305,6 +306,7 @@ export function PageTab({
   // may be at a backlink's link, scrolls into view once React has settled the mounted editor.
   const editorView = ready ? page.view : undefined;
   const links = usePageLinks(path, editorView);
+  const images = usePageImages(path, editorView);
   const checkProperties = usePageProperties(editorView, reading);
   const [blank, setBlank] = useState<boolean | null>(null);
   useEffect(() => {
@@ -470,16 +472,19 @@ export function PageTab({
             onChange={(editor) => {
               saver.changed(editor.doc);
               links.changed();
+              images.changed();
               setBlank(isBlank(editor.doc));
               checkProperties(editor);
             }}
             onUnmount={(editor) => setEditor(session, path, editor)}
             onReplace={(editor) => {
               links.replaced();
+              images.replaced();
               setBlank(isBlank(editor.doc));
               checkProperties(editor);
             }}
             suggest={(query) => linkSuggest(path, query)}
+            imageUrl={(image, stamp) => imageUrl(session, image, stamp)}
             onFollow={(link) => {
               // The editor follows only resolved links in the reading view, which never writes.
               if (reading && link.state !== "resolved") return;

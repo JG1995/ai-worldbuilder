@@ -556,6 +556,45 @@
 }
 
 /*
+ * Embedded images (src/ui/image-embeds.ts), never wider than the page column or their grid cell,
+ * and their placeholders: an icon and the message in ui-small text-muted inside a dashed outline
+ * border with no radius.
+ */
+.page-editor.cm-editor .cm-image {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.page-editor.cm-editor div.cm-image,
+.page-editor.cm-editor div.cm-image-placeholder {
+  display: flex;
+}
+
+.page-editor.cm-editor .cm-image img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.page-editor.cm-editor .cm-image-placeholder {
+  @apply ui-small;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 8px 12px;
+  border: 1px dashed var(--color-outline);
+  color: var(--color-text-muted);
+  vertical-align: bottom;
+  overflow-wrap: anywhere;
+}
+
+.page-editor.cm-editor div.cm-image-placeholder {
+  width: fit-content;
+}
+
+/*
  * The link suggestion list (src/ui/link-suggestions.ts), a popover on the menus layer with
  * Search's rows: the name in ui-strong, the folder and alias in ui-small text-muted, and the
  * selected row in the selected fill with the accent line, which forced colours repaint as a border.

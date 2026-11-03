@@ -17,6 +17,7 @@ import { tags } from "@lezer/highlight";
 import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
 import type { EditorLink } from "@/types/api";
 import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
+import { type ImageUrl, imageEmbeds } from "./image-embeds";
 import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
 import { livePreview, previewView } from "./live-preview";
 import { pageSyntax } from "./markdown-syntax";
@@ -61,6 +62,9 @@ function styleNonce() {
 
 /** The function the link suggestion list asks, which `MarkdownEditor` sets from its `suggest`. */
 const suggestion = new Compartment();
+
+/** The image embeds' extension, which `MarkdownEditor` sets from its `imageUrl`. */
+const images = new Compartment();
 
 /**
  * Whether the editor is editable and read-only, and which view the live preview shows, together:
@@ -170,6 +174,7 @@ export function createPageState(
       markdown({ extensions: pageSyntax }),
       previewOn.of(preview),
       preview ? [livePreview, tableGrid, propertiesBlock] : [],
+      images.of([]),
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
@@ -206,15 +211,17 @@ const replaceListeners = new WeakMap<EditorView, (state: EditorState) => void>()
 
 /**
  * Puts `state` in the running editor in place of its own, keeping its view, whether it is
- * read-only and the function its link suggestions ask, and reports it through the editor's
- * `onReplace`.
+ * read-only, the function its link suggestions ask and its image embeds, and reports it through
+ * the editor's `onReplace`.
  */
 export function replaceState(editor: EditorView, state: EditorState) {
   const shown = mode.get(editor.state);
   const suggest = suggestion.get(editor.state);
+  const imagesShown = images.get(editor.state);
   editor.setState(state);
   if (shown) setMode(editor, shown);
   if (suggest) editor.dispatch({ effects: suggestion.reconfigure(suggest) });
+  if (imagesShown) editor.dispatch({ effects: images.reconfigure(imagesShown) });
   replaceListeners.get(editor)?.(editor.state);
 }
 
@@ -287,6 +294,13 @@ type MarkdownEditorProps = {
    * list on; each question goes to the current one.
    */
   suggest?: Suggest;
+  /**
+   * Gives the URL of a world image that an image embed resolved to, by its path and stamp. Whether
+   * there is one at mount turns the images on, in a state created with the live preview; each URL
+   * comes from the current one. Without it, image embeds show as typed, or as their names in the
+   * reading view.
+   */
+  imageUrl?: ImageUrl;
 };
 
 /**
@@ -304,6 +318,7 @@ export function MarkdownEditor({
   onReplace,
   onFollow,
   suggest,
+  imageUrl,
 }: MarkdownEditorProps) {
   const parent = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -312,6 +327,7 @@ export function MarkdownEditor({
   const [initialState] = useState(state);
   const [focusAtMount] = useState(autoFocus);
   const [suggestsAtMount] = useState(suggest !== undefined);
+  const [imagesAtMount] = useState(imageUrl !== undefined);
   const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const reportReplace = useEffectEvent((next: EditorState) => onReplace?.(next));
@@ -326,6 +342,7 @@ export function MarkdownEditor({
     if (!suggest) throw new Error("The editor no longer suggests pages.");
     return suggest(query);
   });
+  const urlOf = useEffectEvent((path: string, stamp: string) => imageUrl?.(path, stamp) ?? "");
   const applyMode = useEffectEvent((editor: EditorView) =>
     setMode(editor, modeOf(reading, readOnly)),
   );
@@ -348,6 +365,10 @@ export function MarkdownEditor({
     if (suggestsAtMount) {
       const ask: Suggest = async (query) => askSuggest(query);
       editor.dispatch({ effects: suggestion.reconfigure(suggestFacet.of(ask)) });
+    }
+    if (imagesAtMount && editor.state.facet(previewOn)) {
+      const url: ImageUrl = (path, stamp) => urlOf(path, stamp);
+      editor.dispatch({ effects: images.reconfigure(imageEmbeds(url)) });
     }
     replaceListeners.set(editor, reportReplace);
     // The reading view follows only the resolved links it draws as focusable, by where they start.
@@ -396,7 +417,7 @@ export function MarkdownEditor({
       editor.destroy();
       view.current = null;
     };
-  }, [initialState, focusAtMount, suggestsAtMount]);
+  }, [initialState, focusAtMount, suggestsAtMount, imagesAtMount]);
 
   useEffect(() => {
     if (view.current) setMode(view.current, modeOf(reading, readOnly));
