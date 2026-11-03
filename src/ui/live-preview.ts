@@ -185,10 +185,20 @@ class RangeBuilder {
     return from >= this.from && from <= this.to;
   }
 
-  /** Shows `decoration` from `from` to `to`, unless the cursor's lines show the syntax there. */
+  /**
+   * Shows `decoration` from `from` to `to`, unless the cursor's lines show the syntax there. A
+   * plugin may not replace a line break, so hidden text that spans lines hides line by line, and a
+   * widget that would span lines is not drawn.
+   */
   private replace(from: number, to: number, decoration = hidden) {
-    if (from < to && this.inRange(from) && !this.isRevealed(from, to)) {
-      this.ranges.push(decoration.range(from, to));
+    if (from >= to || this.isRevealed(from, to)) return;
+    const { doc } = this.state;
+    if (to > doc.lineAt(from).to && decoration !== hidden) return;
+    for (let at = from; at < to; ) {
+      const line = doc.lineAt(at);
+      const end = Math.min(line.to, to);
+      if (at < end && this.inRange(at)) this.ranges.push(decoration.range(at, end));
+      at = line.to + 1;
     }
   }
 
@@ -204,16 +214,6 @@ class RangeBuilder {
     for (let number = first; number <= last; number++) {
       const line = doc.line(number);
       this.ranges.push(decoration.range(line.from));
-    }
-  }
-
-  /** Hides `from` to `to` line by line, since a hidden line break would change the layout. */
-  private hideLines(from: number, to: number) {
-    const { doc } = this.state;
-    for (let at = from; at < to; ) {
-      const line = doc.lineAt(at);
-      this.replace(at, Math.min(line.to, to));
-      at = line.to + 1;
     }
   }
 
@@ -267,11 +267,11 @@ class RangeBuilder {
         this.replace(node.from, node.from + 1);
         return false;
       case "PageComment":
-        if (this.reading) this.hideLines(node.from, node.to);
+        if (this.reading) this.replace(node.from, node.to);
         return !this.reading;
       case "PageCommentBlock":
         this.lines(node.from, node.to, lineClasses.comment);
-        if (this.reading) this.hideLines(node.from, node.to);
+        if (this.reading) this.replace(node.from, node.to);
         return !this.reading;
       case "WikiLink":
       case "WikiEmbed":

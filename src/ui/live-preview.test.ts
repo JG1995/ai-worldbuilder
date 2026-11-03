@@ -204,6 +204,27 @@ describe("away from the cursor, the live preview", () => {
     expect(editor.contentDOM.querySelector(".cm-link, .cm-link-unresolved")).toBeNull();
   });
 
+  // A plugin may not hide a line break, and CodeMirror throws if one does.
+  it.each([
+    [
+      ["[the docks](/docks", '"The docks")'],
+      ["the docks", ""],
+    ],
+    [
+      ["[](/docks", "'The docks')"],
+      ["/docks", ""],
+    ],
+    [
+      ["[](", "/docks)"],
+      ["", "/docks"],
+    ],
+  ])("hides a link's syntax line by line when it spans lines: %j", (lines, drawn) => {
+    const editor = show(lines);
+
+    expect(drawnLines(editor).slice(0, 2)).toEqual(drawn);
+    expect(editor.state.doc.toString()).toBe(`${lines.join("\n")}\n`);
+  });
+
   it("shows HTML comments as typed and unstyled, unlike %% comments", () => {
     const editor = show(["a <!-- note --> b", "", "<!-- block -->"]);
 
@@ -234,5 +255,15 @@ describe("on the lines with the cursor or the selection, the live preview", () =
     editor.dispatch({ selection: { anchor: editor.state.doc.length } });
     expect(drawnLines(editor).slice(0, 4)).toEqual(["One", "two", "three", "• four"]);
     expect(editor.state.doc.toString()).toBe(`${lines.join("\n")}\n`);
+  });
+
+  it("keeps taking edits after the cursor leaves a link that spans lines", () => {
+    const editor = show(["[the docks](/docks", '"The docks")'], { cursor: 1 });
+
+    editor.dispatch({ selection: { anchor: editor.state.doc.length } });
+    editor.dispatch(editor.state.replaceSelection("Ash"));
+
+    expect(editor.state.doc.toString()).toBe('[the docks](/docks\n"The docks")\nAsh');
+    expect(drawnLines(editor)).toEqual(["the docks", "", "Ash"]);
   });
 });
