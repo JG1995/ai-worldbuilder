@@ -41,6 +41,7 @@ function TestShell({
   assistant,
   initialAssistantOpen = false,
   onAssistantWidthChange = () => {},
+  collapsed = false,
 }: {
   initialWidth?: number;
   onTreeWidthChange?: (width: number) => void;
@@ -48,6 +49,8 @@ function TestShell({
   assistant?: ReactNode;
   initialAssistantOpen?: boolean;
   onAssistantWidthChange?: (width: number) => void;
+  /** Collapses both panes, as the reading layout does. */
+  collapsed?: boolean;
 }) {
   const [width, setWidth] = useState(initialWidth);
   const [open, setOpen] = useState(initialOpen);
@@ -73,6 +76,7 @@ function TestShell({
       }}
       treeOverlayOpen={open}
       onTreeOverlayOpenChange={setOpen}
+      treeCollapsed={collapsed}
       assistant={assistant}
       assistantOpen={assistantOpen}
       onAssistantOpenChange={setAssistantOpen}
@@ -83,6 +87,7 @@ function TestShell({
       }}
       assistantOverlayOpen={assistantOverlayOpen}
       onAssistantOverlayOpenChange={setAssistantOverlayOpen}
+      assistantCollapsed={collapsed}
     />
   );
 }
@@ -190,6 +195,64 @@ describe("Shell", () => {
     const toggle = screen.getByRole("button", { name: "File tree" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveFocus();
+  });
+
+  describe("collapsed", () => {
+    const tree = () => screen.getByRole("complementary", { hidden: true });
+
+    it("hides the tree at 1280px behind the tree button, which opens it beside the page and as an overlay below 960px", () => {
+      const setWidth = stubWidth(1280);
+      render(<TestShell collapsed />);
+      const toggle = screen.getByRole("button", { name: "File tree" });
+      expect(tree()).not.toBeVisible();
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+      fireEvent.click(toggle);
+      expect(tree()).toBeVisible();
+      expect(tree()).not.toHaveClass("absolute");
+
+      setWidth(800);
+      expect(tree()).toBeVisible();
+      expect(tree()).toHaveClass("absolute");
+      setWidth(1280);
+      expect(tree()).toBeVisible();
+
+      fireEvent.click(toggle);
+      expect(tree()).not.toBeVisible();
+    });
+
+    it("hides the open assistant at 1280px until its button opens it, leaving its side pane state", () => {
+      stubWidth(1280);
+      const assistant = <button type="button">Settings</button>;
+      const { rerender } = render(
+        <TestShell assistant={assistant} initialAssistantOpen collapsed />,
+      );
+      expect(assistantPane()).not.toBeVisible();
+
+      fireEvent.click(assistantButton());
+      expect(assistantPane()).toBeVisible();
+      fireEvent.click(assistantButton());
+      expect(assistantPane()).not.toBeVisible();
+
+      rerender(<TestShell assistant={assistant} initialAssistantOpen />);
+      expect(assistantPane()).toBeVisible();
+      // Showing again as the collapse ends is not an opening, so focus stays on the button.
+      expect(assistantButton()).toHaveFocus();
+    });
+
+    it.each([
+      ["tree", "Tree row"],
+      ["assistant", "Settings"],
+    ])("moves focus from the %s to the page when it collapses", (_, control) => {
+      stubWidth(1280);
+      const assistant = <button type="button">Settings</button>;
+      const { rerender } = render(<TestShell assistant={assistant} initialAssistantOpen />);
+      act(() => screen.getByRole("button", { name: control }).focus());
+
+      rerender(<TestShell assistant={assistant} initialAssistantOpen collapsed />);
+
+      expect(screen.getByRole("button", { name: "Page link" })).toHaveFocus();
+    });
   });
 
   describe("with an assistant", () => {

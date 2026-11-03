@@ -1609,7 +1609,8 @@ pub async fn workspace_save(
 }
 
 /// The stored workspace with only the tabs that are still pages and the expanded paths that are
-/// still folders in the world at `root`. A gone active tab gives way to the first tab left.
+/// still folders in the world at `root`. A gone active tab gives way to the first tab left, and
+/// only kept tabs stay in the reading view.
 fn existing_in(root: &Path, stored: Workspace) -> Workspace {
     let tabs: Vec<String> = stored
         .tabs
@@ -1625,6 +1626,11 @@ fn existing_in(root: &Path, stored: Workspace) -> Workspace {
         .into_iter()
         .filter(|folder| paths::existing_folder(root, Some(folder)).is_ok())
         .collect();
+    let reading = stored
+        .reading
+        .into_iter()
+        .filter(|tab| tabs.contains(tab))
+        .collect();
     Workspace {
         tabs,
         active,
@@ -1635,6 +1641,7 @@ fn existing_in(root: &Path, stored: Workspace) -> Workspace {
             .assistant_width
             .clamp(ASSISTANT_WIDTHS.0, ASSISTANT_WIDTHS.1),
         assistant_conversation: stored.assistant_conversation,
+        reading,
     }
 }
 
@@ -1645,7 +1652,8 @@ fn limited(mut workspace: Workspace) -> Result<Workspace, AppError> {
         .tabs
         .iter()
         .chain(&workspace.expanded)
-        .chain(&workspace.active);
+        .chain(&workspace.active)
+        .chain(&workspace.reading);
     if !all_paths.all(|path| path.split('/').all(paths::is_allowed_name)) {
         return Err(AppError::new(
             ErrorKind::InvalidPath,
@@ -1653,6 +1661,7 @@ fn limited(mut workspace: Workspace) -> Result<Workspace, AppError> {
         ));
     }
     workspace.tabs.truncate(MAX_TABS);
+    workspace.reading.truncate(MAX_TABS);
     workspace.expanded.truncate(MAX_EXPANDED);
     workspace.tree_width = workspace.tree_width.clamp(TREE_WIDTHS.0, TREE_WIDTHS.1);
     workspace.assistant_width = workspace
@@ -1774,6 +1783,7 @@ mod tests {
                     "assistantOpen": true,
                     "assistantWidth": 360,
                     "assistantConversation": null,
+                    "reading": [],
                 },
             })
         );
@@ -2127,6 +2137,14 @@ mod tests {
             assistant_open: false,
             assistant_width: 420,
             assistant_conversation: Some(7),
+            reading: Vec::new(),
+        }
+    }
+
+    fn reading(workspace: Workspace, reading: &[&str]) -> Workspace {
+        Workspace {
+            reading: reading.iter().map(|tab| tab.to_string()).collect(),
+            ..workspace
         }
     }
 
@@ -2140,10 +2158,13 @@ mod tests {
         let state = launched(&app_data);
         state.open(world.path().to_path_buf()).unwrap();
         state
-            .save_workspace(workspace(
-                &["Overview.md", "Gone.md", "Places/Saltmere.md"],
-                Some("Places/Saltmere.md"),
-                &["Places", "Factions"],
+            .save_workspace(reading(
+                workspace(
+                    &["Overview.md", "Gone.md", "Places/Saltmere.md"],
+                    Some("Places/Saltmere.md"),
+                    &["Places", "Factions"],
+                ),
+                &["Gone.md", "Places/Saltmere.md"],
             ))
             .unwrap();
         // The application closes with the world open; then the page and a folder go.
@@ -2156,10 +2177,13 @@ mod tests {
         assert_eq!(relaunched.root().unwrap(), world.path());
         assert_eq!(
             restored.workspace,
-            workspace(
-                &["Overview.md", "Places/Saltmere.md"],
-                Some("Places/Saltmere.md"),
-                &["Places"],
+            reading(
+                workspace(
+                    &["Overview.md", "Places/Saltmere.md"],
+                    Some("Places/Saltmere.md"),
+                    &["Places"],
+                ),
+                &["Places/Saltmere.md"],
             )
         );
     }
@@ -2173,6 +2197,19 @@ mod tests {
         let kept = existing_in(world.path(), stored);
 
         assert_eq!(kept.active.as_deref(), Some("Places/Saltmere.md"));
+    }
+
+    #[test]
+    fn only_open_tabs_stay_in_the_reading_view() {
+        let world = world();
+        let stored = reading(
+            workspace(&["Places/Saltmere.md"], None, &[]),
+            &["Places/Saltmere.md", "Places/Elsewhere.md"],
+        );
+
+        let kept = existing_in(world.path(), stored);
+
+        assert_eq!(kept.reading, ["Places/Saltmere.md"]);
     }
 
     #[test]
@@ -2249,6 +2286,7 @@ mod tests {
             workspace(&[], Some("Places/../../outside.md"), &[]),
             workspace(&[], None, &[".obsidian"]),
             workspace(&[], None, &[""]),
+            reading(workspace(&[], None, &[]), &["../outside.md"]),
         ] {
             assert_eq!(
                 state.save_workspace(refused).unwrap_err().kind,
@@ -2275,6 +2313,7 @@ mod tests {
             assistant_open: true,
             assistant_width: 9_000,
             assistant_conversation: None,
+            reading: pages.clone(),
         };
 
         let kept = limited(wide).unwrap();
@@ -2286,6 +2325,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(kept.tabs, pages[..100]);
+        assert_eq!(kept.reading, pages[..100]);
         assert_eq!(kept.expanded, folders[..5_000]);
         assert_eq!(kept.tree_width, 420);
         assert_eq!(kept.assistant_width, 560);

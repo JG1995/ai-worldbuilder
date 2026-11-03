@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "rea
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
 import type { RecentWorld, TreeEntry, WrittenPage } from "@/types/api";
-import { Button } from "@/ui/Button";
+import { Button, IconButton } from "@/ui/Button";
 import type { LinkAnchor } from "@/ui/editor-links";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
@@ -13,15 +13,16 @@ import { TabStrip } from "@/ui/TabStrip";
 import { ToastRegion } from "@/ui/Toast";
 import { folderCreate, pageCreate, worldTree, worldTreeKey } from "../api/commands";
 import { createFromLink } from "../logic/links";
-import { type CursorTarget, useWorldStore } from "../stores/world-store";
+import { type CursorTarget, readingLayout, useWorldStore } from "../stores/world-store";
 import { pageNameOf } from "../utils/paths";
-import { PageTab, pageEditor } from "./PageTab";
+import { PageTab, pageEditor, switchKeepingTopLine } from "./PageTab";
 
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
 const historyShortcut = "Ctrl+Shift+H";
 const searchShortcut = "Ctrl+O";
 const settingsShortcut = "Ctrl+,";
+const viewShortcut = "Ctrl+E";
 
 /** World menu items for recent worlds carry the world's id after this prefix. */
 const recentItemPrefix = "recent:";
@@ -98,7 +99,8 @@ export type AssistantPorts = {
  * What the world's screen hands to its layout: the tree, the tab strip, the page region and the
  * toasts, with the tree pane's width and overlay state, the assistant pane's open state, width
  * and overlay state, the assistant's ports, the conversation it shows, and whether a world change
- * runs.
+ * runs. In the reading layout both panes are collapsed, and their overlay states are the reading
+ * layout's own.
  */
 export type WorldScreenParts = {
   tree: ReactNode;
@@ -113,12 +115,14 @@ export type WorldScreenParts = {
   onTreeWidthChange: (width: number) => void;
   treeOverlayOpen: boolean;
   onTreeOverlayOpenChange: (open: boolean) => void;
+  treeCollapsed: boolean;
   assistantOpen: boolean;
   onAssistantOpenChange: (open: boolean) => void;
   assistantWidth: number;
   onAssistantWidthChange: (width: number) => void;
   assistantOverlayOpen: boolean;
   onAssistantOverlayOpenChange: (open: boolean) => void;
+  assistantCollapsed: boolean;
   assistantPorts: AssistantPorts;
   /** The conversation the assistant showed last in this world, or null for a new one. */
   assistantConversation: number | null;
@@ -177,6 +181,14 @@ export function WorldScreen({
   const assistantWidth = useWorldStore((store) => store.assistantWidth);
   const assistantOverlayOpen = useWorldStore((store) => store.assistantOverlayOpen);
   const assistantConversation = useWorldStore((store) => store.assistantConversation);
+  const reading = useWorldStore((store) => store.reading);
+  const inReadingLayout = useWorldStore(readingLayout);
+  const readingTreeOpen = useWorldStore((store) => store.readingTreeOpen);
+  const readingAssistantOpen = useWorldStore((store) => store.readingAssistantOpen);
+  const activeReady = useWorldStore(
+    (store) => store.active !== null && store.pages[store.active]?.status === "ready",
+  );
+  const showingHistory = useWorldStore((store) => store.historyPath !== null);
   const worldNotices = useWorldStore((store) => store.worldNotices);
   const historyNotRecording = useWorldStore((store) => store.historyNotRecording);
   const toasts = useWorldStore((store) => store.toasts);
@@ -185,6 +197,7 @@ export function WorldScreen({
   const indexRevision = useWorldStore((store) => store.indexRevision);
   const changingWorld = useWorldStore((store) => store.changingWorld);
   const [searching, setSearching] = useState(false);
+  const [comparing, setComparing] = useState(false);
   // A world change closes quick open; nothing from it reaches the next world.
   if (searching && changingWorld) setSearching(false);
   const {
@@ -198,6 +211,9 @@ export function WorldScreen({
     setAssistantWidth,
     setAssistantOverlayOpen,
     setAssistantConversation,
+    setView,
+    setReadingTreeOpen,
+    setReadingAssistantOpen,
     flush,
     newEntryFolder,
     startNaming,
@@ -369,11 +385,33 @@ export function WorldScreen({
   /**
    * Opens the name input for a new page or folder in its target folder. From the page region
    * below 960px it opens the tree overlay; at 960px and wider the shell closes the overlay again.
+   * In the reading layout it opens the collapsed tree.
    */
   function startNew(kind: TreeNameInput["kind"], rightClickedFolder?: string) {
     if (!useWorldStore.getState().nameInput) focusBeforeNaming.current = document.activeElement;
     startNaming(kind, newEntryFolder(rightClickedFolder));
-    setTreeOverlayOpen(true);
+    if (readingLayout(useWorldStore.getState())) setReadingTreeOpen(true);
+    else setTreeOverlayOpen(true);
+  }
+
+  /**
+   * The views can switch while a page tab shows its page's text: not during a world change, with
+   * no page tab, while the page has no text to show, or while its History view or Compare shows.
+   */
+  const viewSwitchable = !changingWorld && activeReady && !showingHistory && !comparing;
+
+  /**
+   * Switches the active page tab to the other view, keeping the line at the top of the page.
+   * With `focusPage`, the page keeps the focus it had.
+   */
+  function switchView({ focusPage }: { focusPage: boolean }) {
+    const { active, pages, reading } = useWorldStore.getState();
+    const page = active === null ? undefined : pages[active];
+    const view = page?.status === "ready" ? page.view?.current : null;
+    if (active === null || !view) return;
+    switchKeepingTopLine(view, () => flushSync(() => setView(active, !reading.has(active))), {
+      focus: focusPage,
+    });
   }
 
   function returnFocusFromNaming() {
@@ -416,11 +454,21 @@ export function WorldScreen({
   /**
    * Window shortcuts, wherever focus is outside a modal dialog: Ctrl/Cmd+S saves the active page
    * at once, Ctrl/Cmd+N starts a new page, Ctrl/Cmd+Shift+N a new folder, Ctrl/Cmd+Shift+H shows
-   * the active page's history, and Ctrl/Cmd+O and Ctrl/Cmd+K open quick open when there is one.
+   * the active page's history, Ctrl/Cmd+E switches its view, and Ctrl/Cmd+O and Ctrl/Cmd+K open
+   * quick open when there is one.
    */
   const shortcuts = useEffectEvent((event: KeyboardEvent) => {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
     const key = event.key.toLowerCase();
+    if (key === "e" && !event.shiftKey) {
+      // Ctrl+E would otherwise go to a browser's search, so it is cancelled even where it does
+      // nothing.
+      event.preventDefault();
+      if (!viewSwitchable || document.activeElement?.closest('[aria-modal="true"]')) return;
+      const focusPage = document.activeElement?.closest("main") != null;
+      switchView({ focusPage });
+      return;
+    }
     if (quickOpen && (key === "o" || key === "k") && !event.shiftKey) {
       // Ctrl+O would otherwise open a file, and Ctrl+K go to the browser's search, so both are
       // cancelled even where they open nothing.
@@ -493,14 +541,18 @@ export function WorldScreen({
       {layout({
         treeWidth,
         onTreeWidthChange: setTreeWidth,
-        treeOverlayOpen,
-        onTreeOverlayOpenChange: setTreeOverlayOpen,
+        treeOverlayOpen: inReadingLayout ? readingTreeOpen : treeOverlayOpen,
+        onTreeOverlayOpenChange: inReadingLayout ? setReadingTreeOpen : setTreeOverlayOpen,
+        treeCollapsed: inReadingLayout,
         assistantOpen,
         onAssistantOpenChange: setAssistantOpen,
         assistantWidth,
         onAssistantWidthChange: setAssistantWidth,
-        assistantOverlayOpen,
-        onAssistantOverlayOpenChange: setAssistantOverlayOpen,
+        assistantOverlayOpen: inReadingLayout ? readingAssistantOpen : assistantOverlayOpen,
+        onAssistantOverlayOpenChange: inReadingLayout
+          ? setReadingAssistantOpen
+          : setAssistantOverlayOpen,
+        assistantCollapsed: inReadingLayout,
         assistantPorts,
         assistantConversation,
         onAssistantConversationChange: setAssistantConversation,
@@ -547,7 +599,18 @@ export function WorldScreen({
             onActivate={activateTab}
             onClose={closePage}
             leading={treeToggle}
-            trailing={assistantToggle}
+            trailing={
+              <>
+                <IconButton
+                  icon={inReadingLayout ? "edit" : "menu_book"}
+                  label={inReadingLayout ? "Editing view" : "Reading view"}
+                  shortcut={viewShortcut}
+                  disabled={!viewSwitchable}
+                  onClick={() => switchView({ focusPage: false })}
+                />
+                {assistantToggle}
+              </>
+            }
           />
         ),
         toasts: <ToastRegion toasts={toasts} onDismiss={dismissToast} onAction={runToastAction} />,
@@ -594,6 +657,8 @@ export function WorldScreen({
                   path={active}
                   session={session}
                   ai={ai}
+                  reading={reading.has(active)}
+                  onComparingChange={setComparing}
                   onClose={(path) => void closeFromPage(path, { save: true })}
                   onDiscard={(path) => void closeFromPage(path, { save: false })}
                   onOpenPage={(path, options) => void openFromTree(path, options)}

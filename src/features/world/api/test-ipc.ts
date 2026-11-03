@@ -25,6 +25,7 @@ export const testWorld: WorldOpened = {
     assistantOpen: true,
     assistantWidth: 360,
     assistantConversation: null,
+    reading: [],
   },
 };
 
@@ -84,6 +85,7 @@ const defaults: Record<string, Handler> = {
   }),
   backlinks_list: () => ({ state: "ready", pages: [] }),
   links_in: () => ({ state: "ready", links: [] }),
+  page_properties: () => ({ state: "none" }),
   link_create: ({ from, target }) => ({
     state: "created",
     path: entryPath(parentOf(String(from)), `${String(target)}.md`),

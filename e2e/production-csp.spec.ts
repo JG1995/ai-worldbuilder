@@ -67,7 +67,7 @@ test("the production build renders a page in the editor under the production CSP
       world_open: {
         name: "Kesh",
         session: 1,
-        workspace: { tabs: [], active: null, expanded: [], treeWidth: 264 },
+        workspace: { tabs: [], active: null, expanded: [], treeWidth: 264, reading: [] },
       },
       world_tree: [{ path: "Kesh Tor.md", name: "Kesh Tor", kind: "page" }],
       page_read: {

@@ -31,7 +31,8 @@ export function WorldLayout({
     if (event.key.toLowerCase() !== "a") return;
     event.preventDefault();
     if (changingWorld || document.activeElement?.closest('[aria-modal="true"]')) return;
-    if (window.matchMedia(assistantSideQuery).matches) {
+    // A collapsed assistant, as in the reading layout, opens by its overlay state at every width.
+    if (!parts.assistantCollapsed && window.matchMedia(assistantSideQuery).matches) {
       parts.onAssistantOpenChange(!parts.assistantOpen);
     } else {
       parts.onAssistantOverlayOpenChange(!parts.assistantOverlayOpen);

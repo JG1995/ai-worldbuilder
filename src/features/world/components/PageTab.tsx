@@ -2,7 +2,7 @@ import { isolateHistory } from "@codemirror/commands";
 import type { EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
 import type { EditorLink, HistoryVersion, Properties } from "@/types/api";
@@ -68,6 +68,8 @@ type PageTabProps = {
   ai?: boolean;
   /** Shows the page in the reading view, which never writes; the editing view by default. */
   reading?: boolean;
+  /** Reports whether Compare shows in place of the editor; false again once the tab unmounts. */
+  onComparingChange?: (comparing: boolean) => void;
 };
 
 /** Whether a text holds nothing but whitespace. */
@@ -185,6 +187,56 @@ export function pageEditor(session: number, path: string): ReplaceEditor {
   };
 }
 
+/** The page region that scrolls `view` with the page's title and notices, if it is on screen. */
+function scrollRegion(view: EditorView) {
+  let element = view.dom.parentElement;
+  while (element && getComputedStyle(element).overflowY !== "auto") element = element.parentElement;
+  return element;
+}
+
+/**
+ * Runs `change`, which switches the page in `view` to the other view, keeping the editor line at
+ * the top of the page region there: the line is found before the switch, and its top is scrolled
+ * back to the region's top once the editor has measured the new view's type size, a few times
+ * while lines measured on the way move it. With the title or a notice at the region's top, the
+ * region's scroll position stays. With `focus`, the page keeps the focus: the editor in the
+ * editing view, the region in the reading view.
+ */
+export function switchKeepingTopLine(
+  view: EditorView,
+  change: () => void,
+  { focus }: { focus: boolean },
+) {
+  const region = scrollRegion(view);
+  const regionTop = region?.getBoundingClientRect().top;
+  // A pixel down, so a line whose top is at the region's top, give or take rounding, is the one
+  // kept rather than the line before it.
+  const line =
+    regionTop !== undefined && regionTop >= view.documentTop
+      ? view.lineBlockAtHeight(regionTop - view.documentTop + 1)
+      : null;
+  change();
+  if (focus) {
+    // The reading view's page region is the tab stop around the editor.
+    const page = view.dom.parentElement?.closest<HTMLElement>('[tabindex="0"]');
+    if (view.state.facet(EditorView.editable)) view.focus();
+    else page?.focus({ preventScroll: true });
+  }
+  if (!region || !line) return;
+  // Each step runs in the frame after an editor measure, which may itself have scrolled the region
+  // to keep its top line in place while the editor has focus.
+  const align = (attempts: number) =>
+    requestAnimationFrame(() => {
+      if (!region.isConnected) return;
+      const top = view.lineBlockAt(line.from).top + view.documentTop;
+      const offset = top - region.getBoundingClientRect().top;
+      if (Math.abs(offset) < 1) return;
+      region.scrollTop += offset;
+      if (attempts > 1) align(attempts - 1);
+    });
+  view.requestMeasure({ read: () => null, write: () => align(5) });
+}
+
 /** Shows the reload toast when checking the page after a refused write reloaded it. */
 function reportOutsideChange(session: number, result: ReplaceResult) {
   if (result.kind === "failed" && result.outside?.kind === "reloaded") {
@@ -225,6 +277,7 @@ export function PageTab({
   onCreateLink,
   ai = false,
   reading = false,
+  onComparingChange,
 }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
@@ -242,6 +295,11 @@ export function PageTab({
   const ready = page?.status === "ready";
   // Compare closes with its conflict, so a later conflict shows its notice until Compare is pressed.
   if (comparing && !(ready && page.notice?.kind === "conflict")) setComparing(false);
+  const reportComparing = useEffectEvent((shown: boolean) => onComparingChange?.(shown));
+  useEffect(() => {
+    reportComparing(comparing);
+  }, [comparing]);
+  useEffect(() => () => reportComparing(false), []);
 
   // The editor has focused itself as it mounted, which runs before this effect. Its cursor, which
   // may be at a backlink's link, scrolls into view once React has settled the mounted editor.

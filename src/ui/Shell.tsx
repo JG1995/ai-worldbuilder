@@ -34,6 +34,11 @@ const firstControl = (pane: HTMLElement) =>
     (element) => element.getAttribute("role") !== "separator",
   );
 
+/** Focuses the first control in the page region, or `fallback` while it has none. */
+function focusPage(region: HTMLElement | null, fallback: HTMLElement | null) {
+  ((region && firstControl(region)) ?? fallback)?.focus();
+}
+
 /** Whether the window matches `query`, and a subscription to its changes. */
 function mediaQuery(query: string) {
   return {
@@ -53,8 +58,9 @@ type ShellProps = {
   /** The tree pane's content, such as a `FileTree`. */
   tree: ReactNode;
   /**
-   * Renders the tab strip. Below 960px, `treeToggle` is the button that opens the tree overlay;
-   * with an `assistant`, `assistantToggle` is the Assistant button for the strip's right end.
+   * Renders the tab strip. Below 960px, and at every width while the tree is collapsed,
+   * `treeToggle` is the button that opens the tree; with an `assistant`, `assistantToggle` is the
+   * Assistant button for the strip's right end.
    */
   tabStrip: (treeToggle: ReactNode, assistantToggle: ReactNode) => ReactNode;
   /** The page region below the tab strip. */
@@ -64,9 +70,18 @@ type ShellProps = {
   /** In pixels; limited to 200 to 420. */
   treeWidth: number;
   onTreeWidthChange: (width: number) => void;
-  /** Whether the tree overlay is open below 960px. The shell asks to close it at 960px and wider. */
+  /**
+   * Whether the tree overlay is open below 960px. The shell asks to close it at 960px and wider,
+   * unless the tree is collapsed.
+   */
   treeOverlayOpen: boolean;
   onTreeOverlayOpenChange: (open: boolean) => void;
+  /**
+   * Hides the tree at every width until `treeOverlayOpen` opens it: beside the page column at
+   * 960px and wider, as an overlay below. The tab strip shows the tree button at every width.
+   * Off by default.
+   */
+  treeCollapsed?: boolean;
   /** The assistant pane's content, such as an `AssistantPane`. Without it, there is no pane. */
   assistant?: ReactNode;
   /** Whether the assistant's side pane is open at 1280px and wider. */
@@ -75,9 +90,18 @@ type ShellProps = {
   /** In pixels; limited to 300 to 560. */
   assistantWidth?: number;
   onAssistantWidthChange?: (width: number) => void;
-  /** Whether the assistant overlay is open below 1280px. The shell asks to close it when wider. */
+  /**
+   * Whether the assistant overlay is open below 1280px. The shell asks to close it when wider,
+   * unless the assistant is collapsed.
+   */
   assistantOverlayOpen?: boolean;
   onAssistantOverlayOpenChange?: (open: boolean) => void;
+  /**
+   * Hides the assistant at every width until `assistantOverlayOpen` opens it: beside the page
+   * column at 1280px and wider, as an overlay below. `assistantOpen` is left as it is meanwhile.
+   * Off by default.
+   */
+  assistantCollapsed?: boolean;
 };
 
 /**
@@ -85,7 +109,8 @@ type ShellProps = {
  * over the left of the page region below that. With an `assistant`, its pane sits beside the page
  * column at 1280px and wider, and is an overlay over the right of the page region below that. F6
  * and Shift+F6 move focus between the panes. Both panes stay mounted in both layouts, and while
- * closed, so crossing a breakpoint or closing a pane keeps its content's focus and state.
+ * closed, so crossing a breakpoint or closing a pane keeps its content's focus and state. A pane
+ * that collapses with focus inside moves focus to the page.
  */
 export function Shell({
   tree,
@@ -96,6 +121,7 @@ export function Shell({
   onTreeWidthChange,
   treeOverlayOpen,
   onTreeOverlayOpenChange,
+  treeCollapsed = false,
   assistant,
   assistantOpen = false,
   onAssistantOpenChange,
@@ -103,78 +129,96 @@ export function Shell({
   onAssistantWidthChange,
   assistantOverlayOpen = false,
   onAssistantOverlayOpenChange,
+  assistantCollapsed = false,
 }: ShellProps) {
   const paneId = useId();
   const assistantId = useId();
   const root = useRef<HTMLDivElement>(null);
   const treePane = useRef<HTMLElement>(null);
   const pageColumn = useRef<HTMLDivElement>(null);
+  const pageRegion = useRef<HTMLElement>(null);
   const assistantPane = useRef<HTMLElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
   const assistantButton = useRef<HTMLButtonElement>(null);
   const lastFocused = useRef(new Map<Element, HTMLElement>());
   const wide = useSyncExternalStore(treeSide.subscribe, treeSide.matches);
   const overlayOpen = !wide && treeOverlayOpen;
-  const treeVisible = wide || overlayOpen;
-  const wasTreeVisible = useRef(treeVisible);
+  const treeVisible = treeCollapsed ? treeOverlayOpen : wide || overlayOpen;
+  const shownTree = useRef({ visible: treeVisible, collapsed: treeCollapsed });
   const width = clamp(treeWidth, minTreeWidth, maxTreeWidth);
   const setOverlayOpen = useEffectEvent(onTreeOverlayOpenChange);
 
   const hasAssistant = assistant != null;
   const assistantWide = useSyncExternalStore(assistantSide.subscribe, assistantSide.matches);
   const assistantOverlay = hasAssistant && !assistantWide && assistantOverlayOpen;
-  const assistantVisible = hasAssistant && (assistantWide ? assistantOpen : assistantOverlay);
+  const assistantVisible =
+    hasAssistant &&
+    (assistantCollapsed ? assistantOverlayOpen : assistantWide ? assistantOpen : assistantOverlay);
   const shownAssistant = useRef({
     visible: assistantVisible,
     wide: assistantWide,
     present: hasAssistant,
+    collapsed: assistantCollapsed,
   });
   const setAssistantOverlayOpen = useEffectEvent((open: boolean) =>
     onAssistantOverlayOpenChange?.(open),
   );
 
-  // Widening turns an open overlay into the side pane, so narrowing again leaves it closed.
+  // Widening turns an open overlay into the side pane, so narrowing again leaves it closed. A
+  // collapsed tree stays open across the breakpoint instead.
   useEffect(() => {
-    if (wide && treeOverlayOpen) setOverlayOpen(false);
-  }, [wide, treeOverlayOpen]);
+    if (wide && treeOverlayOpen && !treeCollapsed) setOverlayOpen(false);
+  }, [wide, treeOverlayOpen, treeCollapsed]);
 
   // Widening shows the assistant's side pane as it was, so narrowing again leaves the overlay closed.
   useEffect(() => {
-    if (assistantWide && assistantOverlayOpen) setAssistantOverlayOpen(false);
-  }, [assistantWide, assistantOverlayOpen]);
+    if (assistantWide && assistantOverlayOpen && !assistantCollapsed) {
+      setAssistantOverlayOpen(false);
+    }
+  }, [assistantWide, assistantOverlayOpen, assistantCollapsed]);
 
-  // Hiding the tree with focus inside it would drop focus on the body, so it moves to the toggle.
+  // Hiding the tree with focus inside it would drop focus on the body, so it moves to the toggle,
+  // or to the page when the tree collapses.
   useLayoutEffect(() => {
+    const shown = shownTree.current;
+    shownTree.current = { visible: treeVisible, collapsed: treeCollapsed };
     const focusWasInTree = treePane.current?.contains(document.activeElement);
-    if (wasTreeVisible.current && !treeVisible && focusWasInTree) toggle.current?.focus();
-    wasTreeVisible.current = treeVisible;
-  }, [treeVisible]);
+    if (!shown.visible || treeVisible || !focusWasInTree) return;
+    const collapsing = treeCollapsed && !shown.collapsed;
+    if (collapsing) focusPage(pageRegion.current, toggle.current);
+    else toggle.current?.focus();
+  }, [treeVisible, treeCollapsed]);
 
   // The user opened the assistant when it shows in the same layout it was hidden in, with the
-  // pane already there: not when a world opens, AI is switched on or a breakpoint is crossed.
-  // Opening moves focus into it, and hiding it with focus inside moves focus to its button.
+  // pane already there: not when a world opens, AI is switched on, a breakpoint is crossed or the
+  // assistant stops being collapsed. Opening moves focus into it, and hiding it with focus inside
+  // moves focus to its button, or to the page when the assistant collapses.
   useLayoutEffect(() => {
     const shown = shownAssistant.current;
     shownAssistant.current = {
       visible: assistantVisible,
       wide: assistantWide,
       present: hasAssistant,
+      collapsed: assistantCollapsed,
     };
     const pane = assistantPane.current;
     if (!pane) return;
     if (shown.visible && !assistantVisible && pane.contains(document.activeElement)) {
-      assistantButton.current?.focus();
+      const collapsing = assistantCollapsed && !shown.collapsed;
+      if (collapsing) focusPage(pageRegion.current, assistantButton.current);
+      else assistantButton.current?.focus();
     } else if (
       !shown.visible &&
       assistantVisible &&
       shown.present &&
-      shown.wide === assistantWide
+      shown.wide === assistantWide &&
+      shown.collapsed === assistantCollapsed
     ) {
       const target =
         pane.querySelector<HTMLElement>("[data-initial-focus]") ?? firstControl(pane) ?? pane;
       target.focus();
     }
-  }, [assistantVisible, assistantWide, hasAssistant]);
+  }, [assistantVisible, assistantWide, hasAssistant, assistantCollapsed]);
 
   useOverlayDismissal(overlayOpen, root, treePane, toggle, () => setOverlayOpen(false));
   useOverlayDismissal(assistantOverlay, root, assistantPane, assistantButton, () =>
@@ -220,18 +264,18 @@ export function Shell({
   }, []);
 
   function toggleAssistant() {
-    if (assistantWide) onAssistantOpenChange?.(!assistantOpen);
+    if (assistantWide && !assistantCollapsed) onAssistantOpenChange?.(!assistantOpen);
     else onAssistantOverlayOpenChange?.(!assistantOverlayOpen);
   }
 
-  const treeToggle = !wide && (
+  const treeToggle = (!wide || treeCollapsed) && (
     <IconButton
       ref={toggle}
       icon="menu"
       label="File tree"
-      aria-expanded={overlayOpen}
+      aria-expanded={treeVisible}
       aria-controls={paneId}
-      onClick={() => onTreeOverlayOpenChange(!overlayOpen)}
+      onClick={() => onTreeOverlayOpenChange(!treeVisible)}
     />
   );
 
@@ -276,7 +320,9 @@ export function Shell({
       </aside>
       <div ref={pageColumn} className="relative flex min-w-0 flex-1 flex-col">
         {tabStrip(treeToggle || null, assistantToggle || null)}
-        <main className="min-h-0 flex-1">{page}</main>
+        <main ref={pageRegion} className="min-h-0 flex-1">
+          {page}
+        </main>
         {/* Its own stacking context on the toast layer, so toasts stay above dialogs. */}
         <div className="absolute bottom-4 left-4 z-(--z-toast)">{toasts}</div>
       </div>

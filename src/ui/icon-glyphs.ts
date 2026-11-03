@@ -4,6 +4,7 @@
 export const glyphs = {
   add: "\u{e145}",
   arrow_back: "\u{e5c4}",
+  broken_image: "\u{e3ad}",
   chat: "\u{e0b7}",
   check_circle: "\u{e86c}",
   chevron_right: "\u{e409}",
@@ -12,15 +13,19 @@ export const glyphs = {
   create_new_folder: "\u{e2cc}",
   delete: "\u{e872}",
   description: "\u{e873}",
+  edit: "\u{e150}",
   error: "\u{e000}",
   expand_more: "\u{e5cf}",
   folder: "\u{e2c7}",
   folder_open: "\u{e2c8}",
   forum: "\u{e0bf}",
+  image: "\u{e251}",
   info: "\u{e88e}",
   menu: "\u{e5d2}",
+  menu_book: "\u{ea19}",
   more_horiz: "\u{e5d3}",
   note_add: "\u{e89c}",
+  open_in_new: "\u{e895}",
   search: "\u{e8b6}",
   send: "\u{e163}",
   stop: "\u{e047}",
@@ -28,4 +33,4 @@ export const glyphs = {
 } as const;
 
 /** SHA-256 of src/assets/icons/material-symbols-sharp.woff2. */
-export const fontSha256 = "f0664b2923e267a570d1c711b117eab89b2edfb305072994eb1b007fdcbe6cbf";
+export const fontSha256 = "6f80e638939351187e5078cd8cc1d4c20c01095d5d63153ecd5dcfcd7863c391";

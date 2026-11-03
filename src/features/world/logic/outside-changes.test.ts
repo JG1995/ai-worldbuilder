@@ -30,6 +30,7 @@ function mockDisk(active: string) {
       assistantOpen: true,
       assistantWidth: 360,
       assistantConversation: null,
+      reading: [],
     },
   };
   return mockWorldIpc({
@@ -214,6 +215,7 @@ describe("a change on disk to a page in the reading view", () => {
         assistantOpen: true,
         assistantWidth: 360,
         assistantConversation: null,
+        reading: [],
       },
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

@@ -84,6 +84,7 @@ describe("launching", () => {
         assistantOpen: true,
         assistantWidth: 360,
         assistantConversation: null,
+        reading: [],
       },
     };
     const calls = mockWorldIpc({ world_restore: () => restored });
@@ -284,6 +285,7 @@ describe("switching from the world menu", () => {
         assistantOpen: true,
         assistantWidth: 360,
         assistantConversation: null,
+        reading: [],
       },
     });
   });

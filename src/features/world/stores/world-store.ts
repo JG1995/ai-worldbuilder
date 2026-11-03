@@ -72,6 +72,15 @@ type WorldStore = {
   assistantOverlayOpen: boolean;
   /** The conversation the assistant shows, or null for a new one; saved with the workspace. */
   assistantConversation: number | null;
+  /** The tabs that show the reading view; every other tab shows the editing view. Saved. */
+  reading: ReadonlySet<string>;
+  /**
+   * Whether the tree and the assistant are open in the reading layout, which shows while the
+   * active tab is a reading tab in place of the saved tree and assistant state. Both are false
+   * whenever the reading layout is not showing, so it starts with both closed. Not saved.
+   */
+  readingTreeOpen: boolean;
+  readingAssistantOpen: boolean;
   pages: Readonly<Record<string, PageStatus>>;
   worldNotices: ReadonlySet<WorldNotice>;
   /** Why the world's changes are not being recorded in its history, while they are not. */
@@ -104,9 +113,10 @@ type WorldStore = {
   closed: () => void;
   setChangingWorld: (changing: boolean) => void;
   /**
-   * Opens a page in the active tab, or in a new tab when asked or when no tab is active. With
-   * `at`, its editor takes focus with the cursor at that target; with `focusEditor`, its editor
-   * takes focus and an open page keeps its cursor.
+   * Opens a page in the active tab, or in a new tab when asked or when no tab is active. A new tab
+   * takes the active tab's view, and so does a page that takes the active tab's place; an open
+   * page keeps its own. With `at`, its editor takes focus with the cursor at that target; with
+   * `focusEditor`, its editor takes focus and an open page keeps its cursor.
    */
   openPage: (
     path: string,
@@ -132,7 +142,7 @@ type WorldStore = {
   startNaming: (kind: TreeNameInput["kind"], folder: string | null) => void;
   setNameError: (error: string) => void;
   cancelNaming: () => void;
-  /** Closes the name input and opens the new page in a new tab. */
+  /** Closes the name input and opens the new page in a new tab, in the editing view. */
   pageCreated: (path: string) => void;
   /** Closes the name input, and expands and selects the new folder. */
   folderCreated: (path: string) => void;
@@ -144,6 +154,12 @@ type WorldStore = {
   setAssistantWidth: (width: number) => void;
   setAssistantOverlayOpen: (open: boolean) => void;
   setAssistantConversation: (conversation: number | null) => void;
+  /** Shows the open tab of `path` in the reading view, or in the editing view with false. */
+  setView: (path: string, reading: boolean) => void;
+  /** Opens or closes the tree in the reading layout; ignored while it is not showing. */
+  setReadingTreeOpen: (open: boolean) => void;
+  /** Opens or closes the assistant in the reading layout; ignored while it is not showing. */
+  setReadingAssistantOpen: (open: boolean) => void;
   /**
    * The setters below take the world session the page was opened in, and are ignored once that
    * world or the page is no longer open, so nothing from one world reaches another.
@@ -189,6 +205,9 @@ const closedWorld = {
   assistantWidth: defaultAssistantWidth,
   assistantOverlayOpen: false,
   assistantConversation: null,
+  reading: new Set<string>(),
+  readingTreeOpen: false,
+  readingAssistantOpen: false,
   pages: {},
   worldNotices: new Set<WorldNotice>(),
   historyNotRecording: null,
@@ -204,8 +223,8 @@ const closedWorld = {
 let toastCount = 0;
 
 /**
- * How long after the tabs, the expanded folders, the tree width, the assistant's side pane or the
- * conversation it shows change the workspace saves.
+ * How long after the tabs, their views, the expanded folders, the tree width, the assistant's side
+ * pane or the conversation it shows change the workspace saves.
  */
 export const workspaceSaveDelay = 500;
 
@@ -236,6 +255,28 @@ function savers(pages: WorldStore["pages"]) {
 }
 
 const loading: PageStatus = { status: "loading" };
+
+/** Whether the reading layout shows: the active tab is a reading tab. */
+export function readingLayout({ active, reading }: Pick<WorldStore, "active" | "reading">) {
+  return active !== null && reading.has(active);
+}
+
+/**
+ * Closes the reading layout's sidebars when `next` ends the reading layout, so the next one starts
+ * with both closed; a reading layout that goes on keeps them as they are.
+ */
+function readingSidebars(next: Pick<WorldStore, "active" | "reading">) {
+  return readingLayout(next) ? {} : { readingTreeOpen: false, readingAssistantOpen: false };
+}
+
+/** `reading` with `path` added or removed. */
+function withView(reading: ReadonlySet<string>, path: string, isReading: boolean) {
+  if (reading.has(path) === isReading) return reading;
+  const next = new Set(reading);
+  if (isReading) next.add(path);
+  else next.delete(path);
+  return next;
+}
 
 /**
  * Where a page's cursor goes when it opens: an offset into its text in UTF-16 code units, as a
@@ -300,6 +341,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
       assistantOpen: workspace.assistantOpen,
       assistantWidth: workspace.assistantWidth,
       assistantConversation: workspace.assistantConversation,
+      reading: new Set(workspace.reading),
       pages: Object.fromEntries(workspace.tabs.map((path) => [path, loading])),
     });
   },
@@ -312,15 +354,21 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
   setChangingWorld: (changingWorld) => set({ changingWorld }),
 
   openPage: (path, { newTab, at, focusEditor = false }) => {
-    const { tabs, active, pages, activate } = get();
+    const { tabs, active, pages, reading, activate } = get();
     set({ cursorTarget: null });
     if (!tabs.includes(path)) {
+      const activeReads = active !== null && reading.has(active);
       if (newTab || active === null) {
-        set({ tabs: [...tabs, path], pages: { ...pages, [path]: loading } });
+        set({
+          tabs: [...tabs, path],
+          pages: { ...pages, [path]: loading },
+          reading: withView(reading, path, activeReads),
+        });
       } else {
         set({
           tabs: tabs.map((tab) => (tab === active ? path : tab)),
           pages: { ...without(pages, active), [path]: loading },
+          reading: withView(withView(reading, active, false), path, activeReads),
         });
       }
     }
@@ -342,7 +390,8 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     ),
 
   activate: (path, { focusEditor = false } = {}) =>
-    set(({ expanded, createdPage, historyPath }) => ({
+    set(({ expanded, createdPage, historyPath, reading }) => ({
+      ...readingSidebars({ active: path, reading }),
       active: path,
       historyPath: historyPath === path ? historyPath : null,
       selectedFolder: null,
@@ -352,13 +401,16 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
     })),
 
   closeTab: (path) =>
-    set(({ tabs, active, pages, expanded, selectedFolder, historyPath }) => {
+    set(({ tabs, active, pages, expanded, selectedFolder, historyPath, reading }) => {
       const index = tabs.indexOf(path);
       if (index === -1) return {};
       const rest = tabs.filter((tab) => tab !== path);
       const next = path === active ? (rest[index] ?? rest[index - 1] ?? null) : active;
+      const kept = withView(reading, path, false);
       return {
+        ...readingSidebars({ active: next, reading: kept }),
         tabs: rest,
+        reading: kept,
         active: next,
         selectedFolder: next === active ? selectedFolder : null,
         historyPath: next === historyPath ? historyPath : null,
@@ -397,6 +449,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
   pageCreated: (path) => {
     set({ nameInput: null, createdPage: path });
     get().openPage(path, { newTab: true });
+    get().setView(path, false);
   },
 
   folderCreated: (path) =>
@@ -420,6 +473,19 @@ export const useWorldStore = create<WorldStore>()((set, get) => ({
   setAssistantOverlayOpen: (assistantOverlayOpen) => set({ assistantOverlayOpen }),
 
   setAssistantConversation: (assistantConversation) => set({ assistantConversation }),
+
+  setView: (path, isReading) =>
+    set(({ tabs, active, reading }) => {
+      if (!tabs.includes(path)) return {};
+      const next = withView(reading, path, isReading);
+      return { reading: next, ...readingSidebars({ active, reading: next }) };
+    }),
+
+  setReadingTreeOpen: (readingTreeOpen) =>
+    set((state) => (readingLayout(state) ? { readingTreeOpen } : {})),
+
+  setReadingAssistantOpen: (readingAssistantOpen) =>
+    set((state) => (readingLayout(state) ? { readingAssistantOpen } : {})),
 
   setPage: (session, path, status) =>
     set(({ world, tabs, pages }) =>
@@ -520,6 +586,7 @@ export function saveWorkspace(): Promise<void> {
     assistantOpen,
     assistantWidth,
     assistantConversation,
+    reading,
   } = useWorldStore.getState();
   if (world) {
     const workspace: Workspace = {
@@ -530,6 +597,7 @@ export function saveWorkspace(): Promise<void> {
       assistantOpen,
       assistantWidth,
       assistantConversation,
+      reading: tabs.filter((tab) => reading.has(tab)),
     };
     workspaceSaving = workspaceSaving.then(() =>
       workspaceSave(workspace).then(
@@ -556,7 +624,8 @@ useWorldStore.subscribe((state, previous) => {
     state.treeWidth !== previous.treeWidth ||
     state.assistantOpen !== previous.assistantOpen ||
     state.assistantWidth !== previous.assistantWidth ||
-    state.assistantConversation !== previous.assistantConversation;
+    state.assistantConversation !== previous.assistantConversation ||
+    state.reading !== previous.reading;
   if (!changed || state.changingWorld) return;
   cancelWorkspaceSave();
   workspaceTimer = setTimeout(() => void saveWorkspace(), workspaceSaveDelay);

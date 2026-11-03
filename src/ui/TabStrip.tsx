@@ -27,7 +27,7 @@ type TabStripProps = {
   onClose: (id: string) => void;
   /** Controls at the strip's left, such as the shell's tree toggle. */
   leading?: ReactNode;
-  /** Controls at the strip's right end, such as the shell's Assistant button. */
+  /** Controls at the strip's right end, such as the view button and the shell's Assistant button. */
   trailing?: ReactNode;
 };
 
@@ -265,7 +265,7 @@ export function TabStrip({
           />
         </div>
       )}
-      {trailing && <div className="flex shrink-0 items-center px-1">{trailing}</div>}
+      {trailing && <div className="flex shrink-0 items-center gap-1 px-1">{trailing}</div>}
       {tooltip && <TabTooltip {...tooltip} />}
       <span id={pendingId} hidden>
         {pendingText}
