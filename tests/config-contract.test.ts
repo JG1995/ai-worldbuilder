@@ -16,11 +16,34 @@ describe("production content security policy", () => {
     expect(csp["default-src"]).toBe("'self'");
   });
 
-  it("allows no outside origin except Tauri IPC in connect-src", () => {
+  it("is exactly the bundle's policy with the world image scheme's two URL forms in img-src", () => {
+    expect(csp).toEqual({
+      "default-src": "'self'",
+      "script-src": "'self'",
+      "style-src": "'self'",
+      "img-src": "'self' grimoire-image: http://grimoire-image.localhost",
+      "font-src": "'self'",
+      "connect-src": "ipc: http://ipc.localhost",
+      "object-src": "'none'",
+    });
+  });
+
+  it("allows no outside origin except Tauri IPC in connect-src and the image scheme in img-src", () => {
+    const allowedOrigins: Record<string, string[]> = {
+      "connect-src": ["http://ipc.localhost"],
+      "img-src": ["http://grimoire-image.localhost"],
+    };
     for (const [directive, sources] of Object.entries(csp)) {
       const origins = sources.split(/\s+/).filter((source) => /^https?:/.test(source));
-      const allowed = directive === "connect-src" ? ["http://ipc.localhost"] : [];
-      expect(origins, directive).toEqual(allowed);
+      expect(origins, directive).toEqual(allowedOrigins[directive] ?? []);
+    }
+  });
+
+  it("allows no data: or blob: source", () => {
+    for (const [directive, sources] of Object.entries(csp)) {
+      expect(sources.split(/\s+/), directive).not.toContainEqual(
+        expect.stringMatching(/^(data|blob):/),
+      );
     }
   });
 

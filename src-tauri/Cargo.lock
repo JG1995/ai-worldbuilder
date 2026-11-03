@@ -1545,6 +1545,7 @@ dependencies = [
  "keyring-core",
  "notify",
  "notify-debouncer-full",
+ "percent-encoding",
  "pulldown-cmark",
  "reqwest",
  "rfd",

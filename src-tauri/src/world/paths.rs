@@ -1,5 +1,6 @@
 //! Confinement: turns a path from the interface into a path inside the open world, or refuses it.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,57 @@ pub fn is_page_name(name: &str) -> bool {
     Path::new(name)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// The content type of an image file name, by its extension in any letter case, or `None` when
+/// the name is not one of the eight image types the world's pages may embed.
+pub fn image_type(name: &str) -> Option<&'static str> {
+    let extension = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        _ => return None,
+    })
+}
+
+/// The absolute path of an existing image file at `relative` inside `root`, for the webview.
+///
+/// It applies page confinement, and one more rule: every segment must be a name its folder's
+/// listing shows exactly, so a name the file system finds but does not list (a Windows short name
+/// such as `PORTRA~1.PNG`, or another letter case on a case-insensitive volume) is refused.
+pub fn existing_image(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
+    let segments = segments(relative)?;
+    if !segments
+        .last()
+        .is_some_and(|name| image_type(name).is_some())
+    {
+        return Err(invalid_path());
+    }
+    let (path, metadata) = walk(root, &segments)?;
+    if !metadata.is_file() {
+        return Err(not_found());
+    }
+    let mut folder = root.to_path_buf();
+    for segment in segments {
+        let names = fs::read_dir(&folder)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<Vec<_>>>()?;
+        if !listed(&names, segment) {
+            return Err(invalid_path());
+        }
+        folder.push(segment);
+    }
+    Ok(path)
+}
+
+/// Whether `names`, the names a folder's listing shows, hold `name` exactly.
+fn listed(names: &[OsString], name: &str) -> bool {
+    names.iter().any(|listed| listed == name)
 }
 
 /// The absolute path of an existing page, a `.md` file, at `relative` inside `root`.
@@ -395,12 +447,59 @@ mod tests {
         assert!(existing_page(world.path(), r"a\b.md").is_ok());
     }
 
+    #[test]
+    fn an_image_path_must_name_an_image_file() {
+        let world = world();
+        fs::write(world.path().join("Places/Map.PNG"), [0u8; 4]).unwrap();
+        fs::create_dir(world.path().join("Places/Folder.png")).unwrap();
+
+        assert_eq!(
+            existing_image(world.path(), "Places/Map.PNG").unwrap(),
+            world.path().join("Places").join("Map.PNG")
+        );
+        for (path, kind) in [
+            ("Places/Saltmere.md", ErrorKind::InvalidPath),
+            ("Places", ErrorKind::InvalidPath),
+            ("Places/../Places/Map.PNG", ErrorKind::InvalidPath),
+            (".obsidian/Map.PNG", ErrorKind::InvalidPath),
+            ("Places/Folder.png", ErrorKind::NotFound),
+            ("Places/Nowhere.png", ErrorKind::NotFound),
+        ] {
+            assert_eq!(
+                kind_of(existing_image(world.path(), path)),
+                kind,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_the_listing_does_not_show_exactly_is_not_listed() {
+        // Linux has no short names, so the comparison is tested with a listing as Windows gives it.
+        let names: Vec<OsString> = [".obsidian", "Portrait.png", "Places"]
+            .map(OsString::from)
+            .to_vec();
+
+        assert!(listed(&names, "Portrait.png"));
+        assert!(listed(&names, "Places"));
+        for name in [
+            "OBSIDI~1",
+            "PORTRA~1.PNG",
+            "portrait.png",
+            "Portrait.png ",
+            "Place",
+        ] {
+            assert!(!listed(&names, name), "{name:?}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_junction_inside_the_path_is_refused_on_windows() {
         let world = world();
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("Secret.md"), "secret").unwrap();
+        fs::write(outside.path().join("Secret.png"), [0u8; 4]).unwrap();
         let junction = world.path().join("Elsewhere");
         let status = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
@@ -412,6 +511,10 @@ mod tests {
 
         assert_eq!(
             kind_of(existing_page(world.path(), "Elsewhere/Secret.md")),
+            ErrorKind::InvalidPath
+        );
+        assert_eq!(
+            kind_of(existing_image(world.path(), "Elsewhere/Secret.png")),
             ErrorKind::InvalidPath
         );
     }
