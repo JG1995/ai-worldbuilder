@@ -66,7 +66,7 @@ pub fn parse(text: &str, name: &str) -> Parsed {
 
 /// The frontmatter's body, the lines between its two `---` lines, and where the text after it
 /// starts, in bytes.
-fn frontmatter(text: &str) -> Option<(&str, usize)> {
+pub(super) fn frontmatter(text: &str) -> Option<(&str, usize)> {
     let mut lines = text.split_inclusive('\n');
     let first = lines.next()?;
     if first.trim_end() != "---" {
@@ -92,7 +92,7 @@ const MAX_YAML_DEPTH: usize = 64;
 /// `MAX_YAML_DEPTH` deep, and has no YAML aliases (`*name`), which the loader expands by copying,
 /// so that a few lines of nested aliases could build a document too large for memory. Reads the
 /// parser's events one by one, because its own `load` recurses for each level of nesting.
-fn loadable(frontmatter: &str) -> bool {
+pub(super) fn loadable(frontmatter: &str) -> bool {
     let mut parser = YamlParser::new_from_str(frontmatter);
     let mut depth = 0;
     loop {

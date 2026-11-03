@@ -174,6 +174,24 @@ describe("AssistantPane's answers", () => {
     expect(screen.queryByText("No answer arrived for this message.")).toBeNull();
   });
 
+  it("shows an answer in the reading view at the assistant's size, with no syntax and no web link", () => {
+    renderPane(
+      chatWith({
+        messages: [
+          { id: 1, role: "user", text: "Hello" },
+          answer(2, "complete", "**Bold** `code` ![the map](map.png) [site](https://example.com)"),
+        ],
+      }),
+    );
+
+    const shown = screen.getByRole("textbox", { name: "Answer" });
+    expect(shown).toHaveAttribute("contenteditable", "false");
+    expect(shown).toHaveTextContent(/^Bold code the map site$/);
+    expect(shown.querySelector("a, [data-link]")).toBeNull();
+    expect(shown.closest(".assistant")).not.toBeNull();
+    expect(shown.closest(".body-reading")).toBeNull();
+  });
+
   it("says when no answer arrived for a message, offering Retry only on the last one", () => {
     const chat = chatWith({
       messages: [

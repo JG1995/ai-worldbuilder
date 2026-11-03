@@ -11,6 +11,7 @@ import type {
   NewLocation,
   PageText,
   PageVersion,
+  Properties,
   RecentWorld,
   RestoredPage,
   TreeEntry,
@@ -99,6 +100,10 @@ export const backlinksList = (path: string) => invokeCommand<Backlinks>("backlin
  * and the index revision it was asked at.
  */
 export const backlinksKey = ["backlinks_list"] as const;
+
+/** The properties block's rows for the frontmatter at the start of `text`, a page's text. */
+export const pageProperties = (text: string) =>
+  invokeCommand<Properties>("page_properties", { text });
 
 /**
  * The links in `text`, the editor's text of the page at `path`, each with its range in UTF-16 code

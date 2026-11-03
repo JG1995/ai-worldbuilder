@@ -513,9 +513,11 @@ function Answer({
 }
 
 /**
- * An answer's Markdown in a read-only editor, never as HTML. New text that continues the shown
- * text is added to its end, so a streaming answer grows without rebuilding the editor. Its links
- * are marked once they are known, and following one goes to `onFollow`.
+ * An answer's Markdown in the reading view, never as HTML, at the size of the text around it. New
+ * text that continues the shown text is added to its end, so a streaming answer grows without
+ * rebuilding the editor. Its links are marked once they are known, and following a resolved one
+ * goes to `onFollow`. It is given no image, web-link or preview callbacks, so it loads no image,
+ * opens no address and previews no page.
  */
 function AnswerText({
   text,
@@ -527,7 +529,7 @@ function AnswerText({
   onFollow: (link: EditorLink) => void;
 }) {
   const view = useRef<EditorView>(null);
-  const [state] = useState(() => createPageState(text, "Answer"));
+  const [state] = useState(() => createPageState(text, "Answer", 0, { preview: true }));
 
   useEffect(() => {
     const editor = view.current;
@@ -545,7 +547,7 @@ function AnswerText({
     if (links) view.current?.dispatch({ effects: setLinks(links) });
   }, [links]);
 
-  return <MarkdownEditor state={state} readOnly viewRef={view} onFollow={onFollow} />;
+  return <MarkdownEditor state={state} readOnly reading viewRef={view} onFollow={onFollow} />;
 }
 
 /** "Read N pages", which expands to the pages an answer's request carried. */

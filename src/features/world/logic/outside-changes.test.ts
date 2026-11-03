@@ -7,9 +7,10 @@ import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PageText, WorldEvents, WorldOpened } from "@/types/api";
 import { mockWorldIpc, shellLayout, testWorld } from "../api/test-ipc";
+import { PageTab } from "../components/PageTab";
 import { World } from "../components/World";
 import { useWorldStore } from "../stores/world-store";
-import { reloadToast } from "./outside-changes";
+import { followOutsideChanges, reloadToast } from "./outside-changes";
 
 const overview = "Overview.md";
 const keshTor = "Places/Kesh Tor.md";
@@ -188,6 +189,64 @@ describe("a change on disk", () => {
     expect(await screen.findByText(/This page is not UTF-8 text/)).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Kesh Tor" })).not.toBeInTheDocument();
     expect(commandsOf(calls, "page_write")).toEqual([]);
+  });
+});
+
+describe("a change on disk to a page in the reading view", () => {
+  it("reloads it in the reading view, inert, with the properties of its new frontmatter", async () => {
+    disk.set(overview, { text: "---\ntitle: Old\n---\n- [ ] Bar the gate\n", version: "o1" });
+    const calls = mockWorldIpc({
+      page_read: ({ path }) => disk.get(String(path)),
+      page_properties: ({ text }) => ({
+        state: "rows",
+        rows: [
+          { key: "title", value: { kind: "text", text: /New/.test(String(text)) ? "New" : "Old" } },
+        ],
+      }),
+    });
+    useWorldStore.getState().opened({
+      ...testWorld,
+      workspace: {
+        tabs: [overview],
+        active: overview,
+        expanded: [],
+        treeWidth: 264,
+        assistantOpen: true,
+        assistantWidth: 360,
+        assistantConversation: null,
+      },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const stopFollowing = followOutsideChanges(client);
+    const page = createElement(PageTab, {
+      path: overview,
+      session: testWorld.session,
+      onClose: vi.fn(),
+      onDiscard: vi.fn(),
+      onOpenPage: vi.fn(),
+      onCreateLink: vi.fn(),
+      reading: true,
+    });
+    render(createElement(QueryClientProvider, { client }, page));
+    const textbox = await screen.findByRole("textbox", { name: "Overview" });
+    await screen.findByRole("button", { name: "Properties" });
+
+    disk.set(overview, {
+      text: "---\ntitle: New\n---\n- [ ] Bar the gate\n- [ ] Ring\n",
+      version: "o2",
+    });
+    await changed({ pages: [overview] });
+
+    await waitFor(() => expect(editorOf(textbox).state.doc.toString()).toContain("Ring"));
+    expect(textbox).toHaveAttribute("contenteditable", "false");
+    expect(textbox).toHaveAttribute("aria-readonly", "true");
+    fireEvent.mouseDown(screen.getByRole("checkbox", { name: "Bar the gate" }), { button: 0 });
+    expect(editorOf(textbox).state.doc.toString()).toContain("- [ ] Bar the gate");
+    fireEvent.click(await screen.findByRole("button", { name: "Properties" }));
+    expect(await screen.findByText("New", { selector: "dd" })).toBeVisible();
+    await act(() => useWorldStore.getState().flush(overview));
+    expect(commandsOf(calls, "page_write")).toEqual([]);
+    stopFollowing();
   });
 });
 

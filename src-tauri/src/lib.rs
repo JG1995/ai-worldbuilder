@@ -70,6 +70,7 @@ pub fn run() {
             world::page_write,
             world::page_compare,
             world::page_restore,
+            world::page_properties,
             world::page_create,
             world::folder_create,
             world::world_new_location,
