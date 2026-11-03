@@ -75,6 +75,8 @@ pub enum State {
     Folder,
     /// A page, with its exact bytes.
     Page(Vec<u8>),
+    /// A file that is not a page, such as an approved image, with its exact bytes.
+    File(Vec<u8>),
 }
 
 impl State {
@@ -83,12 +85,13 @@ impl State {
             Self::Absent => "absent",
             Self::Folder => "folder",
             Self::Page(_) => "page",
+            Self::File(_) => "file",
         }
     }
 
     fn bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Page(bytes) => Some(bytes),
+            Self::Page(bytes) | Self::File(bytes) => Some(bytes),
             _ => None,
         }
     }
@@ -96,6 +99,7 @@ impl State {
     fn stored(kind: &str, bytes: Option<Vec<u8>>) -> Self {
         match (kind, bytes) {
             ("page", Some(bytes)) => Self::Page(bytes),
+            ("file", Some(bytes)) => Self::File(bytes),
             ("folder", _) => Self::Folder,
             _ => Self::Absent,
         }
@@ -114,6 +118,9 @@ pub enum Kind {
     Undo,
     /// Changes the user accepted from the assistant, written together.
     Accepted,
+    /// An image the user approved from the assistant, with the folder that holds it when the
+    /// approval created it.
+    ApprovedImage,
 }
 
 impl Kind {
@@ -127,6 +134,7 @@ impl Kind {
             Self::Restore => "restore",
             Self::Undo => "undo",
             Self::Accepted => "accepted",
+            Self::ApprovedImage => "approved_image",
         }
     }
 }
@@ -367,9 +375,9 @@ impl History {
 
     /// The earlier versions of the page at `path`, newest first, each with its bytes: the text
     /// after each change of the path, and the text a change replaced when it is not the text the
-    /// change before left, labelled `outside`, because another tool wrote it. Absent and folder
-    /// states are no versions, and consecutive identical texts appear once. History follows the
-    /// path, so a page deleted and created again keeps the versions of the one before.
+    /// change before left, labelled `outside`, because another tool wrote it. Absent, folder and
+    /// file states are no versions, and consecutive identical texts appear once. History follows
+    /// the path, so a page deleted and created again keeps the versions of the one before.
     ///
     /// A change still pending, because history failed to complete or abandon it in this opening,
     /// is listed too, so the bytes it replaced can be restored before the next opening resolves it.
@@ -978,6 +986,48 @@ mod tests {
         assert!(!changes[0].pending);
     }
 
+    const IMAGE: &[u8] = b"\x89PNG image";
+
+    /// Entries of an approval: the `images` folder it created and the image file in it.
+    fn approval_entries() -> Vec<Entry> {
+        vec![
+            entry("images", State::Absent, State::Folder),
+            entry(
+                "images/Kesh.png",
+                State::Absent,
+                State::File(IMAGE.to_vec()),
+            ),
+        ]
+    }
+
+    #[test]
+    fn recovery_removes_a_pending_approval_without_its_file_and_completes_one_with_it() {
+        for (folder, file, kept) in [
+            (State::Absent, State::Absent, vec![]),
+            (
+                State::Folder,
+                State::File(IMAGE.to_vec()),
+                vec![("approved_image", approval_entries())],
+            ),
+        ] {
+            let fixture = Fixture::new();
+            let mut history = fixture.open(0);
+            history
+                .begin(Kind::ApprovedImage, &approval_entries(), 0)
+                .unwrap();
+            drop(history);
+
+            fixture.open_with(10, |path| match path {
+                "images" => folder.clone(),
+                _ => file.clone(),
+            });
+
+            let changes = fixture.stored();
+            assert_eq!(kinds_and_entries(&changes), kept);
+            assert!(changes.iter().all(|change| !change.pending));
+        }
+    }
+
     #[test]
     fn completing_only_some_paths_keeps_exactly_their_entries_and_none_removes_the_change() {
         let fixture = Fixture::new();
@@ -1146,6 +1196,29 @@ mod tests {
                 version("1-after", VersionKind::AcceptedNewPage, 10, "new"),
             ]
         );
+    }
+
+    #[test]
+    fn a_file_entry_is_no_version_of_a_page() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        change(
+            &mut history,
+            Kind::ApprovedImage,
+            State::Absent,
+            State::File(IMAGE.to_vec()),
+            10,
+        );
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+        assert_eq!(history.version_bytes(PAGE, "2-after").unwrap(), None);
     }
 
     #[test]

@@ -1103,7 +1103,11 @@ fn review_answer(
                 })
                 .count();
             let undo = match set.change {
-                Some(change) => world.holds_change(session, change_id(change))?,
+                Some(change) => world.holds_change(
+                    session,
+                    change_id(change),
+                    crate::history::Kind::Accepted,
+                )?,
                 None => false,
             };
             Ok(AcceptedSet {

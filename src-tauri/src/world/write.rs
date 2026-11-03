@@ -1,6 +1,6 @@
 //! The single write path. Every write to a world goes through this module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ pub struct OwnWrites(HashMap<String, Written>);
 
 #[derive(Debug)]
 enum Written {
-    /// A page, by the version of the bytes written.
+    /// A page or another file, by the version of the bytes written.
     Page(String),
     Folder,
     /// Nothing: a page the application deleted, or a folder it removed.
@@ -1203,13 +1203,190 @@ fn replace_batch_page(
     put_bytes(&page, bytes, permissions, version, check_and_rename)
 }
 
+/// The folder at the world's top level that approved images go in.
+const IMAGES_FOLDER: &str = "images";
+/// How many numbered names an approved image tries when its name is taken: ` 2` to ` 999`.
+const LAST_IMAGE_NUMBER: u32 = 999;
+
+/// An approved image once written: its path as it is on disk, relative to the world, and the change
+/// that records it, once that is complete.
+#[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "approvals arrive in package image-approval")
+)]
+pub struct ImageWritten {
+    pub path: String,
+    pub change: Option<ChangeId>,
+}
+
+/// Writes `bytes`, an approved image called `name` whose content is of type `extension`, to the
+/// `images` folder at the top level of the world at `root`, as one `approved_image` change. A
+/// folder of that name in any letter case is used with its name on disk, and one is created when
+/// there is none; anything else of that name, a link or junction included, refuses the approval
+/// with `invalid_path`. The file name is `names::image_file_stem` of `name` with the extension,
+/// with ` 2`, ` 3` and so on up to ` 999` added before the extension while a file of that name
+/// exists in any letter case, and `exists` after that. The change is begun, with the folder when
+/// the approval creates it and the file, before anything is written, and `on_record` then gets its
+/// id and start time, or none when nothing records, with the file's path; when it returns false,
+/// the record is abandoned and nothing is written. A failed write removes what it created, the file
+/// and then the folder, and records nothing. It never replaces anything. The caller holds the world
+/// lock, so writes do not overlap.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "approvals arrive in package image-approval")
+)]
+pub fn write_image(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    name: &str,
+    bytes: &[u8],
+    extension: &str,
+    on_record: impl FnOnce(Option<ChangeId>, &str) -> bool,
+) -> Result<ImageWritten, AppError> {
+    write_image_with(
+        root,
+        own,
+        recorder,
+        name,
+        bytes,
+        extension,
+        on_record,
+        || Ok(()),
+    )
+}
+
+/// `write_image`, with a step that runs just before the image's file is created, after its folder
+/// was, so tests can make the write fail there.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test seam adds one step to write_image's arguments"
+)]
+fn write_image_with(
+    root: &Path,
+    own: &mut OwnWrites,
+    recorder: &mut Recorder,
+    name: &str,
+    bytes: &[u8],
+    extension: &str,
+    on_record: impl FnOnce(Option<ChangeId>, &str) -> bool,
+    before_write: impl FnOnce() -> Result<(), AppError>,
+) -> Result<ImageWritten, AppError> {
+    paths::check_root(root)?;
+    let (folder, taken) = match entry_named(root, IMAGES_FOLDER)? {
+        Some((folder, kind)) if kind.is_dir() && !kind.is_symlink() => {
+            let taken = file_names_in(&root.join(&folder))?;
+            (folder, Some(taken))
+        }
+        Some(_) => return Err(images_not_a_folder()),
+        None => (IMAGES_FOLDER.to_owned(), None),
+    };
+    let creates_folder = taken.is_none();
+    let file_name = free_image_name(
+        &names::image_file_stem(name),
+        extension,
+        &taken.unwrap_or_default(),
+    )?;
+    let path = join_relative(&folder, &file_name);
+    let mut entries = Vec::with_capacity(2);
+    if creates_folder {
+        entries.push(Entry {
+            path: folder.clone(),
+            before: State::Absent,
+            after: State::Folder,
+        });
+    }
+    entries.push(Entry {
+        path: path.clone(),
+        before: State::Absent,
+        after: State::File(bytes.to_vec()),
+    });
+    let record = recorder.begin(Kind::ApprovedImage, &entries);
+    let change = recorder.change_of(record.as_ref());
+    if !on_record(change, &path) {
+        recorder.finish(record, false);
+        return Err(stopped());
+    }
+
+    let mut result = Ok(());
+    if creates_folder {
+        result = create_restored_folder(&root.join(&folder));
+        if result.is_ok() {
+            own.folder(&folder);
+        }
+    }
+    let folder_created = creates_folder && result.is_ok();
+    if result.is_ok() {
+        result = before_write().and_then(|()| create_image_file(&root.join(&path), bytes));
+    }
+    if result.is_err() && folder_created && fs::remove_dir(root.join(&folder)).is_ok() {
+        own.absent(&folder);
+    }
+    let completed = recorder.finish(record, result.is_ok());
+    result?;
+    own.page(&path, bytes);
+    Ok(ImageWritten {
+        path,
+        change: change.filter(|_| completed.is_some()),
+    })
+}
+
+/// Creates the image file at `file` with `bytes`, never replacing an entry, and removes it again
+/// when writing it fails.
+fn create_image_file(file: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let created = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)
+        .map_err(creation_error)?;
+    if let Err(error) = write_new_file(created, bytes) {
+        // The file is the one this call created, so nothing of anyone else's is removed.
+        let _ = fs::remove_file(file);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// The names in `folder`, in Unicode lowercase, as the clash check compares them.
+fn file_names_in(folder: &Path) -> Result<HashSet<String>, AppError> {
+    let mut names = HashSet::new();
+    for entry in fs::read_dir(folder)? {
+        names.insert(entry?.file_name().to_string_lossy().to_lowercase());
+    }
+    Ok(names)
+}
+
+/// The first of `{stem}.{extension}`, `{stem} 2.{extension}` … `{stem} 999.{extension}` that is
+/// not in `taken`, names in lowercase, or `exists`.
+fn free_image_name(
+    stem: &str,
+    extension: &str,
+    taken: &HashSet<String>,
+) -> Result<String, AppError> {
+    (1..=LAST_IMAGE_NUMBER)
+        .map(|number| match number {
+            1 => format!("{stem}.{extension}"),
+            _ => format!("{stem} {number}.{extension}"),
+        })
+        .find(|name| !taken.contains(&name.to_lowercase()))
+        .ok_or_else(exists)
+}
+
+fn images_not_a_folder() -> AppError {
+    AppError::new(
+        ErrorKind::InvalidPath,
+        "Something that is not a folder is named images at the world's top level.",
+    )
+}
+
 /// A change to undo.
 #[derive(Debug, Clone, Copy)]
 pub enum UndoTarget {
     /// Any change, by its id.
     Change(i64),
-    /// An accepted change, by its id and start time.
-    Accepted(ChangeId),
+    /// A change of `kind`, such as an accepted one, by its id and start time.
+    Recorded { change: ChangeId, kind: Kind },
 }
 
 /// What an undo wrote back.
@@ -1246,15 +1423,18 @@ enum Reversal {
     },
     /// A page the change created, which holds `after`, deleted.
     Delete { after: Vec<u8> },
+    /// A file that is not a page, such as an approved image, which the change created and which
+    /// holds `after`, deleted.
+    DeleteFile { after: Vec<u8> },
     /// A folder the change created, removed when it is empty.
     RemoveFolder,
 }
 
 /// Undoes the change `target` as a whole, and records the undo: puts back each page it edited,
-/// deletes each page it created and removes each folder it created that is empty, deepest first,
-/// keeping one that is not. It writes only when every page the change wrote still holds exactly
-/// the bytes it left, and every folder it created is still a folder; otherwise it is a `conflict`
-/// naming the first that changed, and nothing is written. A change that history does not hold, or
+/// deletes each page and image file it created and removes each folder it created that is empty,
+/// deepest first, keeping one that is not. It writes only when every page and file the change
+/// wrote still holds exactly the bytes it left, and every folder it created is still a folder;
+/// otherwise it is a `conflict` naming the first that changed, and nothing is written. A change that history does not hold, or
 /// whose kind or start time differ, is `not_found`. The undo is begun with every entry before
 /// anything is written, and `on_record` then gets its id and start time, or none, with the pages'
 /// paths; when it returns false, nothing is written. A failed write rolls back what the undo did
@@ -1283,8 +1463,8 @@ fn undo_change_with(
 ) -> Result<BatchUndone, AppError> {
     let entries = match (target, recorder.history()) {
         (UndoTarget::Change(id), Some(history)) => history.change_entries(id)?,
-        (UndoTarget::Accepted(change), Some(history))
-            if history.holds(change.id, Kind::Accepted, change.started)? =>
+        (UndoTarget::Recorded { change, kind }, Some(history))
+            if history.holds(change.id, kind, change.started)? =>
         {
             history.change_entries(change.id)?
         }
@@ -1370,6 +1550,10 @@ fn check_undo(root: &Path, entries: Vec<Entry>) -> Result<Vec<(String, Reversal)
                         check_holds(root, &path, &after)?;
                         Reversal::Delete { after }
                     }
+                    (State::Absent, State::File(after)) => {
+                        check_file_holds(root, &path, &after)?;
+                        Reversal::DeleteFile { after }
+                    }
                     (State::Absent, State::Folder) => {
                         paths::existing_folder(root, Some(&path))
                             .map_err(|_| changed_since(&path))?;
@@ -1397,6 +1581,20 @@ fn check_holds(root: &Path, relative: &str, after: &[u8]) -> Result<(), AppError
     }
 }
 
+/// Refuses, as changed since, the image file at `relative` unless it holds exactly `after`.
+fn check_file_holds(root: &Path, relative: &str, after: &[u8]) -> Result<(), AppError> {
+    let current = match paths::existing_image(root, relative) {
+        Ok(file) => Some(fs::read(file)?),
+        Err(error) if error.kind == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if current.as_deref() == Some(after) {
+        Ok(())
+    } else {
+        Err(changed_since(relative))
+    }
+}
+
 /// The entries of an undo's record: each entry of the change, reversed.
 fn undo_entries(reversals: &[(String, Reversal)]) -> Vec<Entry> {
     reversals
@@ -1407,6 +1605,7 @@ fn undo_entries(reversals: &[(String, Reversal)]) -> Vec<Entry> {
                     (State::Page(after.clone()), State::Page(before.clone()))
                 }
                 Reversal::Delete { after } => (State::Page(after.clone()), State::Absent),
+                Reversal::DeleteFile { after } => (State::File(after.clone()), State::Absent),
                 Reversal::RemoveFolder => (State::Folder, State::Absent),
             };
             Entry {
@@ -1418,9 +1617,13 @@ fn undo_entries(reversals: &[(String, Reversal)]) -> Vec<Entry> {
         .collect()
 }
 
-/// Undoes one page: puts its bytes before back, or deletes it, if it still holds the bytes after.
+/// Undoes one page or file: puts its bytes before back, or deletes it, if it still holds the bytes
+/// after.
 fn undo_page(root: &Path, relative: &str, reversal: &Reversal) -> Result<(), AppError> {
-    let page = paths::existing_page(root, relative)?;
+    let page = match reversal {
+        Reversal::DeleteFile { .. } => paths::existing_image(root, relative)?,
+        _ => paths::existing_page(root, relative)?,
+    };
     let current = fs::read(&page)?;
     match reversal {
         Reversal::Restore { before, after, .. } if current == *after => {
@@ -1433,7 +1636,9 @@ fn undo_page(root: &Path, relative: &str, reversal: &Reversal) -> Result<(), App
                 check_and_rename,
             )
         }
-        Reversal::Delete { after } if current == *after => Ok(fs::remove_file(page)?),
+        Reversal::Delete { after } | Reversal::DeleteFile { after } if current == *after => {
+            Ok(fs::remove_file(page)?)
+        }
         _ => Err(changed_since(relative)),
     }
 }
@@ -1462,8 +1667,8 @@ fn roll_back<'a>(
     failure.map_or(Ok(()), |error| Err((error, left)))
 }
 
-/// Puts back the bytes the change left in a page that the undo restored or deleted, and returns
-/// them.
+/// Puts back the bytes the change left in a page or file that the undo restored or deleted, and
+/// returns them.
 fn roll_back_page<'a>(
     root: &Path,
     relative: &str,
@@ -1482,8 +1687,11 @@ fn roll_back_page<'a>(
             )?;
             Ok(after)
         }
-        Reversal::Delete { after } => {
-            let (page, _) = paths::restorable_page(root, relative)?;
+        Reversal::Delete { after } | Reversal::DeleteFile { after } => {
+            let page = match reversal {
+                Reversal::Delete { .. } => paths::restorable_page(root, relative)?.0,
+                _ => restorable_file(root, relative)?,
+            };
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1498,6 +1706,16 @@ fn roll_back_page<'a>(
         }
         Reversal::RemoveFolder => Ok(&[]),
     }
+}
+
+/// Where a file the undo deleted at `relative`, a path `check_file_holds` accepted, goes back: its
+/// absolute path in its folder, which must still exist and be a real folder.
+fn restorable_file(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
+    let (folder, name) = match relative.rsplit_once('/') {
+        Some((folder, name)) => (Some(folder), name),
+        None => (None, relative),
+    };
+    Ok(paths::existing_folder(root, folder)?.join(name))
 }
 
 /// What an undo of `pages` wrote, before its change and any failure are known.
@@ -3408,7 +3626,10 @@ mod tests {
                 step: impl FnMut(UndoStep) -> Result<(), AppError>,
             ) -> Result<BatchUndone, AppError> {
                 let mut recorder = Recorder::new(Some(history), 200);
-                let target = UndoTarget::Accepted(change);
+                let target = UndoTarget::Recorded {
+                    change,
+                    kind: Kind::Accepted,
+                };
                 undo_change_with(
                     world.path(),
                     &mut own(),
@@ -3439,7 +3660,10 @@ mod tests {
                     world.path(),
                     own,
                     &mut recorder,
-                    UndoTarget::Accepted(change),
+                    UndoTarget::Recorded {
+                        change,
+                        kind: Kind::Accepted,
+                    },
                     |_, _| true,
                 )
                 .unwrap();
@@ -3508,7 +3732,10 @@ mod tests {
                     world.path(),
                     &mut own(),
                     &mut recorder,
-                    UndoTarget::Accepted(change),
+                    UndoTarget::Recorded {
+                        change,
+                        kind: Kind::Accepted,
+                    },
                     |_, _| panic!("the undo was begun"),
                 )
                 .unwrap_err();
@@ -3610,7 +3837,10 @@ mod tests {
                     world.path(),
                     &mut own(),
                     &mut recorder,
-                    UndoTarget::Accepted(batch.change.unwrap()),
+                    UndoTarget::Recorded {
+                        change: batch.change.unwrap(),
+                        kind: Kind::Accepted,
+                    },
                     |_, _| false,
                 )
                 .unwrap_err();
@@ -3619,6 +3849,280 @@ mod tests {
                 assert_eq!(tree_of(&world), after);
                 assert_eq!(read(&world, "Lf.md"), b"# Lf\nNew\n");
                 assert_eq!(kinds(&app_data, &world), ["accepted"]);
+            }
+        }
+
+        mod image {
+            use super::*;
+
+            const PNG: &[u8] = b"\x89PNG\r\n\x1a\n harbour";
+            const OSLO: &str = "images/Harbourmaster Oslo.png";
+
+            fn file(bytes: &[u8]) -> State {
+                State::File(bytes.to_vec())
+            }
+
+            fn approve(world: &TempDir, history: &mut History) -> Result<ImageWritten, AppError> {
+                let mut recorder = Recorder::new(Some(history), 100);
+                write_image(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    "Harbourmaster Oslo",
+                    PNG,
+                    "png",
+                    |_, _| true,
+                )
+            }
+
+            fn undo(
+                world: &TempDir,
+                history: &mut History,
+                change: ChangeId,
+            ) -> Result<BatchUndone, AppError> {
+                let mut recorder = Recorder::new(Some(history), 200);
+                let target = UndoTarget::Recorded {
+                    change,
+                    kind: Kind::ApprovedImage,
+                };
+                undo_change(world.path(), &mut own(), &mut recorder, target, |_, _| true)
+            }
+
+            #[test]
+            fn an_approval_creates_the_images_folder_and_the_file_as_one_change() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = linking_world(&app_data);
+                let own = &mut own();
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+                let mut recorded_with = None;
+
+                let written = write_image(
+                    world.path(),
+                    own,
+                    &mut recorder,
+                    "Harbourmaster Oslo",
+                    PNG,
+                    "png",
+                    |change, path| {
+                        // The record is begun and nothing is written yet.
+                        assert_eq!(tree_of(&world), ["Places", "Places/Saltmere.md"]);
+                        recorded_with = Some((change, path.to_owned()));
+                        true
+                    },
+                )
+                .unwrap();
+
+                let change = ChangeId {
+                    id: 1,
+                    started: 100,
+                };
+                assert_eq!(recorded_with, Some((Some(change), OSLO.to_owned())));
+                assert_eq!(
+                    (written.path.as_str(), written.change),
+                    (OSLO, Some(change))
+                );
+                assert_eq!(fs::read(world.path().join(OSLO)).unwrap(), PNG);
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "approved_image".to_owned(),
+                        vec![
+                            entry("images", State::Absent, State::Folder),
+                            entry(OSLO, State::Absent, file(PNG)),
+                        ]
+                    )]
+                );
+                for path in ["images", OSLO] {
+                    assert!(own.is_own(world.path(), path), "{path}");
+                }
+            }
+
+            #[test]
+            fn an_existing_folder_in_another_letter_case_is_used_and_a_clash_adds_a_number() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = linking_world(&app_data);
+                fs::create_dir(world.path().join("Images")).unwrap();
+                fs::write(
+                    world.path().join("Images/harbourmaster OSLO.PNG"),
+                    b"theirs",
+                )
+                .unwrap();
+
+                let written = approve(&world, &mut history).unwrap();
+
+                let path = "Images/Harbourmaster Oslo 2.png";
+                assert_eq!(written.path, path);
+                assert_eq!(fs::read(world.path().join(path)).unwrap(), PNG);
+                assert_eq!(
+                    fs::read(world.path().join("Images/harbourmaster OSLO.PNG")).unwrap(),
+                    b"theirs"
+                );
+                assert_eq!(
+                    recorded(&app_data, &world),
+                    [(
+                        "approved_image".to_owned(),
+                        vec![entry(path, State::Absent, file(PNG))]
+                    )]
+                );
+            }
+
+            /// Approves an image after `make` put something other than a folder at `IMAGES`, and
+            /// checks that the approval is refused with nothing written or recorded.
+            fn refused_after(case: &str, make: impl FnOnce(&Path)) {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = linking_world(&app_data);
+                make(&world.path().join("IMAGES"));
+                let before = tree_of(&world);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+
+                let error = write_image(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    "Harbourmaster Oslo",
+                    PNG,
+                    "png",
+                    |_, _| panic!("{case}: the record was begun"),
+                )
+                .unwrap_err();
+
+                assert_eq!(error.kind, ErrorKind::InvalidPath, "{case}");
+                assert_eq!(
+                    error.message,
+                    "Something that is not a folder is named images at the world's top level."
+                );
+                assert_eq!(tree_of(&world), before, "{case}");
+                assert!(recorded(&app_data, &world).is_empty(), "{case}");
+            }
+
+            #[test]
+            fn something_other_than_a_folder_named_images_refuses_and_nothing_is_written() {
+                refused_after("a file", |images| fs::write(images, b"notes").unwrap());
+                #[cfg(unix)]
+                {
+                    let outside = tempfile::tempdir().unwrap();
+                    refused_after("a symbolic link", |images| {
+                        std::os::unix::fs::symlink(outside.path(), images).unwrap()
+                    });
+                    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+                }
+            }
+
+            #[test]
+            fn on_record_saying_stop_or_a_failed_write_leaves_nothing_written_or_recorded() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = linking_world(&app_data);
+                let mut recorder = Recorder::new(Some(&mut history), 100);
+
+                let stopped = write_image(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    "Harbourmaster Oslo",
+                    PNG,
+                    "png",
+                    |_, _| false,
+                )
+                .unwrap_err();
+                let failed = write_image_with(
+                    world.path(),
+                    &mut own(),
+                    &mut recorder,
+                    "Harbourmaster Oslo",
+                    PNG,
+                    "png",
+                    |_, _| true,
+                    || {
+                        assert!(world.path().join("images").is_dir());
+                        Err(AppError::new(ErrorKind::Io, "The disk is full."))
+                    },
+                )
+                .unwrap_err();
+
+                assert_eq!(stopped.kind, ErrorKind::Conflict);
+                assert_eq!(failed.message, "The disk is full.");
+                assert_eq!(tree_of(&world), ["Places", "Places/Saltmere.md"]);
+                assert!(recorded(&app_data, &world).is_empty());
+            }
+
+            #[test]
+            fn undoing_an_approval_deletes_the_file_and_the_empty_folder_it_created() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = linking_world(&app_data);
+                let change = approve(&world, &mut history).unwrap().change.unwrap();
+
+                let undone = undo(&world, &mut history, change).unwrap();
+
+                assert_eq!(undone.deleted, [OSLO]);
+                assert!(undone.failure.is_none());
+                assert_eq!(tree_of(&world), ["Places", "Places/Saltmere.md"]);
+                assert_eq!(
+                    recorded(&app_data, &world)[1],
+                    (
+                        "undo".to_owned(),
+                        vec![
+                            entry("images", State::Folder, State::Absent),
+                            entry(OSLO, file(PNG), State::Absent),
+                        ]
+                    )
+                );
+            }
+
+            #[test]
+            fn undoing_an_approval_keeps_a_folder_that_holds_another_file() {
+                let app_data = tempfile::tempdir().unwrap();
+                let (world, mut history) = linking_world(&app_data);
+                let change = approve(&world, &mut history).unwrap().change.unwrap();
+                fs::write(world.path().join("images/Map.png"), b"theirs").unwrap();
+
+                undo(&world, &mut history, change).unwrap();
+
+                assert_eq!(
+                    tree_of(&world),
+                    ["Places", "Places/Saltmere.md", "images", "images/Map.png"]
+                );
+                assert_eq!(
+                    recorded(&app_data, &world)[1],
+                    (
+                        "undo".to_owned(),
+                        vec![entry(OSLO, file(PNG), State::Absent)]
+                    )
+                );
+            }
+
+            #[test]
+            fn an_undo_after_the_image_changed_or_went_writes_nothing_and_names_it() {
+                for change_it in [
+                    |path: &Path| fs::write(path, b"edited").unwrap(),
+                    |path: &Path| fs::remove_file(path).unwrap(),
+                ] {
+                    let app_data = tempfile::tempdir().unwrap();
+                    let (world, mut history) = linking_world(&app_data);
+                    let change = approve(&world, &mut history).unwrap().change.unwrap();
+                    change_it(&world.path().join(OSLO));
+                    let before = tree_of(&world);
+                    let mut recorder = Recorder::new(Some(&mut history), 200);
+                    let target = UndoTarget::Recorded {
+                        change,
+                        kind: Kind::ApprovedImage,
+                    };
+
+                    // The check made before the record begins refuses it.
+                    let error =
+                        undo_change(world.path(), &mut own(), &mut recorder, target, |_, _| {
+                            panic!("the undo was begun")
+                        })
+                        .unwrap_err();
+
+                    assert_eq!(error.kind, ErrorKind::Conflict);
+                    assert_eq!(
+                        error.message,
+                        "“Harbourmaster Oslo” changed since it was written, so nothing was \
+                         undone. Its history still holds every version."
+                    );
+                    assert_eq!(tree_of(&world), before);
+                    assert_eq!(recorded(&app_data, &world).len(), 1);
+                }
             }
         }
     }
