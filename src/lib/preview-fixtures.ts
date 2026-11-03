@@ -127,6 +127,16 @@ ring = 7 stones
 \`\`\`
 
 A [plain link](https://example.com) and an escaped \\*star\\*.
+
+| Stone | Weight | Found by |
+| :--- | :---: | ---: |
+| **Granite** | \`9 kg\` | [[Glasswrights' Guild]] |
+| Slate | 4 kg |
+| Flint | 2 kg | a rider | lost |
+
+| Ring | Northern | Eastern | Southern | Western | Centre | Capstone | Hearthstone | Waystone | Keystone | Lintel | Upkeep |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Old ford | granite | slate | flint | sandstone | chalk | marble | schist | quartzite | limestone | gneiss | yearly |
 `,
 };
 

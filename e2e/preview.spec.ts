@@ -63,11 +63,17 @@ test("away from the cursor, each element shows formatted with its syntax hidden"
     "",
     "A plain link and an escaped *star*.",
     "",
+    "",
+    "",
   ]);
   await expect(lines(page).nth(4)).toHaveClass(/cm-heading-2/);
-  await expect(editor(page).locator(".cm-em")).toHaveCSS("font-style", "italic");
-  await expect(editor(page).locator(".cm-strong")).toHaveCSS("font-weight", "700");
-  await expect(editor(page).locator(".cm-link")).toHaveText(["Glasswrights' Guild", "lens makers"]);
+  await expect(lines(page).locator(".cm-em")).toHaveCSS("font-style", "italic");
+  await expect(lines(page).locator(".cm-strong")).toHaveCSS("font-weight", "700");
+  await expect(editor(page).locator(".cm-link")).toHaveText([
+    "Glasswrights' Guild",
+    "lens makers",
+    "Glasswrights' Guild",
+  ]);
   await expect(page.getByRole("checkbox", { name: "Count every stone" })).toHaveAttribute(
     "aria-checked",
     "false",
@@ -110,6 +116,110 @@ test("ticking a checkbox saves the page with [x] and leaves the cursor where it 
     .toContain("- [x] Count every stone\n- [x] Mark a map\n");
 });
 
+const grids = (page: Page) => editor(page).getByRole("table");
+const stones = (page: Page) => grids(page).first();
+
+test("a table shows as a grid with aligned columns, formatted cells and rows fitted to its header", async ({
+  page,
+}) => {
+  await openWardStones(page);
+
+  const rows = stones(page).getByRole("row");
+  await expect(rows.nth(0).getByRole("columnheader")).toHaveText(["Stone", "Weight", "Found by"]);
+  await expect(rows.nth(1).getByRole("cell")).toHaveText([
+    "Granite",
+    "9 kg",
+    "Glasswrights' Guild",
+  ]);
+  await expect(rows.nth(2).getByRole("cell")).toHaveText(["Slate", "4 kg", ""]);
+  await expect(rows.nth(3).getByRole("cell")).toHaveText(["Flint", "2 kg", "a rider"]);
+  await expect(rows.nth(0).getByRole("columnheader").first()).toHaveCSS("font-weight", "700");
+  const aligned = rows.nth(1).getByRole("cell");
+  for (const [index, alignment] of ["left", "center", "right"].entries()) {
+    await expect(aligned.nth(index)).toHaveCSS("text-align", alignment);
+  }
+  await expect(aligned.nth(0).locator(".cm-strong")).toHaveText("Granite");
+  await expect(aligned.nth(1).locator(".cm-code")).toHaveText("9 kg");
+});
+
+test("clicking a cell shows the table as Markdown with the cursor there, and leaving it shows the edit", async ({
+  page,
+}) => {
+  await openWardStones(page);
+  const slate = stones(page).getByRole("cell", { name: "Slate", exact: true });
+
+  // Just inside the cell's padding: before the first character of its text.
+  await slate.click({ position: { x: 9, y: 8 } });
+  await expect(grids(page)).toHaveCount(1);
+  await expect(lines(page).nth(36)).toHaveText("| Slate | 4 kg |");
+  await page.keyboard.type("Blue ");
+  await expect(lines(page).nth(36)).toHaveText("| Blue Slate | 4 kg |");
+
+  await lines(page).nth(0).click();
+  await expect(grids(page)).toHaveCount(2);
+  await expect(stones(page).getByRole("row").nth(2).getByRole("cell")).toHaveText([
+    "Blue Slate",
+    "4 kg",
+    "",
+  ]);
+  await expect.poll(() => storedText(page), { timeout: 2000 }).toContain("| Blue Slate | 4 kg |\n");
+});
+
+test("the arrow keys move the cursor into a table, which shows it as Markdown, and out again", async ({
+  page,
+}) => {
+  await openWardStones(page);
+  await lines(page).nth(31).click();
+
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await expect(grids(page)).toHaveCount(1);
+  await expect(lines(page).nth(33)).toHaveText("| Stone | Weight | Found by |");
+  await page.keyboard.type("~");
+  await expect(lines(page).nth(33)).toHaveText("~| Stone | Weight | Found by |");
+  await page.keyboard.press("Backspace");
+
+  // Down through the table's lines to the line between the two tables shows both as grids.
+  for (let pressed = 0; pressed < 5; pressed++) await page.keyboard.press("ArrowDown");
+  await expect(grids(page)).toHaveCount(2);
+  await page.keyboard.press("ArrowUp");
+  await expect(grids(page)).toHaveCount(1);
+  await expect(lines(page).nth(37)).toHaveText("| Flint | 2 kg | a rider | lost |");
+});
+
+test("Ctrl+click on a link in a cell follows it", async ({ page }) => {
+  await openWardStones(page);
+
+  await stones(page)
+    .locator(".cm-link")
+    .click({ modifiers: ["Control"] });
+
+  await expect(page.getByRole("tab", { name: "Glasswrights' Guild" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+test("a wide grid scrolls inside its own area, and the page does not", async ({ page }) => {
+  await openWardStones(page);
+
+  const wrapper = grids(page).nth(1).locator("xpath=..");
+  const widths = await wrapper.evaluate((element) => {
+    let scroller = element.parentElement;
+    while (scroller && getComputedStyle(scroller).overflowY !== "auto") {
+      scroller = scroller.parentElement;
+    }
+    return {
+      grid: element.scrollWidth,
+      wrapper: element.clientWidth,
+      page: scroller?.scrollWidth,
+      pageShown: scroller?.clientWidth,
+    };
+  });
+  expect(widths.grid).toBeGreaterThan(widths.wrapper);
+  expect(widths.page).toBe(widths.pageShown);
+});
+
 test("under forced colours, links keep their underline and checkboxes their border", async ({
   page,
 }) => {
@@ -122,4 +232,7 @@ test("under forced colours, links keep their underline and checkboxes their bord
   const box = page.getByRole("checkbox", { name: "Count every stone" });
   await expect(box).toHaveCSS("border-top-style", "solid");
   await expect(box).toHaveCSS("border-top-width", "1px");
+  const cell = stones(page).getByRole("cell").first();
+  await expect(cell).toHaveCSS("border-top-style", "solid");
+  await expect(cell).toHaveCSS("border-top-width", "1px");
 });
