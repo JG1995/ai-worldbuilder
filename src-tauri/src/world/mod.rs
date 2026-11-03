@@ -3760,7 +3760,7 @@ mod tests {
             state.close();
 
             let connection = rusqlite::Connection::open(&database).unwrap();
-            connection.pragma_update(None, "user_version", 2).unwrap();
+            connection.pragma_update(None, "user_version", 3).unwrap();
             drop(connection);
             let newer = state.open(world.path().to_path_buf()).unwrap().session;
             assert_eq!(

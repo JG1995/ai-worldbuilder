@@ -114,6 +114,23 @@ pub enum Kind {
     Undo,
     /// Changes the user accepted from the assistant, written together.
     Accepted,
+    /// A page or folder renamed in its folder, with the links it rewrote.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "renames are written from PR `rename`")
+    )]
+    Rename,
+    /// A page or folder moved to another folder, with the links it rewrote.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "moves are written from PR `rename`")
+    )]
+    Move,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "deletes are written from PR `delete`")
+    )]
+    Delete,
 }
 
 impl Kind {
@@ -127,6 +144,9 @@ impl Kind {
             Self::Restore => "restore",
             Self::Undo => "undo",
             Self::Accepted => "accepted",
+            Self::Rename => "rename",
+            Self::Move => "move",
+            Self::Delete => "delete",
         }
     }
 }
@@ -172,6 +192,8 @@ pub enum VersionKind {
     AcceptedNewPage,
     /// A page an accepted change from the assistant edited.
     AcceptedEdit,
+    /// A page whose links a rename or a move rewrote.
+    LinksUpdated,
 }
 
 /// An earlier version of a page, as the History view lists it.
@@ -191,6 +213,26 @@ const AFTER: &str = "after";
 
 fn version_id(change: i64, side: &str) -> String {
     format!("{change}-{side}")
+}
+
+/// One change of a page as `History::chain` follows it: the page's state before and after the
+/// change, each as recorded at the path the page had then.
+struct Step {
+    change: i64,
+    kind: String,
+    started: u64,
+    latest: u64,
+    before: State,
+    after: State,
+    /// The change moved the page, so `before` was recorded at its earlier path.
+    moved: bool,
+}
+
+/// The path `path` maps to when it is `root` or inside it and `root` is replaced by `other`, or
+/// `None` when it is outside `root`.
+fn moved_from(path: &str, root: &str, other: &str) -> Option<String> {
+    let rest = path.strip_prefix(root)?;
+    (rest.is_empty() || rest.starts_with('/')).then(|| format!("{other}{rest}"))
 }
 
 /// The editing session of one path in this opening: the change its saves extend.
@@ -250,17 +292,43 @@ impl History {
 
     /// Commits a pending record of a write about to replace `entries`' states before.
     pub fn begin(&mut self, kind: Kind, entries: &[Entry], now: u64) -> Result<Record, Failure> {
-        let change = self.insert(kind, entries, now, true)?;
+        self.begin_with(kind, entries, None, now)
+    }
+
+    /// Commits a pending record, as `begin` does, of a write that moves the page or folder at the
+    /// first path of `moved` to the second.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "moves are written from PR `rename`")
+    )]
+    pub fn begin_moving(
+        &mut self,
+        kind: Kind,
+        entries: &[Entry],
+        moved: (&str, &str),
+        now: u64,
+    ) -> Result<Record, Failure> {
+        self.begin_with(kind, entries, Some(moved), now)
+    }
+
+    /// Records a write that is already done, such as a new page or folder, which replaced nothing.
+    pub fn add(&mut self, kind: Kind, entries: &[Entry], now: u64) -> Result<(), Failure> {
+        self.insert(kind, entries, None, now, false).map(drop)
+    }
+
+    fn begin_with(
+        &mut self,
+        kind: Kind,
+        entries: &[Entry],
+        moved: Option<(&str, &str)>,
+        now: u64,
+    ) -> Result<Record, Failure> {
+        let change = self.insert(kind, entries, moved, now, true)?;
         Ok(Record {
             change,
             extends: None,
             now,
         })
-    }
-
-    /// Records a write that is already done, such as a new page or folder, which replaced nothing.
-    pub fn add(&mut self, kind: Kind, entries: &[Entry], now: u64) -> Result<(), Failure> {
-        self.insert(kind, entries, now, false).map(drop)
     }
 
     /// Commits a pending record of a save of the page at `path` from `before` to `after`. The save
@@ -366,53 +434,47 @@ impl History {
     }
 
     /// The earlier versions of the page at `path`, newest first, each with its bytes: the text
-    /// after each change of the path, and the text a change replaced when it is not the text the
+    /// after each change of the page, and the text a change replaced when it is not the text the
     /// change before left, labelled `outside`, because another tool wrote it. Absent and folder
-    /// states are no versions, and consecutive identical texts appear once. History follows the
-    /// path, so a page deleted and created again keeps the versions of the one before.
+    /// states are no versions, and consecutive identical texts appear once. A move that left the
+    /// page's text as it was adds no version.
+    ///
+    /// History follows the page back through the moves the application recorded, so a renamed or
+    /// moved page keeps the versions of its earlier paths, and a page created later at one of those
+    /// paths does not get them. Otherwise it follows the path, so a page deleted and created again
+    /// keeps the versions of the one before.
     ///
     /// A change still pending, because history failed to complete or abandon it in this opening,
     /// is listed too, so the bytes it replaced can be restored before the next opening resolves it.
     pub fn versions(&self, path: &str) -> Result<Vec<(HistoryVersion, Vec<u8>)>, Failure> {
-        let mut statement = self.connection.prepare(
-            "SELECT entries.change_id, changes.kind, changes.started, changes.latest,
-                    before_kind, before_bytes, after_kind, after_bytes
-             FROM entries JOIN changes ON changes.id = entries.change_id
-             WHERE entries.path = ?1 ORDER BY entries.change_id",
-        )?;
-        let rows = statement.query_map([path], |row| {
-            let before: String = row.get(4)?;
-            let after: String = row.get(6)?;
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? as u64,
-                row.get::<_, i64>(3)? as u64,
-                State::stored(&before, row.get(5)?),
-                State::stored(&after, row.get(7)?),
-            ))
-        })?;
         let mut versions: Vec<(HistoryVersion, Vec<u8>)> = Vec::new();
         let mut push = |id: String, kind: VersionKind, at: u64, bytes: Vec<u8>| {
             if versions.last().is_none_or(|(_, last)| *last != bytes) {
                 versions.push((HistoryVersion { id, kind, at }, bytes));
             }
         };
-        for row in rows {
-            let (change, kind, started, latest, before, after) = row?;
-            let after_kind = version_kind(&kind, before == State::Absent);
+        for step in self.chain(path)?.into_iter().rev() {
+            if step.moved && step.before == step.after {
+                continue;
+            }
+            let after_kind = version_kind(&step.kind, step.before == State::Absent);
             // When the text a change replaced is the text the change before it left, it is the
             // last version listed, so it is skipped as a repeat; any other came from another tool.
-            if let State::Page(bytes) = before {
+            if let State::Page(bytes) = step.before {
                 push(
-                    version_id(change, BEFORE),
+                    version_id(step.change, BEFORE),
                     VersionKind::Outside,
-                    started,
+                    step.started,
                     bytes,
                 );
             }
-            if let State::Page(bytes) = after {
-                push(version_id(change, AFTER), after_kind, latest, bytes);
+            if let State::Page(bytes) = step.after {
+                push(
+                    version_id(step.change, AFTER),
+                    after_kind,
+                    step.latest,
+                    bytes,
+                );
             }
         }
         versions.reverse();
@@ -420,30 +482,108 @@ impl History {
     }
 
     /// The bytes of the version `id` of the page at `path`, or `None` when the page's history has
-    /// no such version.
+    /// no such version. A version from before a move has the bytes recorded at the earlier path.
     pub fn version_bytes(&self, path: &str, id: &str) -> Result<Option<Vec<u8>>, Failure> {
         let Some((change, side)) = id.split_once('-') else {
             return Ok(None);
         };
-        let query = match side {
-            BEFORE => {
-                "SELECT before_bytes FROM entries
-                 WHERE change_id = ?1 AND path = ?2 AND before_kind = 'page'"
-            }
-            AFTER => {
-                "SELECT after_bytes FROM entries
-                 WHERE change_id = ?1 AND path = ?2 AND after_kind = 'page'"
-            }
-            _ => return Ok(None),
-        };
         let Ok(change) = change.parse::<i64>() else {
             return Ok(None);
         };
-        let bytes = self
+        let Some(step) = self
+            .chain(path)?
+            .into_iter()
+            .find(|step| step.change == change)
+        else {
+            return Ok(None);
+        };
+        let state = match side {
+            BEFORE => step.before,
+            AFTER => step.after,
+            _ => return Ok(None),
+        };
+        Ok(match state {
+            State::Page(bytes) => Some(bytes),
+            _ => None,
+        })
+    }
+
+    /// The changes of the page at `path`, newest first, followed back through recorded moves:
+    ///
+    /// - where the page appeared in a change that moved it, or a folder above it, here, the change
+    ///   is one step from its old path to this one, and older changes are followed at the old path;
+    /// - where the page left in a change that moved it away, the older changes belong to the page
+    ///   that moved, so the chain ends;
+    /// - any other change of the path is a step.
+    fn chain(&self, path: &str) -> Result<Vec<Step>, Failure> {
+        let mut statement = self.connection.prepare(
+            "SELECT entries.change_id, changes.kind, changes.started, changes.latest,
+                    before_kind, before_bytes, after_kind, after_bytes, from_path, to_path
+             FROM entries JOIN changes ON changes.id = entries.change_id
+             LEFT JOIN moves ON moves.change_id = entries.change_id
+             WHERE entries.path = ?1 AND entries.change_id < ?2
+             ORDER BY entries.change_id DESC",
+        )?;
+        let mut chain = Vec::new();
+        let mut path = path.to_owned();
+        let mut older_than = i64::MAX;
+        'paths: loop {
+            let rows = statement.query_map(params![path, older_than], |row| {
+                let before: String = row.get(4)?;
+                let after: String = row.get(6)?;
+                let from: Option<String> = row.get(8)?;
+                let to: Option<String> = row.get(9)?;
+                Ok((
+                    Step {
+                        change: row.get(0)?,
+                        kind: row.get(1)?,
+                        started: row.get::<_, i64>(2)? as u64,
+                        latest: row.get::<_, i64>(3)? as u64,
+                        before: State::stored(&before, row.get(5)?),
+                        after: State::stored(&after, row.get(7)?),
+                        moved: false,
+                    },
+                    from.zip(to),
+                ))
+            })?;
+            for row in rows {
+                let (mut step, moved) = row?;
+                let Some((from, to)) = moved else {
+                    chain.push(step);
+                    continue;
+                };
+                if step.before == State::Absent
+                    && let Some(old) = moved_from(&path, &to, &from)
+                {
+                    step.moved = true;
+                    step.before = self.before_at(step.change, &old)?;
+                    older_than = step.change;
+                    chain.push(step);
+                    path = old;
+                    continue 'paths;
+                }
+                if step.after == State::Absent && moved_from(&path, &from, &to).is_some() {
+                    break 'paths;
+                }
+                chain.push(step);
+            }
+            break;
+        }
+        Ok(chain)
+    }
+
+    /// The state before the change `change` at `path`, which is absent when the change has no
+    /// entry there.
+    fn before_at(&self, change: i64, path: &str) -> Result<State, Failure> {
+        let before = self
             .connection
-            .query_row(query, params![change, path], |row| row.get(0))
+            .query_row(
+                "SELECT before_kind, before_bytes FROM entries WHERE change_id = ?1 AND path = ?2",
+                params![change, path],
+                |row| Ok(State::stored(&row.get::<_, String>(0)?, row.get(1)?)),
+            )
             .optional()?;
-        Ok(bytes)
+        Ok(before.unwrap_or(State::Absent))
     }
 
     /// The entries of the change `id`, or `None` when history has no such change.
@@ -468,6 +608,24 @@ impl History {
         Ok((!entries.is_empty()).then_some(entries))
     }
 
+    /// The page or folder the change `id` moved, from its first path to its second, or `None` when
+    /// it moved none or history has no such change.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "moves are undone from PR `rename`")
+    )]
+    pub fn change_move(&self, id: i64) -> Result<Option<(String, String)>, Failure> {
+        let moved = self
+            .connection
+            .query_row(
+                "SELECT from_path, to_path FROM moves WHERE change_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(moved)
+    }
+
     /// Whether history holds the change `id` of `kind` that started at `started`. Ids start again
     /// in a database that replaced a damaged one, so an id alone could name an unrelated change.
     pub fn holds(&self, id: i64, kind: Kind, started: u64) -> Result<bool, Failure> {
@@ -482,12 +640,13 @@ impl History {
         Ok(held.is_some())
     }
 
-    /// Inserts a change with its entries in one commit. Any change but an edit's ends the editing
-    /// sessions of its paths.
+    /// Inserts a change with its entries and the root it `moved` in one commit. Any change but an
+    /// edit's ends the editing sessions of its paths.
     fn insert(
         &mut self,
         kind: Kind,
         entries: &[Entry],
+        moved: Option<(&str, &str)>,
         now: u64,
         pending: bool,
     ) -> Result<i64, Failure> {
@@ -515,6 +674,12 @@ impl History {
                     entry.after.bytes(),
                 ])?;
             }
+        }
+        if let Some((from, to)) = moved {
+            transaction.execute(
+                "INSERT INTO moves (change_id, from_path, to_path) VALUES (?1, ?2, ?3)",
+                params![change, from, to],
+            )?;
         }
         transaction.commit()?;
         Ok(change)
@@ -606,7 +771,7 @@ impl History {
 }
 
 /// The kind of a version a change of `kind` left where the page was `absent` before or not. Only
-/// an edit and the kinds below leave a page; a new folder leaves none.
+/// an edit and the kinds below leave a page; a new folder and a delete leave none.
 fn version_kind(kind: &str, absent: bool) -> VersionKind {
     match kind {
         "accepted" if absent => VersionKind::AcceptedNewPage,
@@ -616,6 +781,7 @@ fn version_kind(kind: &str, absent: bool) -> VersionKind {
         "keep_mine" => VersionKind::KeepMine,
         "restore" => VersionKind::Restore,
         "undo" => VersionKind::Undo,
+        "rename" | "move" => VersionKind::LinksUpdated,
         _ => VersionKind::Edit,
     }
 }
@@ -1054,8 +1220,12 @@ mod tests {
 
     /// `PAGE`'s versions, newest first, as (id, kind, time, bytes).
     fn versions(history: &History) -> Vec<(String, VersionKind, u64, String)> {
+        versions_at(history, PAGE)
+    }
+
+    fn versions_at(history: &History, path: &str) -> Vec<(String, VersionKind, u64, String)> {
         history
-            .versions(PAGE)
+            .versions(path)
             .unwrap()
             .into_iter()
             .map(|(version, bytes)| {
@@ -1188,6 +1358,241 @@ mod tests {
                 version("1-before", VersionKind::Outside, 0, "old"),
             ]
         );
+    }
+
+    /// Records a rename of the page `from` to `to` at `now`, which left `after` where `before` was.
+    fn rename(history: &mut History, from: &str, to: &str, texts: (&[u8], &[u8]), now: u64) {
+        let (before, after) = texts;
+        let entries = [
+            entry(from, page(before), State::Absent),
+            entry(to, State::Absent, page(after)),
+        ];
+        let record = history
+            .begin_moving(Kind::Rename, &entries, (from, to), now)
+            .unwrap();
+        history.complete(record).unwrap();
+    }
+
+    fn bytes_of(history: &History, path: &str, id: &str) -> Option<String> {
+        let bytes = history.version_bytes(path, id).unwrap();
+        bytes.map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn a_renamed_page_lists_its_earlier_versions_and_an_unchanged_rename_adds_none() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        rename(&mut history, PAGE, "Renamed.md", (b"two", b"two"), 10);
+        // A page with no history before its rename.
+        rename(
+            &mut history,
+            "Fresh.md",
+            "Kept.md",
+            (b"fresh", b"fresh"),
+            20,
+        );
+
+        assert_eq!(
+            versions_at(&history, "Renamed.md"),
+            [
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+        assert_eq!(
+            bytes_of(&history, "Renamed.md", "1-before").as_deref(),
+            Some("one")
+        );
+        assert_eq!(versions_at(&history, "Kept.md"), []);
+    }
+
+    #[test]
+    fn text_another_tool_wrote_before_an_unchanged_rename_is_listed_as_outside_at_the_next_save() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        rename(&mut history, PAGE, "Renamed.md", (b"theirs", b"theirs"), 10);
+        let record = history
+            .begin_save("Renamed.md", b"theirs", b"mine", 20)
+            .unwrap();
+        history.complete(record).unwrap();
+
+        assert_eq!(
+            versions_at(&history, "Renamed.md"),
+            [
+                version("3-after", VersionKind::Edit, 20, "mine"),
+                version("3-before", VersionKind::Outside, 20, "theirs"),
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_in_a_moved_folder_lists_its_earlier_versions_and_their_bytes() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        let old = "Places/Kesh.md";
+        let new = "Lands/Places/Kesh.md";
+        let record = history.begin_save(old, b"one", b"two", 0).unwrap();
+        history.complete(record).unwrap();
+        let entries = [
+            entry("Lands/Places", State::Absent, State::Folder),
+            entry(new, State::Absent, page(b"two")),
+            entry("Places", State::Folder, State::Absent),
+            entry(old, page(b"two"), State::Absent),
+        ];
+        let record = history
+            .begin_moving(Kind::Move, &entries, ("Places", "Lands/Places"), 10)
+            .unwrap();
+        history.complete(record).unwrap();
+
+        assert_eq!(
+            versions_at(&history, new),
+            [
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+        assert_eq!(bytes_of(&history, new, "1-before").as_deref(), Some("one"));
+        assert_eq!(bytes_of(&history, new, "2-after").as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn the_undo_of_a_move_is_followed_back() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        rename(&mut history, PAGE, "Renamed.md", (b"two", b"two"), 10);
+        let record = history
+            .begin_save("Renamed.md", b"two", b"three", 20)
+            .unwrap();
+        history.complete(record).unwrap();
+        let entries = [
+            entry(PAGE, State::Absent, page(b"three")),
+            entry("Renamed.md", page(b"three"), State::Absent),
+        ];
+        let record = history
+            .begin_moving(Kind::Undo, &entries, ("Renamed.md", PAGE), 30)
+            .unwrap();
+        history.complete(record).unwrap();
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("3-after", VersionKind::Edit, 20, "three"),
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_created_later_at_the_old_path_does_not_list_the_moved_page_s_versions() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        rename(&mut history, PAGE, "Renamed.md", (b"two", b"two"), 10);
+        change(&mut history, Kind::NewPage, State::Absent, page(b""), 20);
+
+        assert_eq!(
+            versions(&history),
+            [version("3-after", VersionKind::NewPage, 20, "")]
+        );
+        assert_eq!(bytes_of(&history, PAGE, "1-after"), None);
+    }
+
+    #[test]
+    fn a_page_deleted_and_created_again_lists_the_deleted_page_s_versions() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"one", b"two", 0);
+        change(&mut history, Kind::Delete, page(b"two"), State::Absent, 10);
+        change(&mut history, Kind::NewPage, State::Absent, page(b""), 20);
+
+        assert_eq!(
+            versions(&history),
+            [
+                version("3-after", VersionKind::NewPage, 20, ""),
+                version("1-after", VersionKind::Edit, 0, "two"),
+                version("1-before", VersionKind::Outside, 0, "one"),
+            ]
+        );
+    }
+
+    #[test]
+    fn pages_whose_links_a_rename_rewrote_gain_a_links_updated_version() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        save(&mut history, b"[[Page]]", b"[[Page]] [[Kesh]]", 0);
+        let entries = [
+            entry("Kesh.md", page(b"[[Kesh]]"), page(b"[[Saltmere]]")),
+            entry(PAGE, page(b"[[Page]] [[Kesh]]"), State::Absent),
+            entry(
+                "Renamed.md",
+                State::Absent,
+                page(b"[[Renamed]] [[Saltmere]]"),
+            ),
+        ];
+        let record = history
+            .begin_moving(Kind::Rename, &entries, (PAGE, "Renamed.md"), 10)
+            .unwrap();
+        history.complete(record).unwrap();
+
+        assert_eq!(
+            versions_at(&history, "Renamed.md"),
+            [
+                version(
+                    "2-after",
+                    VersionKind::LinksUpdated,
+                    10,
+                    "[[Renamed]] [[Saltmere]]"
+                ),
+                version("1-after", VersionKind::Edit, 0, "[[Page]] [[Kesh]]"),
+                version("1-before", VersionKind::Outside, 0, "[[Page]]"),
+            ]
+        );
+        assert_eq!(
+            versions_at(&history, "Kesh.md"),
+            [
+                version("2-after", VersionKind::LinksUpdated, 10, "[[Saltmere]]"),
+                version("2-before", VersionKind::Outside, 10, "[[Kesh]]"),
+            ]
+        );
+    }
+
+    #[test]
+    fn retention_and_recovery_remove_a_move_with_its_change() {
+        let fixture = Fixture::new();
+        let mut history = fixture.open(0);
+        rename(&mut history, "Old.md", "New.md", (b"old", b"old"), 0);
+        changes_at(&mut history, (0..100).map(|number| 100 * DAY + number));
+        history
+            .begin_moving(
+                Kind::Rename,
+                &[entry(PAGE, page(b"text"), State::Absent)],
+                (PAGE, "Renamed.md"),
+                100 * DAY,
+            )
+            .unwrap();
+        assert!(history.change_move(1).unwrap().is_some());
+        assert_eq!(
+            history.change_move(102).unwrap(),
+            Some((PAGE.to_owned(), "Renamed.md".to_owned()))
+        );
+        drop(history);
+
+        // The crashed rename never reached its page, and the first change is past retention.
+        let reopened = fixture.open_with(200 * DAY, |_| page(b"text"));
+
+        assert_eq!(reopened.change_move(1).unwrap(), None);
+        assert_eq!(reopened.change_move(102).unwrap(), None);
+        let moves: i64 = reopened
+            .connection
+            .query_row("SELECT count(*) FROM moves", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(moves, 0);
     }
 
     const DAY: u64 = 24 * 60 * 60;
