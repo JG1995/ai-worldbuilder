@@ -15,9 +15,10 @@ import {
 import { Decoration, type DecorationSet, EditorView, keymap } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
-import type { EditorLink } from "@/types/api";
+import type { EditorLink, ImageEmbed, ImageRequest } from "@/types/api";
 import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
 import { type ImageUrl, imageEmbeds } from "./image-embeds";
+import { closeLinkPreview, linkPreviews, type PreviewSource } from "./link-previews";
 import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
 import { livePreview, previewView } from "./live-preview";
 import { pageSyntax } from "./markdown-syntax";
@@ -69,6 +70,9 @@ const images = new Compartment();
 
 /** The web links' extension, which `MarkdownEditor` sets from its `onOpenWeb`. */
 const web = new Compartment();
+
+/** The link previews' extension, which `MarkdownEditor` sets from its `readPreview`. */
+const previews = new Compartment();
 
 /**
  * Whether the editor is editable and read-only, and which view the live preview shows, together:
@@ -180,6 +184,7 @@ export function createPageState(
       preview ? [livePreview, tableGrid, propertiesBlock] : [],
       images.of([]),
       web.of([]),
+      previews.of([]),
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
@@ -216,19 +221,21 @@ const replaceListeners = new WeakMap<EditorView, (state: EditorState) => void>()
 
 /**
  * Puts `state` in the running editor in place of its own, keeping its view, whether it is
- * read-only, the function its link suggestions ask, its image embeds and its web links, and
- * reports it through the editor's `onReplace`.
+ * read-only, the function its link suggestions ask, its image embeds, its web links and its link
+ * previews, and reports it through the editor's `onReplace`.
  */
 export function replaceState(editor: EditorView, state: EditorState) {
   const shown = mode.get(editor.state);
   const suggest = suggestion.get(editor.state);
   const imagesShown = images.get(editor.state);
   const webShown = web.get(editor.state);
+  const previewsShown = previews.get(editor.state);
   editor.setState(state);
   if (shown) setMode(editor, shown);
   if (suggest) editor.dispatch({ effects: suggestion.reconfigure(suggest) });
   if (imagesShown) editor.dispatch({ effects: images.reconfigure(imagesShown) });
   if (webShown) editor.dispatch({ effects: web.reconfigure(webShown) });
+  if (previewsShown) editor.dispatch({ effects: previews.reconfigure(previewsShown) });
   replaceListeners.get(editor)?.(editor.state);
 }
 
@@ -315,6 +322,17 @@ type MarkdownEditorProps = {
    * reading view.
    */
   imageUrl?: ImageUrl;
+  /**
+   * Gives the text of the page at `path` as last saved, for the preview that resting the pointer
+   * on a resolved link to it opens, or rejects when it cannot be read. Whether there is one at
+   * mount turns the previews on, in a state created with the live preview; without it, no link
+   * opens one. The preview shows the text in the reading view, with the images `imageUrl` gives.
+   */
+  readPreview?: (path: string) => Promise<string>;
+  /** Gives the core's links of a previewed page's `text`; without it, they show unmarked. */
+  linksFor?: (path: string, text: string) => Promise<readonly EditorLink[]>;
+  /** Says what a previewed page's image embeds resolve to; without it, they show as names. */
+  imagesFor?: (path: string, embeds: ImageRequest[]) => Promise<ImageEmbed[]>;
 };
 
 /**
@@ -334,6 +352,9 @@ export function MarkdownEditor({
   onOpenWeb,
   suggest,
   imageUrl,
+  readPreview,
+  linksFor,
+  imagesFor,
 }: MarkdownEditorProps) {
   const parent = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -344,6 +365,7 @@ export function MarkdownEditor({
   const [suggestsAtMount] = useState(suggest !== undefined);
   const [imagesAtMount] = useState(imageUrl !== undefined);
   const [webAtMount] = useState(onOpenWeb !== undefined);
+  const [previewsAtMount] = useState(readPreview !== undefined);
   const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const reportReplace = useEffectEvent((next: EditorState) => onReplace?.(next));
@@ -351,6 +373,7 @@ export function MarkdownEditor({
   const follow = useEffectEvent((link: EditorLink | null) => {
     if (!link || !onFollow) return false;
     onFollow(link);
+    view.current?.dispatch({ effects: closeLinkPreview });
     return true;
   });
   /** Opens `link`, if there is one, and says whether it did. */
@@ -365,6 +388,17 @@ export function MarkdownEditor({
     return suggest(query);
   });
   const urlOf = useEffectEvent((path: string, stamp: string) => imageUrl?.(path, stamp) ?? "");
+  const readPage = useEffectEvent(async (path: string) => {
+    if (!readPreview) throw new Error("The editor no longer previews pages.");
+    return readPreview(path);
+  });
+  const linksOf = useEffectEvent(
+    async (path: string, text: string) => linksFor?.(path, text) ?? [],
+  );
+  const imagesOf = useEffectEvent(async (path: string, embeds: ImageRequest[]) => {
+    if (!imagesFor) throw new Error("The editor no longer shows previewed images.");
+    return imagesFor(path, embeds);
+  });
   const applyMode = useEffectEvent((editor: EditorView) =>
     setMode(editor, modeOf(reading, readOnly)),
   );
@@ -395,6 +429,24 @@ export function MarkdownEditor({
     if (webAtMount && editor.state.facet(previewOn)) {
       editor.dispatch({ effects: web.reconfigure(webLinks) });
     }
+    if (previewsAtMount && editor.state.facet(previewOn)) {
+      const url: ImageUrl = (path, stamp) => urlOf(path, stamp);
+      const source: PreviewSource = {
+        read: (path) => readPage(path),
+        // The reading view's rendering, with the page's images; no previews or web links of its own.
+        page: (text, title) =>
+          createPageState(text, title, 0, { preview: true }).update({
+            effects: [
+              mode.reconfigure(modeOf(true, true)),
+              ...(imagesAtMount ? [images.reconfigure(imageEmbeds(url))] : []),
+            ],
+          }).state,
+        links: (path, text) => linksOf(path, text),
+        images: imagesAtMount ? (path, embeds) => imagesOf(path, embeds) : undefined,
+        follow: (link) => follow(link),
+      };
+      editor.dispatch({ effects: previews.reconfigure(linkPreviews(source)) });
+    }
     replaceListeners.set(editor, reportReplace);
     /** The web link at `position`, while web links are shown. */
     const webAt = (position: number | null) =>
@@ -417,7 +469,9 @@ export function MarkdownEditor({
     // default is prevented: a click that follows a link does not also move the cursor.
     const followClick = (event: MouseEvent) => {
       const reading = isReading(editor.state);
-      if (!isFollowClick(event, reading)) return;
+      // A press on a tooltip, such as a link's preview, is not on the text below it.
+      const onText = event.target instanceof Node && editor.contentDOM.contains(event.target);
+      if (!onText || !isFollowClick(event, reading)) return;
       const followed = reading
         ? followReading(event.target)
         : followAt(
@@ -450,7 +504,7 @@ export function MarkdownEditor({
       editor.destroy();
       view.current = null;
     };
-  }, [initialState, focusAtMount, suggestsAtMount, imagesAtMount, webAtMount]);
+  }, [initialState, focusAtMount, suggestsAtMount, imagesAtMount, webAtMount, previewsAtMount]);
 
   useEffect(() => {
     if (view.current) setMode(view.current, modeOf(reading, readOnly));

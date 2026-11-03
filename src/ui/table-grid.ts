@@ -93,6 +93,18 @@ export function linkStart(view: EditorView, link: Element): number | null {
   return start === undefined ? null : view.posAtDOM(wrapper) + start;
 }
 
+/**
+ * Where the drawn text of `element`, inside a grid's cell, starts in the text, as for a link the
+ * pointer rests on in either view; null for an element outside a grid or with no drawn text.
+ */
+export function gridTextStart(view: EditorView, element: Element): number | null {
+  const wrapper = element.closest(".cm-table-wrap");
+  if (!wrapper || !view.contentDOM.contains(wrapper)) return null;
+  const text = document.createTreeWalker(element, NodeFilter.SHOW_TEXT).nextNode();
+  const start = text ? textStarts.get(text) : undefined;
+  return start === undefined ? null : view.posAtDOM(wrapper) + start;
+}
+
 /** A table drawn as a grid in place of its lines, built from text and elements, never HTML. */
 class GridWidget extends WidgetType {
   constructor(readonly grid: Grid) {
