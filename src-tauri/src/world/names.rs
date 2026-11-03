@@ -1,5 +1,6 @@
 //! The naming rules for new worlds, pages and folders. They apply only to names the user types for
-//! a new entry, never to entries that already exist.
+//! a new entry, never to entries that already exist. An approved image's untrusted name is cleaned
+//! up to pass them instead of being refused.
 
 use std::fs;
 use std::path::Path;
@@ -41,6 +42,42 @@ fn broken_rule(name: &str) -> Option<&'static str> {
         )
     } else {
         None
+    }
+}
+
+/// The most bytes an approved image's file name keeps of its untrusted name, before its extension.
+const MAX_IMAGE_STEM_BYTES: usize = 100;
+
+/// The file name, without its extension, of an approved image called `name`, an untrusted name
+/// from the model's answer. The characters the naming rules forbid, control characters and
+/// `[ ] # ^` are removed, the rest is cut to at most 100 bytes at a character boundary, and spaces
+/// and dots are trimmed at both ends; nothing left gives `Image`. A name Windows reserves gains
+/// ` image` before its first dot, so the stem always passes the naming rules.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "approvals arrive in package image-approval")
+)]
+pub fn image_file_stem(name: &str) -> String {
+    let mut kept = String::new();
+    for c in name
+        .chars()
+        .filter(|&c| !FORBIDDEN_CHARACTERS.contains(&c) && !c.is_control() && !"[]#^".contains(c))
+    {
+        if kept.len() + c.len_utf8() > MAX_IMAGE_STEM_BYTES {
+            break;
+        }
+        kept.push(c);
+    }
+    let stem = kept.trim_matches([' ', '.']);
+    if stem.is_empty() {
+        return "Image".to_owned();
+    }
+    if !is_reserved_on_windows(stem) {
+        return stem.to_owned();
+    }
+    match stem.split_once('.') {
+        Some((device, rest)) => format!("{device} image.{rest}"),
+        None => format!("{stem} image"),
     }
 }
 
@@ -145,6 +182,38 @@ mod tests {
             "Glasswrights' Guild",
         ] {
             assert!(check_name(name).is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn an_image_name_is_cleaned_up_into_a_stem_the_naming_rules_accept() {
+        // 99 bytes of `a`, then a two-byte `é` that would end at byte 101.
+        let long = format!("{}é and more", "a".repeat(99));
+        let cases = [
+            ("Harbourmaster Oslo", "Harbourmaster Oslo".to_owned()),
+            (
+                "Map: [[Kesh]] #1 / ^old? \"best\" <v2>|*\\",
+                "Map Kesh 1  old best v2".to_owned(),
+            ),
+            ("Tab\there\u{7}", "Tabhere".to_owned()),
+            (" .. Saltmere at dusk. ", "Saltmere at dusk".to_owned()),
+            (&long, "a".repeat(99)),
+            ("東京の港", "東京の港".to_owned()),
+            ("?#[]", "Image".to_owned()),
+            (" . ", "Image".to_owned()),
+            ("CON", "CON image".to_owned()),
+            ("com1", "com1 image".to_owned()),
+            ("Con. The Smuggler", "Con image. The Smuggler".to_owned()),
+            ("Console", "Console".to_owned()),
+        ];
+
+        for (name, stem) in cases {
+            assert_eq!(image_file_stem(name), stem, "{name:?}");
+            assert!(check_name(&stem).is_ok(), "{stem:?}");
+            assert!(
+                stem.len() <= MAX_IMAGE_STEM_BYTES + " image".len(),
+                "{stem:?}"
+            );
         }
     }
 

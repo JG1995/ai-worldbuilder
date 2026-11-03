@@ -36,7 +36,7 @@ pub(crate) use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
 use tree::TreeEntry;
 pub use watch::{EventSink, WorldEvent};
-pub(crate) use write::{BatchUndone, BatchWrite, BatchWritten, ChangeId};
+pub(crate) use write::{BatchUndone, BatchWrite, BatchWritten, ChangeId, ImageWritten};
 use write::{
     LinkedPage, NewEntry, OwnWrites, PageVersion, Recorder, Recording, RestoredPage, UndoTarget,
 };
@@ -509,7 +509,10 @@ impl WorldState {
         on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
     ) -> Result<BatchUndone, AppError> {
         self.write_in(Some(session), |root, own, recorder, _| {
-            let target = UndoTarget::Accepted(change);
+            let target = UndoTarget::Recorded {
+                change,
+                kind: Kind::Accepted,
+            };
             let undone = write::undo_change(root, own, recorder, target, on_record)?;
             let touched = Touched {
                 written: undone
@@ -523,13 +526,62 @@ impl WorldState {
         })
     }
 
-    /// Whether the history of the opening `session` holds the accepted change `change`; false when
+    /// Writes `bytes`, the approved image `name` of type `extension`, to the world's `images`
+    /// folder as one change while the opening `session` is the open world, under the world lock
+    /// like a save. Images are not indexed, so the index is left alone.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    pub(crate) fn approve_image(
+        &self,
+        session: u64,
+        name: &str,
+        bytes: &[u8],
+        extension: &str,
+        on_record: impl FnOnce(Option<ChangeId>, &str) -> bool,
+    ) -> Result<ImageWritten, AppError> {
+        self.write_in(Some(session), |root, own, recorder, _| {
+            let written =
+                write::write_image(root, own, recorder, name, bytes, extension, on_record)?;
+            Ok((written, Touched::default()))
+        })
+    }
+
+    /// Undoes the approval `change` while the opening `session` is the open world, under the world
+    /// lock like a save, leaving the index alone.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    pub(crate) fn undo_image(
+        &self,
+        session: u64,
+        change: ChangeId,
+        on_record: impl FnOnce(Option<ChangeId>, &[String]) -> bool,
+    ) -> Result<BatchUndone, AppError> {
+        self.write_in(Some(session), |root, own, recorder, _| {
+            let target = UndoTarget::Recorded {
+                change,
+                kind: Kind::ApprovedImage,
+            };
+            let undone = write::undo_change(root, own, recorder, target, on_record)?;
+            Ok((undone, Touched::default()))
+        })
+    }
+
+    /// Whether the history of the opening `session` holds the change `change` of `kind`; false when
     /// the opening has no history.
-    pub(crate) fn holds_change(&self, session: u64, change: ChangeId) -> Result<bool, AppError> {
+    pub(crate) fn holds_change(
+        &self,
+        session: u64,
+        change: ChangeId,
+        kind: Kind,
+    ) -> Result<bool, AppError> {
         let inner = self.lock();
         let world = inner.world.as_ref().filter(|_| inner.session == session);
         match &world.ok_or_else(no_world)?.history {
-            Ok(history) => Ok(history.holds(change.id, Kind::Accepted, change.started)?),
+            Ok(history) => Ok(history.holds(change.id, kind, change.started)?),
             Err(_) => Ok(false),
         }
     }
@@ -1737,6 +1789,9 @@ fn unknown_version() -> AppError {
 fn state_on_disk(root: &Path, relative: &str) -> history::State {
     if let Ok(page) = paths::existing_page(root, relative) {
         return fs::read(page).map_or(history::State::Absent, history::State::Page);
+    }
+    if let Ok(image) = paths::existing_image(root, relative) {
+        return fs::read(image).map_or(history::State::Absent, history::State::File);
     }
     if paths::existing_folder(root, Some(relative)).is_ok() {
         history::State::Folder
@@ -3993,14 +4048,16 @@ mod tests {
                 .accept_batch(first, &[new_page("Harbor.md", "# Harbor\n")], |_, _| true)
                 .unwrap_err();
             let undo = state.undo_batch(first, change, |_, _| true).unwrap_err();
-            let holds = state.holds_change(first, change).unwrap_err();
+            let holds = state
+                .holds_change(first, change, Kind::Accepted)
+                .unwrap_err();
 
             for error in [accept, undo, holds] {
                 assert_eq!(error.kind, ErrorKind::NoWorld);
             }
             assert!(!world.path().join("Harbor.md").exists());
             assert!(world.path().join("Docks.md").exists());
-            assert!(state.holds_change(second, change).unwrap());
+            assert!(state.holds_change(second, change, Kind::Accepted).unwrap());
         }
 
         #[test]
@@ -4015,12 +4072,16 @@ mod tests {
                 .unwrap()
                 .change
                 .unwrap();
-            assert!(state.holds_change(session, old).unwrap());
+            assert!(state.holds_change(session, old, Kind::Accepted).unwrap());
             let unknown = ChangeId {
                 id: old.id + 1,
                 ..old
             };
-            assert!(!state.holds_change(session, unknown).unwrap());
+            assert!(
+                !state
+                    .holds_change(session, unknown, Kind::Accepted)
+                    .unwrap()
+            );
             state.close();
 
             // The database is damaged, so the next opening sets it aside and starts a new one,
@@ -4048,8 +4109,8 @@ mod tests {
                 started: started as u64,
                 ..new
             };
-            assert!(state.holds_change(session, new).unwrap());
-            assert!(!state.holds_change(session, old).unwrap());
+            assert!(state.holds_change(session, new, Kind::Accepted).unwrap());
+            assert!(!state.holds_change(session, old, Kind::Accepted).unwrap());
             let error = state.undo_batch(session, old, |_, _| true).unwrap_err();
             assert_eq!(error.kind, ErrorKind::NotFound);
             assert!(world.path().join("Docks.md").exists());
@@ -4109,6 +4170,84 @@ mod tests {
 
             assert!(stored(app_data.path(), &new).is_empty());
             assert_eq!(fs::read(file(app_data.path(), &old)).unwrap(), old_history);
+        }
+
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n harbour";
+
+        #[test]
+        fn an_approved_image_is_held_as_its_kind_and_undone_in_the_open_world() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+
+            let written = state
+                .approve_image(session, "Harbourmaster Oslo", PNG, "png", |_, _| true)
+                .unwrap();
+            let change = written.change.unwrap();
+
+            assert_eq!(written.path, "images/Harbourmaster Oslo.png");
+            assert_eq!(fs::read(world.path().join(&written.path)).unwrap(), PNG);
+            assert!(
+                state
+                    .holds_change(session, change, Kind::ApprovedImage)
+                    .unwrap()
+            );
+            assert!(!state.holds_change(session, change, Kind::Accepted).unwrap());
+            assert_eq!(
+                state
+                    .undo_batch(session, change, |_, _| true)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::NotFound
+            );
+
+            let undone = state.undo_image(session, change, |_, _| true).unwrap();
+
+            assert_eq!(undone.deleted, [written.path]);
+            assert!(!world.path().join("images").exists());
+        }
+
+        #[test]
+        fn reopening_completes_an_approval_whose_image_holds_its_bytes() {
+            let app_data = tempfile::tempdir().unwrap();
+            let world = world();
+            let state = launched(&app_data);
+            let session = state.open(world.path().to_path_buf()).unwrap().session;
+            state
+                .approve_image(session, "Harbourmaster Oslo", PNG, "png", |_, _| true)
+                .unwrap();
+            state.close();
+            // A crash after the file was written left the record pending.
+            rusqlite::Connection::open(file(app_data.path(), world.path()))
+                .unwrap()
+                .execute("UPDATE changes SET pending = 1", [])
+                .unwrap();
+
+            state.open(world.path().to_path_buf()).unwrap();
+
+            let changes = stored(app_data.path(), world.path());
+            assert!(!changes[0].pending);
+            let entries: Vec<Entry> = changes[0]
+                .entries
+                .iter()
+                .map(|stored| stored.entry.clone())
+                .collect();
+            assert_eq!(
+                entries,
+                [
+                    Entry {
+                        path: "images".to_owned(),
+                        before: State::Absent,
+                        after: State::Folder,
+                    },
+                    Entry {
+                        path: "images/Harbourmaster Oslo.png".to_owned(),
+                        before: State::Absent,
+                        after: State::File(PNG.to_vec()),
+                    },
+                ]
+            );
         }
     }
 }
