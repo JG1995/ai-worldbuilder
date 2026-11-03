@@ -155,6 +155,12 @@ test("below 960px, a pick from the dialog opened in the tree overlay closes the 
   const line = page.getByRole("option", {
     name: "A basalt spire, the only shade for a day's ride.",
   });
+  // Both answers to the whole query list just the Create row and this line. An earlier prefix's
+  // answer already shows the line among other rows and, on a slow CI runner, has stayed for
+  // seconds; the newer answer then resets the selection to its first row.
+  const options = page.getByRole("option");
+  await expect(options).toHaveCount(2, { timeout: 15_000 });
+  await expect(options.first()).toHaveAccessibleName('Create page "basalt spi"');
   await expect(line).toBeVisible();
   await page.keyboard.press("ArrowDown");
   await expect(line).toHaveAttribute("aria-selected", "true");
