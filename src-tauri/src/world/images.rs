@@ -288,6 +288,14 @@ fn image(bytes: Vec<u8>, content_type: &'static str) -> Response<Vec<u8>> {
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // The scheme is a local origin with IPC access, so an SVG opened as a document must not run
+    // script there. Embedded with `<img>`, it cannot anyway.
+    if content_type == "image/svg+xml" {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+        );
+    }
     response
 }
 
@@ -304,6 +312,8 @@ mod tests {
     use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    const SVG_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
 
     fn write(root: &Path, path: &str, bytes: &[u8]) {
         let path = root.join(path);
@@ -609,11 +619,20 @@ mod tests {
             let response = get(&world.state, &url(world.session, name));
 
             assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let headers = response.headers();
+            assert_eq!(headers[header::CONTENT_TYPE], content_type, "{name}");
+            assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{name}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-cache", "{name}");
+            // Only an SVG can hold script, so only it is sandboxed.
+            let svg = content_type == "image/svg+xml";
             assert_eq!(
-                response.headers()[header::CONTENT_TYPE],
-                content_type,
+                headers
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .map(|policy| policy.to_str().unwrap()),
+                svg.then_some(SVG_POLICY),
                 "{name}"
             );
+            assert_eq!(headers.len(), if svg { 4 } else { 3 }, "{name}");
         }
     }
 
