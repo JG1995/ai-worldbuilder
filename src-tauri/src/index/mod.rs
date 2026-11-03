@@ -12,7 +12,7 @@
 mod database;
 mod parse;
 mod properties;
-mod resolve;
+pub(crate) mod resolve;
 mod search;
 mod suggest;
 

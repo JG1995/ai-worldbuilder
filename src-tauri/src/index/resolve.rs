@@ -64,6 +64,20 @@ impl Table {
             .min_by(|a, b| preference(from, a, b))?;
         Some(best)
     }
+
+    /// The entry at the path `target` relative to the folder of the page at `from`, else from the
+    /// world's root, ignoring letter case: how a Markdown image's destination is looked up. A join
+    /// above the root finds nothing.
+    pub fn at_path(&self, from: &str, target: &str) -> Option<&str> {
+        let candidates = [join(folder_of(from), target), join("", target)]
+            .into_iter()
+            .flatten()
+            .find_map(|path| self.by_path.get(&without_extension(&path).to_lowercase()))?;
+        candidates
+            .iter()
+            .map(|&index| self.pages[index].as_str())
+            .min_by(|a, b| preference(from, a, b))
+    }
 }
 
 /// The path, relative to the world, where a page is created for the unresolved link in the page at
@@ -104,7 +118,7 @@ fn preference(from: &str, a: &str, b: &str) -> Ordering {
 }
 
 /// The folder of a path relative to the world, `""` at the top level.
-fn folder_of(path: &str) -> &str {
+pub fn folder_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(folder, _)| folder)
 }
 
@@ -119,7 +133,7 @@ fn without_extension(path: &str) -> &str {
 
 /// `target`'s `/`-separated segments joined to `folder` lexically: `.` stays, `..` goes up one
 /// folder. A join that goes above the world's root is `None`.
-fn join(folder: &str, target: &str) -> Option<String> {
+pub fn join(folder: &str, target: &str) -> Option<String> {
     let mut segments: Vec<&str> = folder.split('/').filter(|s| !s.is_empty()).collect();
     for segment in target.split('/') {
         match segment {
@@ -368,6 +382,50 @@ mod tests {
         ];
         for (from, target, expected, rule) in cases {
             assert_eq!(creation_path(from, target).as_deref(), expected, "{rule}");
+        }
+    }
+
+    #[test]
+    fn a_path_is_found_from_the_page_s_folder_then_from_the_root() {
+        // Image paths keep their extension in the keys, because only `.md` is stripped.
+        let table = Table::new(
+            [
+                "portrait.png",
+                "People/portrait.png",
+                "People/Old/face.PNG",
+                "images/a b.png",
+            ],
+            [],
+        );
+        let cases = [
+            (
+                "People/Mirela.md",
+                "portrait.png",
+                Some("People/portrait.png"),
+            ),
+            ("Mirela.md", "portrait.png", Some("portrait.png")),
+            (
+                "People/Mirela.md",
+                "old/face.png",
+                Some("People/Old/face.PNG"),
+            ),
+            (
+                "People/Mirela.md",
+                "../images/a b.png",
+                Some("images/a b.png"),
+            ),
+            ("People/Mirela.md", "images/a b.png", Some("images/a b.png")),
+            (
+                "People/Mirela.md",
+                "./portrait.png",
+                Some("People/portrait.png"),
+            ),
+            ("People/Mirela.md", "../../portrait.png", None),
+            ("People/Mirela.md", "face.png", None),
+            ("People/Mirela.md", "portrait", None),
+        ];
+        for (from, target, expected) in cases {
+            assert_eq!(table.at_path(from, target), expected, "{from} {target}");
         }
     }
 

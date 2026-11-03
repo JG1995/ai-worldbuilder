@@ -30,6 +30,19 @@ pub fn run() {
         }))
         .manage(world::WorldState::default())
         .manage(assistant::AssistantState::default())
+        // Each image request is answered on a worker thread, so reading a file never blocks the
+        // webview.
+        .register_asynchronous_uri_scheme_protocol(
+            world::IMAGE_SCHEME,
+            |context, request, responder| {
+                let app = context.app_handle().clone();
+                let uri = request.uri().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let state = app.state::<world::WorldState>();
+                    responder.respond(world::respond_image(&state, &uri));
+                });
+            },
+        )
         .setup(|app| {
             #[cfg(target_os = "linux")]
             if let Some(theme) = theme::fallback() {
@@ -87,6 +100,7 @@ pub fn run() {
             world::history_undo,
             world::backlinks_list,
             world::links_in,
+            world::images_resolve,
             world::link_create,
             world::link_suggest,
             world::search_pages,

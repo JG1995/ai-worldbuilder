@@ -3,6 +3,7 @@
 //! and the worker that keeps the open world's page index current.
 
 mod dialog;
+mod images;
 mod names;
 mod page;
 mod paths;
@@ -28,6 +29,8 @@ use crate::index::{
     self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches,
     Properties, Stamp, TextMatches,
 };
+pub use images::{IMAGE_SCHEME, respond as respond_image};
+use images::{ImageEmbed, ImageRequest};
 pub(crate) use page::compare;
 pub(crate) use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};
@@ -761,6 +764,16 @@ impl WorldState {
         self.query_index(|index| index.links_in(path, &parsed))
     }
 
+    /// What `embeds`, the image embeds in the page at `path`, resolve to among the open world's
+    /// image files now. It reads the world's folder listings, never a file.
+    fn resolve_images(
+        &self,
+        path: &str,
+        embeds: &[ImageRequest],
+    ) -> Result<Vec<ImageEmbed>, AppError> {
+        images::resolve(&self.root()?, path, embeds)
+    }
+
     /// The pages to suggest for a link in the page at `from` whose page part so far is `query`,
     /// from the open world's index, which while it is being built holds only the pages it has read
     /// so far.
@@ -1439,6 +1452,17 @@ pub async fn links_in(
     text: String,
 ) -> Result<EditorLinks, AppError> {
     guard(|| state.links_in(&path, &text))
+}
+
+/// What the image embeds in the page at `path` lead to: each an image file of the open world with
+/// its stamp, or why none is shown.
+#[tauri::command]
+pub async fn images_resolve(
+    state: State<'_, WorldState>,
+    path: String,
+    embeds: Vec<ImageRequest>,
+) -> Result<Vec<ImageEmbed>, AppError> {
+    guard(|| state.resolve_images(&path, &embeds))
 }
 
 /// Creates an empty page for the unresolved link in the page at `from` to `target`, or gives the
