@@ -429,7 +429,8 @@ impl AssistantState {
                 ));
             }
             (false, conversation) => {
-                let conversation = store.add_user_message(conversation, &outgoing.text, now())?;
+                let conversation =
+                    store.add_user_message(conversation, &outgoing.text, None, now())?;
                 (conversation, outgoing.text)
             }
         };
@@ -506,12 +507,16 @@ impl AssistantState {
                 proposals: &parsed.proposals,
                 unreadable: parsed.unreadable,
                 unfinished: parsed.unfinished,
+                images: &[],
+                image_unreadable: 0,
+                image_unfinished: false,
             };
             // A write the file refuses is made in memory, and the store's notice says that the
             // conversations are not being saved; the answer ends either way.
             answer = lock_store(store)
                 .add_answer(conversation, &saved, now())
-                .ok();
+                .ok()
+                .map(|(answer, _)| answer);
         }
         let text = parsed.prose;
         Ok(match outcome {
@@ -1763,6 +1768,7 @@ mod tests {
             text: text.to_owned(),
             answer: None,
             proposals: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -1771,6 +1777,7 @@ mod tests {
             text: text.to_owned(),
             answer: Some(state),
             proposals: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -2254,7 +2261,7 @@ mod tests {
         // A user message saved by an opening that ended before its answer did.
         let mut store =
             Store::open(Some(fixture.app_data.path()), fixture.world.path(), 1).unwrap();
-        let conversation = store.add_user_message(None, "Hello", 1).unwrap();
+        let conversation = store.add_user_message(None, "Hello", None, 1).unwrap();
         drop(store);
         fixture.reopen_world();
 
@@ -2288,7 +2295,7 @@ mod tests {
         let fixture = Fixture::new(stalling("Half"));
         let mut store =
             Store::open(Some(fixture.app_data.path()), fixture.world.path(), 1).unwrap();
-        let kept = store.add_user_message(None, "Kept", 1).unwrap();
+        let kept = store.add_user_message(None, "Kept", None, 1).unwrap();
         drop(store);
         let (handle, events) = fixture.start(None, "Gone soon", None, false);
         wait_until("the text", || events.lock().unwrap().len() == 2);
