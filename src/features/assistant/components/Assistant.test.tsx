@@ -533,7 +533,8 @@ describe("saved conversations", () => {
     const ports = renderAssistant({}, 3);
 
     expect(await screen.findByText("Where is Saltmere?")).toBeInTheDocument();
-    const answer = answers()[0];
+    // The answer's editor can mount just after the question shows.
+    const [answer] = await screen.findAllByRole("textbox", { name: "Answer" });
     await waitFor(() =>
       expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
     );
