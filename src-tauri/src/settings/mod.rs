@@ -1,21 +1,25 @@
-//! The `settings` area: the application's settings, the AI switch and the saved text provider,
-//! and the commands that read and change them. The provider's key goes through `secrets`, and its
-//! base URL's rules come from `providers`.
+//! The `settings` area: the application's settings, the AI switch, the saved text provider and
+//! the saved image provider, and the commands that read and change them. The providers' keys go
+//! through `secrets`, each in its own slot; the text provider's base URL's rules come from
+//! `providers`, and the image provider always goes to `providers::images::OPENROUTER`.
 //!
 //! The commands run one at a time under the settings lock, held for the whole operation, keychain
 //! calls included. Each runs on Tauri's blocking pool, because a keychain may wait for the user to
 //! answer an unlock prompt.
 //!
-//! Settings also authorize every request to the provider: the connection test's and the
-//! assistant's answer. A request takes a snapshot of the provider with the provider generation
-//! (`prepare_request`), reads the key without the lock (`read_key`), and starts only inside
-//! `start_request`, under the lock, while the generation is unchanged and AI is on; its abort is
-//! stored there before the lock is released. Switching AI off, saving the provider and removing
-//! the key move the generation and call every stored abort, so no request leaves after them and
-//! none keeps running. `provider_test_cancel` abandons only the test, through its own mark.
+//! Settings also authorize every request to a provider: the connection tests' and the assistant's
+//! answer. Each request has a kind, text or image, and each kind its own generation. A request
+//! takes a snapshot of its provider with its kind's generation (`prepare_request`), reads the key
+//! without the lock (`read_key`), and starts only inside `start_request`, under the lock, while
+//! that generation is unchanged and AI is on; its abort is stored there with its kind before the
+//! lock is released. Saving a provider and removing its key move that kind's generation and call
+//! that kind's stored aborts, and switching AI off does so for both kinds, so no request leaves
+//! after them and none keeps running. Each kind has one connection test, and its cancel command
+//! abandons only that test, through the test's own mark.
 
 mod store;
 
+use std::future::Future;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -26,9 +30,10 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager};
 
 use crate::error::{AppError, ErrorKind, guard};
+use crate::providers::images::{self, ImageFailure, ImageTestOutcome};
 use crate::providers::{self, BaseUrl, ProviderFailure, TestOutcome};
-use crate::secrets::{KeyStorage, Secrets, SecretsError};
-use store::{Saved, SavedProvider};
+use crate::secrets::{KeySlot, KeyStorage, Secrets, SecretsError};
+use store::{Saved, SavedImageProvider, SavedProvider};
 
 /// The settings as the interface sees them. It never holds a key.
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -39,6 +44,8 @@ pub struct Settings {
     ai: bool,
     /// The saved text provider, if any.
     text_provider: Option<TextProvider>,
+    /// The saved image provider, if any.
+    image_provider: Option<ImageProvider>,
 }
 
 /// The saved text provider.
@@ -52,6 +59,18 @@ pub struct TextProvider {
     /// Where the key is stored.
     key: KeyStorage,
     /// The base URL's host, with the port when the URL names one.
+    host: String,
+}
+
+/// The saved image provider. Its requests always go to OpenRouter.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct ImageProvider {
+    model: String,
+    /// Where the key is stored.
+    key: KeyStorage,
+    /// The host the key is sent to, `openrouter.ai`.
     host: String,
 }
 
@@ -82,31 +101,65 @@ pub enum ProviderSaved {
     NoKeychain,
 }
 
+/// Which provider a request goes to. Each kind's requests and connection test are abandoned apart
+/// from the other kind's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Text,
+    Image,
+}
+
+impl ProviderKind {
+    fn slot(self) -> KeySlot {
+        match self {
+            Self::Text => KeySlot::Text,
+            Self::Image => KeySlot::Image,
+        }
+    }
+}
+
 /// The settings, managed by Tauri and loaded at launch.
 pub struct SettingsState {
     /// Shared with each `RequestGuard`, which removes its request's abort when dropped.
     inner: Arc<Mutex<Inner>>,
     /// Beside the settings lock, so that reading a key never needs it.
     secrets: Arc<Secrets>,
+    /// Where image requests go in tests: a local server instead of OpenRouter.
+    #[cfg(test)]
+    image_base: String,
 }
 
 struct Inner {
     saved: Saved,
     /// `grimoire-data/settings.json`; `None` without an app data folder, and then nothing saves.
     file: Option<PathBuf>,
-    /// Moves on when AI is switched off, the provider is saved or its key removed. A request
-    /// prepared before it moved never starts.
-    provider_generation: u64,
-    /// The abort of each running provider request, by request id.
-    requests: Vec<(u64, Abort)>,
+    text: KindState,
+    image: KindState,
+    /// Each running provider request.
+    requests: Vec<Running>,
     next_request: u64,
+}
+
+/// One kind's requests.
+#[derive(Default)]
+struct KindState {
+    /// Moves on when AI is switched off, or when this kind's provider is saved or its key removed.
+    /// A request prepared before it moved never starts.
+    generation: u64,
     test: TestRun,
+}
+
+/// A running provider request.
+struct Running {
+    id: u64,
+    kind: ProviderKind,
+    abort: Abort,
 }
 
 /// Aborts a running provider request. It takes no lock.
 pub type Abort = Box<dyn Fn() + Send>;
 
-/// The connection test, which runs one at a time.
+/// A kind's connection test, which runs one at a time.
 #[derive(Default)]
 struct TestRun {
     /// Moves on whenever a running test must be abandoned, so its result is discarded.
@@ -116,13 +169,18 @@ struct TestRun {
     request: Option<u64>,
 }
 
-/// A request that passed its first step: the provider generation it was prepared in, and a copy of
-/// the provider it goes to.
+/// A request that passed its first step: its kind, the kind's generation it was prepared in,
+/// where its key is stored, and a copy of what it goes to.
 #[derive(Clone)]
-pub struct PreparedRequest {
+pub struct Prepared<P> {
+    kind: ProviderKind,
     generation: u64,
-    provider: SavedProvider,
+    key: KeyStorage,
+    provider: P,
 }
+
+/// A request to the text provider.
+pub type PreparedRequest = Prepared<SavedProvider>;
 
 impl PreparedRequest {
     pub fn base_url(&self) -> &BaseUrl {
@@ -134,7 +192,14 @@ impl PreparedRequest {
     }
 }
 
-/// The request was not started: AI was switched off, or the provider saved again or its key
+/// Where an image provider's request goes, and with which model.
+#[derive(Clone)]
+struct ImageTarget {
+    base: String,
+    model: String,
+}
+
+/// The request was not started: AI was switched off, or its provider saved again or its key
 /// removed, since it was prepared.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Superseded;
@@ -148,14 +213,44 @@ pub struct RequestGuard {
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
-        lock(&self.inner).requests.retain(|(id, _)| *id != self.id);
+        lock(&self.inner)
+            .requests
+            .retain(|running| running.id != self.id);
     }
 }
 
-/// A test that passed its first step, with a copy of the provider it tests.
-struct PendingTest {
+/// A test that passed its first step, with a copy of what it tests.
+struct PendingTest<P> {
     generation: u64,
-    request: PreparedRequest,
+    request: Prepared<P>,
+}
+
+/// How a test of either provider ends without its request's own result.
+trait TestResult: Send + 'static {
+    /// The test was abandoned.
+    fn cancelled() -> Self;
+    /// The key cannot be read, for the reason given, so nothing was sent.
+    fn key_unreadable(detail: String) -> Self;
+}
+
+impl TestResult for TestOutcome {
+    fn cancelled() -> Self {
+        Self::Cancelled
+    }
+
+    fn key_unreadable(detail: String) -> Self {
+        Self::failed(ProviderFailure::KeyUnreadable, Some(detail))
+    }
+}
+
+impl TestResult for ImageTestOutcome {
+    fn cancelled() -> Self {
+        Self::Cancelled
+    }
+
+    fn key_unreadable(detail: String) -> Self {
+        Self::failed(ImageFailure::KeyUnreadable, Some(detail))
+    }
 }
 
 impl SettingsState {
@@ -172,12 +267,14 @@ impl SettingsState {
             inner: Arc::new(Mutex::new(Inner {
                 saved,
                 file,
-                provider_generation: 0,
+                text: KindState::default(),
+                image: KindState::default(),
                 requests: Vec::new(),
                 next_request: 0,
-                test: TestRun::default(),
             })),
             secrets: Arc::new(secrets),
+            #[cfg(test)]
+            image_base: images::OPENROUTER.to_owned(),
         }
     }
 
@@ -193,7 +290,8 @@ impl SettingsState {
     pub(crate) fn set_ai(&self, on: bool) -> Result<Settings, AppError> {
         let mut inner = self.lock();
         if !on {
-            inner.supersede_requests();
+            inner.supersede_requests(ProviderKind::Text);
+            inner.supersede_requests(ProviderKind::Image);
         }
         let next = Saved {
             ai: on,
@@ -216,7 +314,7 @@ impl SettingsState {
             return Err(ai_off());
         }
         // A request belongs to the provider it was prepared for.
-        inner.supersede_requests();
+        inner.supersede_requests(ProviderKind::Text);
         let base_url = match BaseUrl::parse(base_url) {
             Ok(url) => url,
             Err(message) => return Ok(invalid(ProviderField::BaseUrl, message)),
@@ -225,25 +323,23 @@ impl SettingsState {
         if model.is_empty() {
             return Ok(invalid(ProviderField::Model, "Enter the model's ID."));
         }
-        let key = key.map(str::trim).filter(|key| !key.is_empty());
-        if key.is_some_and(|key| !key.chars().all(|char| char.is_ascii_graphic())) {
-            // The message never quotes the character, which is part of the key.
-            return Ok(invalid(
-                ProviderField::Key,
-                "The key can hold only letters, digits and ASCII symbols, with no spaces.",
-            ));
-        }
+        let key = match typed_key(key) {
+            Ok(key) => key,
+            Err(message) => return Ok(invalid(ProviderField::Key, message)),
+        };
 
         let previous = inner.saved.provider.as_ref();
         let storage = match (key, previous) {
-            (Some(key), _) => match self.secrets.store(key, key_file) {
+            (Some(key), _) => match self.secrets.store(KeySlot::Text, key, key_file) {
                 Ok(storage) => storage,
                 Err(SecretsError::NoKeychain) => return Ok(ProviderSaved::NoKeychain),
                 Err(error) => return Err(secrets_error(error)),
             },
             (None, Some(previous)) if previous.base_url.origin() != base_url.origin() => {
                 // The key belongs to the saved origin; it is deleted before the new origin is.
-                self.secrets.remove(previous.key).map_err(secrets_error)?;
+                self.secrets
+                    .remove(KeySlot::Text, previous.key)
+                    .map_err(secrets_error)?;
                 KeyStorage::None
             }
             (None, Some(previous)) => previous.key,
@@ -256,6 +352,7 @@ impl SettingsState {
                 model: model.to_owned(),
                 key: storage,
             }),
+            ..inner.saved.clone()
         };
         let settings = inner.save(next)?;
         Ok(ProviderSaved::Saved { settings })
@@ -267,11 +364,13 @@ impl SettingsState {
         if !inner.saved.ai {
             return Err(ai_off());
         }
-        inner.supersede_requests();
+        inner.supersede_requests(ProviderKind::Text);
         let Some(provider) = inner.saved.provider.clone() else {
             return Ok(to_settings(&inner.saved));
         };
-        self.secrets.remove(provider.key).map_err(secrets_error)?;
+        self.secrets
+            .remove(KeySlot::Text, provider.key)
+            .map_err(secrets_error)?;
         let next = Saved {
             provider: Some(SavedProvider {
                 key: KeyStorage::None,
@@ -282,8 +381,78 @@ impl SettingsState {
         inner.save(next)
     }
 
-    /// A request's first step, under the lock: AI is on and a provider is saved. It holds the
-    /// provider generation and a copy of the provider.
+    /// Checks the fields, stores a typed key in the image provider's slot, and only then writes
+    /// the settings file. A key is required unless one is stored.
+    pub(crate) fn save_image_provider(
+        &self,
+        model: &str,
+        key: Option<&str>,
+        key_file: bool,
+    ) -> Result<ProviderSaved, AppError> {
+        let mut inner = self.lock();
+        if !inner.saved.ai {
+            return Err(ai_off());
+        }
+        inner.supersede_requests(ProviderKind::Image);
+        let model = model.trim();
+        if model.is_empty() {
+            return Ok(invalid(ProviderField::Model, "Enter the model's ID."));
+        }
+        let key = match typed_key(key) {
+            Ok(key) => key,
+            Err(message) => return Ok(invalid(ProviderField::Key, message)),
+        };
+
+        let stored = inner
+            .saved
+            .image
+            .as_ref()
+            .map_or(KeyStorage::None, |image| image.key);
+        let storage = match key {
+            Some(key) => match self.secrets.store(KeySlot::Image, key, key_file) {
+                Ok(storage) => storage,
+                Err(SecretsError::NoKeychain) => return Ok(ProviderSaved::NoKeychain),
+                Err(error) => return Err(secrets_error(error)),
+            },
+            None if stored != KeyStorage::None => stored,
+            None => return Ok(invalid(ProviderField::Key, "Enter the API key.")),
+        };
+        let next = Saved {
+            image: Some(SavedImageProvider {
+                model: model.to_owned(),
+                key: storage,
+            }),
+            ..inner.saved.clone()
+        };
+        let settings = inner.save(next)?;
+        Ok(ProviderSaved::Saved { settings })
+    }
+
+    /// Deletes the image provider's stored key, then records that none is stored. The model stays.
+    pub(crate) fn remove_image_key(&self) -> Result<Settings, AppError> {
+        let mut inner = self.lock();
+        if !inner.saved.ai {
+            return Err(ai_off());
+        }
+        inner.supersede_requests(ProviderKind::Image);
+        let Some(image) = inner.saved.image.clone() else {
+            return Ok(to_settings(&inner.saved));
+        };
+        self.secrets
+            .remove(KeySlot::Image, image.key)
+            .map_err(secrets_error)?;
+        let next = Saved {
+            image: Some(SavedImageProvider {
+                key: KeyStorage::None,
+                ..image
+            }),
+            ..inner.saved.clone()
+        };
+        inner.save(next)
+    }
+
+    /// A text request's first step, under the lock: AI is on and a provider is saved. It holds
+    /// the text generation and a copy of the provider.
     pub fn prepare_request(&self) -> Result<PreparedRequest, AppError> {
         let inner = self.lock();
         if !inner.saved.ai {
@@ -294,26 +463,62 @@ impl SettingsState {
             .provider
             .clone()
             .ok_or_else(|| AppError::new(ErrorKind::NotFound, "No provider is saved."))?;
-        Ok(PreparedRequest {
-            generation: inner.provider_generation,
+        Ok(Prepared {
+            kind: ProviderKind::Text,
+            generation: inner.text.generation,
+            key: provider.key,
             provider,
         })
     }
 
+    /// The image test's first step, under the lock: AI is on, and an image provider is saved with
+    /// a stored key.
+    fn prepare_image_test(&self) -> Result<Prepared<ImageTarget>, AppError> {
+        let inner = self.lock();
+        if !inner.saved.ai {
+            return Err(ai_off());
+        }
+        let image = inner
+            .saved
+            .image
+            .as_ref()
+            .filter(|image| image.key != KeyStorage::None)
+            .ok_or_else(|| AppError::new(ErrorKind::NotFound, "No image provider is saved."))?;
+        Ok(Prepared {
+            kind: ProviderKind::Image,
+            generation: inner.image.generation,
+            key: image.key,
+            provider: ImageTarget {
+                base: self.image_base().to_owned(),
+                model: image.model.clone(),
+            },
+        })
+    }
+
+    #[cfg(not(test))]
+    fn image_base(&self) -> &str {
+        images::OPENROUTER
+    }
+
+    #[cfg(test)]
+    fn image_base(&self) -> &str {
+        &self.image_base
+    }
+
     /// The second step, without the lock, because a keychain may wait for an unlock prompt.
-    pub fn read_key(&self, request: &PreparedRequest) -> Result<Option<String>, AppError> {
+    pub fn read_key<P>(&self, request: &Prepared<P>) -> Result<Option<String>, AppError> {
         self.secrets
-            .read(request.provider.key)
+            .read(request.kind.slot(), request.key)
             .map_err(secrets_error)
     }
 
-    /// The third step: under the lock, unless the provider generation moved or AI is off since
-    /// `request` was prepared, calls `start`, which starts the request and returns its abort, and
-    /// stores that abort before anything else can take the lock. `start` may take the world and
-    /// assistant locks; it returns `None` when it started nothing.
-    pub fn start_request(
+    /// The third step: under the lock, unless the request's kind's generation moved or AI is off
+    /// since `request` was prepared, calls `start`, which starts the request and returns its
+    /// abort, and stores that abort with its kind before anything else can take the lock. `start`
+    /// may take the world and assistant locks; it returns `None` when it started nothing.
+    pub fn start_request<P>(
         &self,
-        request: &PreparedRequest,
+        request: &Prepared<P>,
         start: impl FnOnce() -> Option<Abort>,
     ) -> Result<Option<RequestGuard>, Superseded> {
         let id = self.start_request_with(request, |_, _| start())?;
@@ -324,13 +529,13 @@ impl SettingsState {
     }
 
     /// `start_request` with the state under the lock, and the stored request's id.
-    fn start_request_with(
+    fn start_request_with<P>(
         &self,
-        request: &PreparedRequest,
+        request: &Prepared<P>,
         start: impl FnOnce(&mut Inner, u64) -> Option<Abort>,
     ) -> Result<Option<u64>, Superseded> {
         let mut inner = self.lock();
-        if inner.provider_generation != request.generation || !inner.saved.ai {
+        if inner.kind(request.kind).generation != request.generation || !inner.saved.ai {
             return Err(Superseded);
         }
         let id = inner.next_request;
@@ -338,95 +543,119 @@ impl SettingsState {
         let Some(abort) = start(&mut inner, id) else {
             return Ok(None);
         };
-        inner.requests.push((id, abort));
+        inner.requests.push(Running {
+            id,
+            kind: request.kind,
+            abort,
+        });
         Ok(Some(id))
     }
 
-    /// The test's first step, under the lock: AI is on, a provider is saved and no test runs.
-    /// Marks the test as running; `end_test` clears the mark.
-    fn begin_test(&self) -> Result<PendingTest, AppError> {
-        let request = self.prepare_request()?;
+    /// The test's first step, under the lock, after `request`'s: no test of its kind runs. Marks
+    /// the test as running; `end_test` clears the mark.
+    fn begin_test<P>(&self, request: Prepared<P>) -> Result<PendingTest<P>, AppError> {
         let mut inner = self.lock();
-        if inner.test.running {
+        let test = &mut inner.kind_mut(request.kind).test;
+        if test.running {
             return Err(AppError::new(
                 ErrorKind::Conflict,
                 "A connection test is already running.",
             ));
         }
-        inner.test.running = true;
+        test.running = true;
         Ok(PendingTest {
-            generation: inner.test.generation,
+            generation: test.generation,
             request,
         })
     }
 
     /// The test's second step, `read_key`.
-    fn read_test_key(&self, test: &PendingTest) -> Result<Option<String>, TestOutcome> {
-        self.read_key(&test.request).map_err(|error| {
-            TestOutcome::failed(ProviderFailure::KeyUnreadable, Some(error.message))
-        })
+    fn read_test_key<P, O: TestResult>(&self, test: &PendingTest<P>) -> Result<Option<String>, O> {
+        self.read_key(&test.request)
+            .map_err(|error| O::key_unreadable(error.message))
     }
 
-    /// The third step, `start_request`: unless the test was abandoned meanwhile, starts the request
-    /// and keeps the means to abort it before anything else can take the lock.
-    fn start_test_request(
+    /// The third step, `start_request`: unless the test was abandoned meanwhile, starts `run` with
+    /// a copy of what the test tests and the key, and keeps the means to abort it before anything
+    /// else can take the lock.
+    fn start_test_request<P, O, F>(
         &self,
-        test: &PendingTest,
+        test: &PendingTest<P>,
         key: Option<String>,
-        timeout: Duration,
-    ) -> Result<JoinHandle<TestOutcome>, TestOutcome> {
+        run: impl FnOnce(P, Option<String>) -> F,
+    ) -> Result<JoinHandle<O>, O>
+    where
+        P: Clone,
+        O: TestResult,
+        F: Future<Output = O> + Send + 'static,
+    {
         let mut task = None;
         let started = self.start_request_with(&test.request, |inner, id| {
-            if inner.test.generation != test.generation {
+            let run_state = &mut inner.kind_mut(test.request.kind).test;
+            if run_state.generation != test.generation {
                 return None;
             }
-            inner.test.request = Some(id);
-            let SavedProvider {
-                base_url, model, ..
-            } = test.request.provider.clone();
-            let spawned = tauri::async_runtime::spawn(async move {
-                providers::test(&base_url, &model, key.as_deref(), timeout).await
-            });
+            run_state.request = Some(id);
+            let spawned = tauri::async_runtime::spawn(run(test.request.provider.clone(), key));
             let abort = spawned.inner().abort_handle();
             task = Some(spawned);
             Some(Box::new(move || abort.abort()))
         });
         match (started, task) {
             (Ok(Some(_)), Some(task)) => Ok(task),
-            _ => Err(TestOutcome::Cancelled),
+            _ => Err(O::cancelled()),
         }
     }
 
     /// The second and third steps.
-    fn launch_test(
+    fn launch_test<P, O, F>(
         &self,
-        test: &PendingTest,
-        timeout: Duration,
-    ) -> Result<JoinHandle<TestOutcome>, TestOutcome> {
+        test: &PendingTest<P>,
+        run: impl FnOnce(P, Option<String>) -> F,
+    ) -> Result<JoinHandle<O>, O>
+    where
+        P: Clone,
+        O: TestResult,
+        F: Future<Output = O> + Send + 'static,
+    {
         let key = self.read_test_key(test)?;
-        self.start_test_request(test, key, timeout)
+        self.start_test_request(test, key, run)
     }
 
-    /// Ends the test that began with `generation`, however it ended. A test abandoned meanwhile
-    /// is `Cancelled`, whatever its result.
-    fn end_test(
+    /// Ends `kind`'s test that began with `generation`, however it ended. A test abandoned
+    /// meanwhile is cancelled, whatever its result.
+    fn end_test<O: TestResult>(
         &self,
+        kind: ProviderKind,
         generation: u64,
-        result: Result<TestOutcome, AppError>,
-    ) -> Result<TestOutcome, AppError> {
+        result: Result<O, AppError>,
+    ) -> Result<O, AppError> {
         let mut inner = self.lock();
-        inner.test.running = false;
-        if let Some(request) = inner.test.request.take() {
-            inner.requests.retain(|(id, _)| *id != request);
+        let test = &mut inner.kind_mut(kind).test;
+        test.running = false;
+        let request = test.request.take();
+        let abandoned = test.generation != generation;
+        if let Some(request) = request {
+            inner.requests.retain(|running| running.id != request);
         }
-        if inner.test.generation != generation {
-            return Ok(TestOutcome::Cancelled);
+        if abandoned {
+            return Ok(O::cancelled());
         }
         result
     }
 
-    fn cancel_test(&self) {
-        self.lock().cancel_test();
+    fn cancel_test(&self, kind: ProviderKind) {
+        self.lock().cancel_test(kind);
+    }
+
+    /// Abandons a running image test, if any, while AI is on.
+    fn cancel_image_test(&self) -> Result<(), AppError> {
+        let mut inner = self.lock();
+        if !inner.saved.ai {
+            return Err(ai_off());
+        }
+        inner.cancel_test(ProviderKind::Image);
+        Ok(())
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -440,26 +669,48 @@ fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
 }
 
 impl Inner {
-    /// Abandons a running test, and only the test: its request is aborted, and its result will be
-    /// discarded.
-    fn cancel_test(&mut self) {
-        self.test.generation += 1;
-        if let Some(request) = self.test.request.take()
-            && let Some(at) = self.requests.iter().position(|(id, _)| *id == request)
-        {
-            let (_, abort) = self.requests.remove(at);
-            abort();
+    fn kind(&self, kind: ProviderKind) -> &KindState {
+        match kind {
+            ProviderKind::Text => &self.text,
+            ProviderKind::Image => &self.image,
         }
     }
 
-    /// Abandons every provider request: none prepared so far starts, and each running one is
-    /// aborted. A running test's result is discarded.
-    fn supersede_requests(&mut self) {
-        self.provider_generation += 1;
-        self.test.generation += 1;
-        self.test.request = None;
-        for (_, abort) in mem::take(&mut self.requests) {
-            abort();
+    fn kind_mut(&mut self, kind: ProviderKind) -> &mut KindState {
+        match kind {
+            ProviderKind::Text => &mut self.text,
+            ProviderKind::Image => &mut self.image,
+        }
+    }
+
+    /// Abandons `kind`'s running test, and only the test: its request is aborted, and its result
+    /// will be discarded.
+    fn cancel_test(&mut self, kind: ProviderKind) {
+        let test = &mut self.kind_mut(kind).test;
+        test.generation += 1;
+        if let Some(request) = test.request.take()
+            && let Some(at) = self
+                .requests
+                .iter()
+                .position(|running| running.id == request)
+        {
+            (self.requests.remove(at).abort)();
+        }
+    }
+
+    /// Abandons every request of `kind`: none prepared so far starts, and each running one is
+    /// aborted. A running test's result is discarded. The other kind's requests go on.
+    fn supersede_requests(&mut self, kind: ProviderKind) {
+        let state = self.kind_mut(kind);
+        state.generation += 1;
+        state.test.generation += 1;
+        state.test.request = None;
+        let (superseded, kept): (Vec<_>, Vec<_>) = mem::take(&mut self.requests)
+            .into_iter()
+            .partition(|running| running.kind == kind);
+        self.requests = kept;
+        for running in superseded {
+            (running.abort)();
         }
     }
 
@@ -484,7 +735,22 @@ fn to_settings(saved: &Saved) -> Settings {
             key: provider.key,
             host: provider.base_url.host(),
         }),
+        image_provider: saved.image.as_ref().map(|image| ImageProvider {
+            model: image.model.clone(),
+            key: image.key,
+            host: images::HOST.to_owned(),
+        }),
     }
+}
+
+/// A typed key, trimmed, or `None` when none was typed; or why it is refused.
+fn typed_key(key: Option<&str>) -> Result<Option<&str>, &'static str> {
+    let key = key.map(str::trim).filter(|key| !key.is_empty());
+    if key.is_some_and(|key| !key.chars().all(|char| char.is_ascii_graphic())) {
+        // The message never quotes the character, which is part of the key.
+        return Err("The key can hold only letters, digits and ASCII symbols, with no spaces.");
+    }
+    Ok(key)
 }
 
 fn invalid(field: ProviderField, message: impl Into<String>) -> ProviderSaved {
@@ -525,6 +791,46 @@ fn internal() -> AppError {
     )
 }
 
+/// The text provider's connection test.
+async fn test_text(provider: SavedProvider, key: Option<String>, timeout: Duration) -> TestOutcome {
+    providers::test(&provider.base_url, &provider.model, key.as_deref(), timeout).await
+}
+
+/// The image provider's connection test.
+async fn test_image(
+    target: ImageTarget,
+    key: Option<String>,
+    timeout: Duration,
+) -> ImageTestOutcome {
+    // `prepare_image_test` lets only a provider with a stored key be tested.
+    let key = key.unwrap_or_default();
+    images::test(&target.base, &target.model, &key, timeout).await
+}
+
+/// Sends one connection test, prepared by `prepare`, through `run`. Its steps run on the blocking
+/// pool, because a save waiting for a keychain's unlock prompt holds the settings lock.
+async fn run_test<P, O, F>(
+    app: AppHandle,
+    prepare: impl FnOnce(&SettingsState) -> Result<Prepared<P>, AppError> + Send + 'static,
+    run: impl FnOnce(P, Option<String>) -> F + Send + 'static,
+) -> Result<O, AppError>
+where
+    P: Clone + Send + 'static,
+    O: TestResult,
+    F: Future<Output = O> + Send + 'static,
+{
+    let test = blocking(app.clone(), move |state| state.begin_test(prepare(state)?)).await?;
+    let (kind, generation) = (test.request.kind, test.generation);
+    let launched = blocking(app.clone(), move |state| Ok(state.launch_test(&test, run))).await;
+    let result = match launched {
+        // An aborted request ends as cancelled in `end_test`, because its generation moved on.
+        Ok(Ok(task)) => task.await.map_err(|_| internal()),
+        Ok(Err(outcome)) => Ok(outcome),
+        Err(error) => Err(error),
+    };
+    blocking(app, move |state| state.end_test(kind, generation, result)).await
+}
+
 #[tauri::command]
 pub async fn settings_get(app: AppHandle) -> Result<Settings, AppError> {
     blocking(app, |state| Ok(state.get())).await
@@ -554,33 +860,57 @@ pub async fn provider_key_remove(app: AppHandle) -> Result<Settings, AppError> {
     blocking(app, |state| state.remove_key()).await
 }
 
-/// Sends one test request to the saved provider. Its steps run on the blocking pool, because a
-/// save waiting for a keychain's unlock prompt holds the settings lock.
+/// Sends one test request to the saved text provider.
 #[tauri::command]
 pub async fn provider_test(app: AppHandle) -> Result<TestOutcome, AppError> {
-    let test = blocking(app.clone(), |state| state.begin_test()).await?;
-    let generation = test.generation;
-    let launched = blocking(app.clone(), move |state| {
-        Ok(state.launch_test(&test, providers::TIMEOUT))
+    run_test(app, SettingsState::prepare_request, |provider, key| {
+        test_text(provider, key, providers::TIMEOUT)
     })
-    .await;
-    let result = match launched {
-        // An aborted request ends as `Cancelled` in `end_test`, because its generation moved on.
-        Ok(Ok(task)) => task.await.map_err(|_| internal()),
-        Ok(Err(outcome)) => Ok(outcome),
-        Err(error) => Err(error),
-    };
-    blocking(app, move |state| state.end_test(generation, result)).await
+    .await
 }
 
-/// Abandons a running test, if any.
+/// Abandons a running text provider test, if any.
 #[tauri::command]
 pub async fn provider_test_cancel(app: AppHandle) -> Result<(), AppError> {
     blocking(app, |state| {
-        state.cancel_test();
+        state.cancel_test(ProviderKind::Text);
         Ok(())
     })
     .await
+}
+
+#[tauri::command]
+pub async fn image_provider_save(
+    app: AppHandle,
+    model: String,
+    key: Option<String>,
+    key_file: bool,
+) -> Result<ProviderSaved, AppError> {
+    blocking(app, move |state| {
+        state.save_image_provider(&model, key.as_deref(), key_file)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn image_provider_key_remove(app: AppHandle) -> Result<Settings, AppError> {
+    blocking(app, |state| state.remove_image_key()).await
+}
+
+/// Asks OpenRouter whether it accepts the saved image key and lists the saved model, without
+/// generating an image.
+#[tauri::command]
+pub async fn image_provider_test(app: AppHandle) -> Result<ImageTestOutcome, AppError> {
+    run_test(app, SettingsState::prepare_image_test, |target, key| {
+        test_image(target, key, providers::TIMEOUT)
+    })
+    .await
+}
+
+/// Abandons a running image provider test, if any.
+#[tauri::command]
+pub async fn image_provider_test_cancel(app: AppHandle) -> Result<(), AppError> {
+    blocking(app, |state| state.cancel_image_test()).await
 }
 
 #[cfg(test)]
@@ -646,7 +976,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(fixture.state.get()).unwrap(),
-            json!({ "ai": true, "textProvider": null })
+            json!({ "ai": true, "textProvider": null, "imageProvider": null })
         );
     }
 
@@ -736,6 +1066,7 @@ mod tests {
                         "key": "keychain",
                         "host": "openrouter.ai",
                     },
+                    "imageProvider": null,
                 },
             })
         );
@@ -888,14 +1219,38 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+    type TextTest = PendingTest<SavedProvider>;
+
+    /// The text test's steps as `provider_test` runs them.
+    impl SettingsState {
+        fn begin_text_test(&self) -> Result<TextTest, AppError> {
+            self.begin_test(self.prepare_request()?)
+        }
+
+        fn launch_text_test(
+            &self,
+            test: &TextTest,
+        ) -> Result<JoinHandle<TestOutcome>, TestOutcome> {
+            self.launch_test(test, |provider, key| test_text(provider, key, TEST_TIMEOUT))
+        }
+
+        fn end_text_test(
+            &self,
+            generation: u64,
+            result: Result<TestOutcome, AppError>,
+        ) -> Result<TestOutcome, AppError> {
+            self.end_test(ProviderKind::Text, generation, result)
+        }
+    }
+
     /// The steps `provider_test` runs, without Tauri's blocking pool.
     fn run_test(state: &SettingsState) -> Result<TestOutcome, AppError> {
-        let test = state.begin_test()?;
-        let result = match state.launch_test(&test, TEST_TIMEOUT) {
+        let test = state.begin_text_test()?;
+        let result = match state.launch_text_test(&test) {
             Ok(task) => block_on(task).map_err(|_| internal()),
             Err(outcome) => Ok(outcome),
         };
-        state.end_test(test.generation, result)
+        state.end_text_test(test.generation, result)
     }
 
     /// A fixture whose provider, with a key in the keychain, is `server`.
@@ -941,37 +1296,36 @@ mod tests {
     fn a_test_is_refused_while_ai_is_off_without_a_provider_and_while_one_runs() {
         let fixture = Fixture::new();
         assert_eq!(
-            fixture.state.begin_test().err().unwrap().kind,
+            fixture.state.begin_text_test().err().unwrap().kind,
             ErrorKind::NotFound
         );
 
         let server = Server::silent();
         let fixture = saved_at(&server);
         // The first test is still reading its key.
-        let first = fixture.state.begin_test().unwrap();
+        let first = fixture.state.begin_text_test().unwrap();
         assert_eq!(
-            fixture.state.begin_test().err().unwrap().kind,
+            fixture.state.begin_text_test().err().unwrap().kind,
             ErrorKind::Conflict
         );
         // Its request is running.
-        let task = fixture
-            .state
-            .launch_test(&first, TEST_TIMEOUT)
-            .ok()
-            .unwrap();
+        let task = fixture.state.launch_text_test(&first).ok().unwrap();
         assert_eq!(
-            fixture.state.begin_test().err().unwrap().kind,
+            fixture.state.begin_text_test().err().unwrap().kind,
             ErrorKind::Conflict
         );
 
         fixture.state.set_ai(false).unwrap();
         let result = block_on(task).map_err(|_| internal());
         assert_eq!(
-            fixture.state.end_test(first.generation, result).unwrap(),
+            fixture
+                .state
+                .end_text_test(first.generation, result)
+                .unwrap(),
             TestOutcome::Cancelled
         );
         assert_eq!(
-            fixture.state.begin_test().err().unwrap().kind,
+            fixture.state.begin_text_test().err().unwrap().kind,
             ErrorKind::AiOff
         );
     }
@@ -981,12 +1335,12 @@ mod tests {
         for name in ["cancel", "save", "AI off"] {
             let server = Server::silent();
             let fixture = saved_at(&server);
-            let test = fixture.state.begin_test().unwrap();
-            let task = fixture.state.launch_test(&test, TEST_TIMEOUT).ok().unwrap();
+            let test = fixture.state.begin_text_test().unwrap();
+            let task = fixture.state.launch_text_test(&test).ok().unwrap();
             wait_for_request(&server);
 
             match name {
-                "cancel" => fixture.state.cancel_test(),
+                "cancel" => fixture.state.cancel_test(ProviderKind::Text),
                 "save" => drop(fixture.save("https://example.com/v1", None).unwrap()),
                 _ => drop(fixture.state.set_ai(false).unwrap()),
             }
@@ -995,11 +1349,14 @@ mod tests {
             let result = block_on(task).map_err(|_| internal());
             assert!(result.is_err(), "{name}");
             assert_eq!(
-                fixture.state.end_test(test.generation, result).unwrap(),
+                fixture
+                    .state
+                    .end_text_test(test.generation, result)
+                    .unwrap(),
                 TestOutcome::Cancelled,
                 "{name}"
             );
-            assert!(!fixture.state.lock().test.running, "{name}");
+            assert!(!fixture.state.lock().text.test.running, "{name}");
         }
     }
 
@@ -1007,17 +1364,24 @@ mod tests {
     fn a_test_cancelled_after_reading_its_key_sends_nothing() {
         let server = Server::answering(json_answer("200 OK", CHAT_REPLY));
         let fixture = saved_at(&server);
-        let test = fixture.state.begin_test().unwrap();
-        let key = fixture.state.read_test_key(&test).unwrap();
+        let test = fixture.state.begin_text_test().unwrap();
+        let key = fixture
+            .state
+            .read_test_key::<_, TestOutcome>(&test)
+            .unwrap();
 
-        fixture.state.cancel_test();
+        fixture.state.cancel_test(ProviderKind::Text);
 
-        let started = fixture.state.start_test_request(&test, key, TEST_TIMEOUT);
+        let started = fixture
+            .state
+            .start_test_request(&test, key, |provider, key| {
+                test_text(provider, key, TEST_TIMEOUT)
+            });
         assert_eq!(started.err(), Some(TestOutcome::Cancelled));
         assert_eq!(
             fixture
                 .state
-                .end_test(test.generation, Ok(TestOutcome::Cancelled))
+                .end_text_test(test.generation, Ok(TestOutcome::Cancelled))
                 .unwrap(),
             TestOutcome::Cancelled
         );
@@ -1044,13 +1408,13 @@ mod tests {
         };
         assert!(detail.contains("locked or refused"), "{detail}");
         assert!(server.requests().is_empty());
-        assert!(!fixture.state.lock().test.running);
+        assert!(!fixture.state.lock().text.test.running);
     }
 
     /// Starts a request whose abort counts its calls in `aborted`.
-    fn start_counted(
+    fn start_counted<P>(
         state: &SettingsState,
-        request: &PreparedRequest,
+        request: &Prepared<P>,
         aborted: &Arc<AtomicUsize>,
     ) -> Result<Option<RequestGuard>, Superseded> {
         let aborted = Arc::clone(aborted);
@@ -1109,15 +1473,342 @@ mod tests {
         let answer = fixture.state.prepare_request().unwrap();
         let aborted = Arc::new(AtomicUsize::new(0));
         let _guard = start_counted(&fixture.state, &answer, &aborted).unwrap();
-        let test = fixture.state.begin_test().unwrap();
-        let task = fixture.state.launch_test(&test, TEST_TIMEOUT).ok().unwrap();
+        let test = fixture.state.begin_text_test().unwrap();
+        let task = fixture.state.launch_text_test(&test).ok().unwrap();
 
-        fixture.state.cancel_test();
+        fixture.state.cancel_test(ProviderKind::Text);
 
         assert!(block_on(task).is_err());
         assert_eq!(aborted.load(Ordering::SeqCst), 0);
         // The provider generation did not move, so an answer prepared before still starts.
         let started = start_counted(&fixture.state, &answer, &aborted).unwrap();
         assert!(started.is_some());
+    }
+
+    const IMAGE_MODEL: &str = "google/gemini-2.5-flash-image";
+    const IMAGE_KEY: &str = "sk-or-image-0123456789";
+
+    type ImageTest = PendingTest<ImageTarget>;
+
+    /// The image test's steps as `image_provider_test` runs them.
+    impl SettingsState {
+        fn begin_image_test(&self) -> Result<ImageTest, AppError> {
+            self.begin_test(self.prepare_image_test()?)
+        }
+
+        fn launch_image_test(
+            &self,
+            test: &ImageTest,
+        ) -> Result<JoinHandle<ImageTestOutcome>, ImageTestOutcome> {
+            self.launch_test(test, |target, key| test_image(target, key, TEST_TIMEOUT))
+        }
+    }
+
+    fn run_image_test(state: &SettingsState) -> Result<ImageTestOutcome, AppError> {
+        let test = state.begin_image_test()?;
+        let result = match state.launch_image_test(&test) {
+            Ok(task) => block_on(task).map_err(|_| internal()),
+            Err(outcome) => Ok(outcome),
+        };
+        state.end_test(ProviderKind::Image, test.generation, result)
+    }
+
+    impl Fixture {
+        fn save_image(&self, key: Option<&str>) -> Result<ProviderSaved, AppError> {
+            self.state.save_image_provider(IMAGE_MODEL, key, false)
+        }
+    }
+
+    /// A fixture with a text provider and an image provider, each with a key in the keychain,
+    /// whose requests both go to `server`.
+    fn both_at(server: &Server) -> Fixture {
+        let mut fixture = saved_at(server);
+        fixture.state.image_base = format!("http://{}/api/v1", server.address());
+        fixture.save_image(Some(IMAGE_KEY)).unwrap();
+        fixture
+    }
+
+    #[test]
+    fn the_image_provider_keeps_its_own_key_and_leaves_the_text_provider_alone() {
+        let fixture = Fixture::new();
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+
+        let saved = fixture
+            .state
+            .save_image_provider(
+                &format!(" {IMAGE_MODEL}\n"),
+                Some(&format!(" {IMAGE_KEY} ")),
+                false,
+            )
+            .unwrap();
+
+        let ProviderSaved::Saved { settings } = saved else {
+            panic!("expected saved, got {saved:?}");
+        };
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["imageProvider"],
+            json!({ "model": IMAGE_MODEL, "key": "keychain", "host": "openrouter.ai" })
+        );
+        assert_eq!(settings.text_provider.unwrap().key, KeyStorage::Keychain);
+        assert_eq!(
+            fixture.keychain.password_of(KeySlot::Image).unwrap(),
+            IMAGE_KEY
+        );
+        assert_eq!(fixture.keychain.password().unwrap(), KEY);
+        let text = fixture.file_text();
+        assert!(text.contains(IMAGE_MODEL), "{text}");
+        assert!(!text.contains(IMAGE_KEY) && !text.contains(KEY));
+
+        // Saved again without a key, the stored one stays.
+        let saved = fixture.save_image(None).unwrap();
+        let ProviderSaved::Saved { settings } = saved else {
+            panic!("expected saved, got {saved:?}");
+        };
+        assert_eq!(settings.image_provider.unwrap().key, KeyStorage::Keychain);
+        // And a text save keeps the image provider.
+        fixture.save(BASE_URL, None).unwrap();
+        assert!(fixture.state.get().image_provider.is_some());
+    }
+
+    #[test]
+    fn an_image_save_needs_a_model_and_a_key_unless_one_is_stored() {
+        let fixture = Fixture::new();
+        let cases = [
+            (
+                " ",
+                Some(IMAGE_KEY),
+                ProviderField::Model,
+                "Enter the model's ID.",
+            ),
+            (IMAGE_MODEL, None, ProviderField::Key, "Enter the API key."),
+            (
+                IMAGE_MODEL,
+                Some("  "),
+                ProviderField::Key,
+                "Enter the API key.",
+            ),
+            (
+                IMAGE_MODEL,
+                Some("sk key"),
+                ProviderField::Key,
+                "The key can hold only letters, digits and ASCII symbols, with no spaces.",
+            ),
+        ];
+        for (model, key, field, message) in cases {
+            let saved = fixture
+                .state
+                .save_image_provider(model, key, false)
+                .unwrap();
+
+            assert_eq!(
+                saved,
+                ProviderSaved::Invalid {
+                    field,
+                    message: message.to_owned()
+                },
+                "{model} {key:?}"
+            );
+        }
+        assert!(fixture.keychain.password_of(KeySlot::Image).is_err());
+        assert!(!fixture.file().exists());
+    }
+
+    #[test]
+    fn without_a_keychain_the_image_key_goes_to_the_key_file_only_with_consent() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = SettingsState::with_secrets(
+            Some(folder.path()),
+            MockKeychain::unreachable(Some(folder.path())),
+        );
+
+        let saved = state
+            .save_image_provider(IMAGE_MODEL, Some(IMAGE_KEY), false)
+            .unwrap();
+        assert_eq!(saved, ProviderSaved::NoKeychain);
+        assert_eq!(state.get().image_provider, None);
+
+        let saved = state
+            .save_image_provider(IMAGE_MODEL, Some(IMAGE_KEY), true)
+            .unwrap();
+        let ProviderSaved::Saved { settings } = saved else {
+            panic!("expected saved, got {saved:?}");
+        };
+        assert_eq!(settings.image_provider.unwrap().key, KeyStorage::File);
+        let keys = fs::read_to_string(folder.path().join("keys.json")).unwrap();
+        assert!(keys.contains("imageProvider") && !keys.contains("textProvider"));
+    }
+
+    #[test]
+    fn removing_the_image_key_keeps_the_model_and_the_text_key() {
+        let fixture = Fixture::new();
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+        fixture.save_image(Some(IMAGE_KEY)).unwrap();
+
+        let settings = fixture.state.remove_image_key().unwrap();
+
+        let image = settings.image_provider.unwrap();
+        assert_eq!(
+            (image.model.as_str(), image.key),
+            (IMAGE_MODEL, KeyStorage::None)
+        );
+        assert!(fixture.keychain.password_of(KeySlot::Image).is_err());
+        assert_eq!(fixture.keychain.password().unwrap(), KEY);
+        assert_eq!(
+            fixture.state.begin_image_test().err().unwrap().kind,
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn image_provider_commands_are_refused_while_ai_is_off() {
+        let fixture = Fixture::new();
+        fixture.save_image(Some(IMAGE_KEY)).unwrap();
+        fixture.state.set_ai(false).unwrap();
+
+        let refusals = [
+            fixture.save_image(Some("sk-other")).err(),
+            fixture.state.remove_image_key().err(),
+            fixture.state.begin_image_test().err(),
+            fixture.state.cancel_image_test().err(),
+        ];
+
+        for refusal in refusals {
+            assert_eq!(refusal.map(|error| error.kind), Some(ErrorKind::AiOff));
+        }
+        assert_eq!(
+            fixture.keychain.password_of(KeySlot::Image).unwrap(),
+            IMAGE_KEY
+        );
+    }
+
+    #[test]
+    fn each_provider_s_save_and_key_removal_abort_only_its_own_requests_and_ai_off_aborts_both() {
+        for name in [
+            "image save",
+            "image key removal",
+            "text save",
+            "text key removal",
+            "AI off",
+        ] {
+            let fixture = Fixture::new();
+            fixture.save(BASE_URL, Some(KEY)).unwrap();
+            fixture.save_image(Some(IMAGE_KEY)).unwrap();
+            let text = fixture.state.prepare_request().unwrap();
+            let image = fixture.state.prepare_image_test().unwrap();
+            let text_aborted = Arc::new(AtomicUsize::new(0));
+            let image_aborted = Arc::new(AtomicUsize::new(0));
+            let _text_guard = start_counted(&fixture.state, &text, &text_aborted).unwrap();
+            let _image_guard = start_counted(&fixture.state, &image, &image_aborted).unwrap();
+
+            match name {
+                "image save" => drop(fixture.save_image(None).unwrap()),
+                "image key removal" => drop(fixture.state.remove_image_key().unwrap()),
+                "text save" => drop(fixture.save(BASE_URL, None).unwrap()),
+                "text key removal" => drop(fixture.state.remove_key().unwrap()),
+                _ => drop(fixture.state.set_ai(false).unwrap()),
+            }
+
+            let (text_hit, image_hit) = match name {
+                "image save" | "image key removal" => (false, true),
+                "text save" | "text key removal" => (true, false),
+                _ => (true, true),
+            };
+            assert_eq!(
+                text_aborted.load(Ordering::SeqCst),
+                usize::from(text_hit),
+                "{name}"
+            );
+            assert_eq!(
+                image_aborted.load(Ordering::SeqCst),
+                usize::from(image_hit),
+                "{name}"
+            );
+            // A request prepared before its own kind was superseded can no longer start.
+            let text_again = start_counted(&fixture.state, &text, &text_aborted);
+            let image_again = start_counted(&fixture.state, &image, &image_aborted);
+            assert_eq!(text_again.is_err(), text_hit, "{name}");
+            assert_eq!(image_again.is_err(), image_hit, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_image_test_sends_the_image_key_to_the_image_api_only() {
+        let server = Server::start(|request| match request.path.as_str() {
+            "/api/v1/key" => Some(json_answer("200 OK", r#"{"data":{}}"#)),
+            "/api/v1/images/models" => Some(json_answer(
+                "200 OK",
+                &json!({ "data": [{ "id": IMAGE_MODEL }] }).to_string(),
+            )),
+            _ => Some(json_answer("404 Not Found", "{}")),
+        });
+        let fixture = both_at(&server);
+
+        assert_eq!(
+            run_image_test(&fixture.state).unwrap(),
+            ImageTestOutcome::Success
+        );
+
+        let requests = server.requests();
+        let paths: Vec<&str> = requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect();
+        assert_eq!(paths, ["/api/v1/key", "/api/v1/images/models"]);
+        for request in &requests {
+            assert_eq!(
+                request.header("authorization"),
+                Some(format!("Bearer {IMAGE_KEY}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn saving_one_provider_cancels_its_own_test_and_not_the_other_s() {
+        for image_saved in [true, false] {
+            let server = Server::silent();
+            let fixture = both_at(&server);
+            let text_test = fixture.state.begin_text_test().unwrap();
+            let image_test = fixture.state.begin_image_test().unwrap();
+            let text_task = fixture.state.launch_text_test(&text_test).ok().unwrap();
+            let image_task = fixture.state.launch_image_test(&image_test).ok().unwrap();
+            let start = Instant::now();
+            while server.requests().len() < 2 {
+                assert!(
+                    start.elapsed() < TEST_TIMEOUT,
+                    "the requests did not arrive"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            let other = match image_saved {
+                true => {
+                    fixture.save_image(None).unwrap();
+                    let result = block_on(image_task).map_err(|_| internal());
+                    let outcome = fixture
+                        .state
+                        .end_test(ProviderKind::Image, image_test.generation, result)
+                        .unwrap();
+                    assert_eq!(outcome, ImageTestOutcome::Cancelled);
+                    ProviderKind::Text
+                }
+                false => {
+                    fixture.save(server.base_url("/v1").as_str(), None).unwrap();
+                    let result = block_on(text_task).map_err(|_| internal());
+                    let outcome = fixture
+                        .state
+                        .end_text_test(text_test.generation, result)
+                        .unwrap();
+                    assert_eq!(outcome, TestOutcome::Cancelled);
+                    ProviderKind::Image
+                }
+            };
+
+            // The other kind's test still runs, with its request registered.
+            let inner = fixture.state.lock();
+            assert!(inner.kind(other).test.running, "{other:?}");
+            assert!(inner.requests.iter().any(|running| running.kind == other));
+            drop(inner);
+            fixture.state.set_ai(false).unwrap();
+        }
     }
 }

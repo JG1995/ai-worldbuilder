@@ -1,6 +1,8 @@
 //! The settings file, `grimoire-data/settings.json`:
-//! `{ "format": 1, "ai": true, "textProvider": { "baseUrl", "model", "key" } | null }`, where `key`
-//! says where the key is stored (`keychain`, `file` or `none`), never the key itself.
+//! `{ "format": 1, "ai": true, "textProvider": { "baseUrl", "model", "key" } | null,
+//! "imageProvider": { "model", "key" } | null }`, where each `key` says where that provider's key
+//! is stored (`keychain`, `file` or `none`), never the key itself. A file without `imageProvider`,
+//! as earlier versions wrote, loads with no image provider.
 //!
 //! A missing or unreadable file, one in another format, or one whose base URL breaks the rules
 //! loads as the defaults (AI on, no provider) and is replaced on the next save.
@@ -22,6 +24,7 @@ const FORMAT: u32 = 1;
 pub struct Saved {
     pub ai: bool,
     pub provider: Option<SavedProvider>,
+    pub image: Option<SavedImageProvider>,
 }
 
 impl Default for Saved {
@@ -29,6 +32,7 @@ impl Default for Saved {
         Self {
             ai: true,
             provider: None,
+            image: None,
         }
     }
 }
@@ -41,12 +45,21 @@ pub struct SavedProvider {
     pub key: KeyStorage,
 }
 
+/// The saved image provider, whose requests always go to OpenRouter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedImageProvider {
+    pub model: String,
+    pub key: KeyStorage,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Document {
     format: u32,
     ai: bool,
     text_provider: Option<StoredProvider>,
+    #[serde(default)]
+    image_provider: Option<SavedImageProvider>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,6 +88,7 @@ pub fn load(file: &Path) -> Saved {
             Some(Saved {
                 ai: document.ai,
                 provider,
+                image: document.image_provider,
             })
         })
         .unwrap_or_default()
@@ -90,6 +104,7 @@ pub fn save(file: &Path, saved: &Saved) -> io::Result<()> {
             model: provider.model.clone(),
             key: provider.key,
         }),
+        image_provider: saved.image.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&document).map_err(io::Error::other)?;
     write_atomically(file, &bytes, false)
@@ -115,6 +130,10 @@ mod tests {
         let saved = Saved {
             ai: false,
             provider: Some(provider()),
+            image: Some(SavedImageProvider {
+                model: "google/gemini-2.5-flash-image".into(),
+                key: KeyStorage::File,
+            }),
         };
 
         save(&file, &saved).unwrap();
@@ -130,9 +149,33 @@ mod tests {
                     "model": "anthropic/claude-sonnet-4.5",
                     "key": "keychain",
                 },
+                "imageProvider": {
+                    "model": "google/gemini-2.5-flash-image",
+                    "key": "file",
+                },
             })
         );
         assert_eq!(load(&file), saved);
+    }
+
+    #[test]
+    fn a_file_without_an_image_provider_loads_with_none() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("settings.json");
+        fs::write(
+            &file,
+            br#"{ "format": 1, "ai": false, "textProvider": { "baseUrl": "https://openrouter.ai/api/v1", "model": "anthropic/claude-sonnet-4.5", "key": "keychain" } }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load(&file),
+            Saved {
+                ai: false,
+                provider: Some(provider()),
+                image: None,
+            }
+        );
     }
 
     #[test]
@@ -157,7 +200,7 @@ mod tests {
         let document: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
         assert_eq!(
             document,
-            json!({ "format": 1, "ai": true, "textProvider": null })
+            json!({ "format": 1, "ai": true, "textProvider": null, "imageProvider": null })
         );
     }
 }

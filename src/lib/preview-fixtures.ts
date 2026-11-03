@@ -819,7 +819,7 @@ let newLocation = previewLocations[0];
 const createdWorlds: Record<string, string[]> = {};
 
 /** The preview's settings, in memory. They hold where a key is stored, never a key. */
-let previewSettings: Settings = { ai: true, textProvider: null };
+let previewSettings: Settings = { ai: true, textProvider: null, imageProvider: null };
 
 function requireAi() {
   if (!previewSettings.ai) throw { kind: "ai_off", message: "AI features are off." };
@@ -872,6 +872,7 @@ function saveProvider(args: InvokeArgs | undefined): ProviderSaved {
   else storage = "none";
   void stopAnswer();
   previewSettings = {
+    ...previewSettings,
     ai: true,
     textProvider: { baseUrl: trimmed, model: model.trim(), key: storage, host: url.host },
   };
