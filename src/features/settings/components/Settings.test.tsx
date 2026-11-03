@@ -3,6 +3,9 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
+  ImageFailure,
+  ImageProvider,
+  ImageTestOutcome,
   ProviderFailure,
   ProviderSaved,
   Settings as SavedSettings,
@@ -30,6 +33,14 @@ const withKey: SavedSettings = {
   imageProvider: null,
 };
 const empty: SavedSettings = { ai: true, textProvider: null, imageProvider: null };
+
+const IMAGE_MODEL = "google/gemini-2.5-flash-image";
+const imageProvider = (key: ImageProvider["key"]): ImageProvider => ({
+  model: IMAGE_MODEL,
+  key,
+  host: "openrouter.ai",
+});
+const withImageKey: SavedSettings = { ...withKey, imageProvider: imageProvider("keychain") };
 const saved = (settings: SavedSettings): ProviderSaved => ({ state: "saved", settings });
 
 const keychainLine = "Stored in the system keychain. Sent only to openrouter.ai.";
@@ -69,12 +80,18 @@ function renderSettings(settings: SavedSettings, handlers: Record<string, Handle
   };
 }
 
-const dialog = () => screen.findByRole("dialog", { name: "Settings" });
-const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
-const save = () => screen.getByRole("button", { name: "Save" });
+type Group = "Text provider" | "Image provider";
 
-function type(name: string, value: string) {
-  fireEvent.change(field(name), { target: { value } });
+const dialog = () => screen.findByRole("dialog", { name: "Settings" });
+const group = (name: Group) => within(screen.getByRole("group", { name }));
+const field = (name: string, inGroup: Group = "Text provider") =>
+  group(inGroup).getByLabelText(name) as HTMLInputElement;
+const button = (name: string, inGroup: Group = "Text provider") =>
+  group(inGroup).getByRole("button", { name });
+const save = (inGroup: Group = "Text provider") => button("Save", inGroup);
+
+function type(name: string, value: string, inGroup: Group = "Text provider") {
+  fireEvent.change(field(name, inGroup), { target: { value } });
 }
 
 /** Records each element scrolled into view; jsdom has no `scrollIntoView` of its own. */
@@ -106,6 +123,7 @@ describe("Settings", () => {
     expect(field("API key")).toHaveAccessibleDescription(keychainLine);
     expect(save()).toBeDisabled();
     expect(screen.getByRole("button", { name: "Remove key" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Image provider" })).toBeInTheDocument();
   });
 
   it("hides the provider when AI is switched off, and keeps the switch when that fails", async () => {
@@ -122,6 +140,7 @@ describe("Settings", () => {
 
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
     expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Image provider" })).not.toBeInTheDocument();
     expect(calls.at(-1)).toEqual({ command: "settings_ai_set", args: { on: false } });
 
     fail = true;
@@ -160,7 +179,7 @@ describe("Settings", () => {
     type("Base URL", BASE_URL);
     type("Model", MODEL);
     type("API key", "sk-secret");
-    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    fireEvent.click(button("Show"));
     expect(field("API key")).toHaveAttribute("type", "text");
     fireEvent.click(save());
 
@@ -302,7 +321,7 @@ describe("Settings", () => {
   it("offers Test connection only for a saved provider without unsaved edits", async () => {
     renderSettings(empty);
     await dialog();
-    const test = screen.getByRole("button", { name: "Test connection" });
+    const test = button("Test connection");
     expect(test).toBeDisabled();
     expect(screen.queryByText(saveFirst)).not.toBeInTheDocument();
 
@@ -318,7 +337,7 @@ describe("Settings", () => {
       provider_test: () => new Promise<TestOutcome>((resolve) => (answer = resolve)),
     });
     await dialog();
-    const test = screen.getByRole("button", { name: "Test connection" });
+    const test = button("Test connection");
     expect(test).toBeEnabled();
 
     fireEvent.click(test);
@@ -339,7 +358,7 @@ describe("Settings", () => {
     const scrolled = stubScrollIntoView();
     renderSettings(withKey, { provider_test: () => ({ state: "connected" }) });
     await dialog();
-    const test = screen.getByRole("button", { name: "Test connection" });
+    const test = button("Test connection");
     test.focus();
 
     fireEvent.click(test);
@@ -379,7 +398,7 @@ describe("Settings", () => {
     });
     await dialog();
 
-    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    fireEvent.click(button("Test connection"));
 
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveTextContent(text);
@@ -390,19 +409,24 @@ describe("Settings", () => {
     );
   });
 
-  it("abandons a running test when it closes", async () => {
-    const { calls, reopen } = renderSettings(withKey, {
+  it("abandons both running tests when it closes", async () => {
+    const { calls, reopen } = renderSettings(withImageKey, {
       provider_test: () => new Promise<TestOutcome>(() => {}),
       provider_test_cancel: () => null,
+      image_provider_test: () => new Promise<ImageTestOutcome>(() => {}),
+      image_provider_test_cancel: () => null,
     });
     await dialog();
-    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
-    await waitFor(() => expect(calls.at(-1)?.command).toBe("provider_test"));
+    fireEvent.click(button("Test connection"));
+    fireEvent.click(button("Test connection", "Image provider"));
+    await waitFor(() => expect(calls.at(-1)?.command).toBe("image_provider_test"));
 
     reopen();
 
     await waitFor(() =>
-      expect(calls.map(({ command }) => command)).toContain("provider_test_cancel"),
+      expect(calls.map(({ command }) => command)).toEqual(
+        expect.arrayContaining(["provider_test_cancel", "image_provider_test_cancel"]),
+      ),
     );
   });
 
@@ -412,7 +436,7 @@ describe("Settings", () => {
       provider_save: () => saved(withKey),
     });
     await dialog();
-    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    fireEvent.click(button("Test connection"));
     await screen.findByRole("status");
 
     type("Model", "another/model");
@@ -432,5 +456,169 @@ describe("Settings", () => {
     await dialog();
     expect(field("Model")).toHaveValue(MODEL);
     expect(field("API key")).toHaveValue("");
+  });
+
+  describe("image provider", () => {
+    const image = "Image provider";
+
+    it("saves the trimmed fields with a secondary Save, empties the key and names openrouter.ai", async () => {
+      const { calls } = renderSettings(withKey, {
+        image_provider_save: () => saved(withImageKey),
+      });
+      await dialog();
+      expect(field("API key", image)).toHaveAccessibleDescription(
+        "No key is stored. Images need an OpenRouter API key.",
+      );
+      // The text provider's Save stays the dialog's one primary button.
+      expect(save(image).className).not.toContain("bg-accent");
+
+      type("Model", `  ${IMAGE_MODEL} `, image);
+      type("API key", " sk-or-secret\n", image);
+      fireEvent.click(save(image));
+
+      await waitFor(() =>
+        expect(field("API key", image)).toHaveAccessibleDescription(keychainLine),
+      );
+      expect(calls.at(-1)).toEqual({
+        command: "image_provider_save",
+        args: { model: IMAGE_MODEL, key: "sk-or-secret", keyFile: false },
+      });
+      expect(field("API key", image)).toHaveValue("");
+      expect(field("API key", image)).toHaveFocus();
+      expect(save(image)).toBeDisabled();
+    });
+
+    it("shows a field's rule under it", async () => {
+      renderSettings(withKey, {
+        image_provider_save: () => ({
+          state: "invalid",
+          field: "model",
+          message: "Enter the model's ID.",
+        }),
+      });
+      await dialog();
+
+      type("API key", "sk-or-secret", image);
+      fireEvent.click(save(image));
+
+      await waitFor(() => expect(field("Model", image)).toBeInvalid());
+      expect(field("Model", image)).toHaveAccessibleDescription(/^Enter the model's ID\./);
+      expect(field("Model")).toBeValid();
+    });
+
+    it("asks before storing the key in a file, and Store in a file stores it there", async () => {
+      const { calls } = renderSettings(withKey, {
+        image_provider_save: ({ keyFile }) =>
+          keyFile
+            ? saved({ ...withKey, imageProvider: imageProvider("file") })
+            : { state: "no_keychain" },
+      });
+      await dialog();
+      type("Model", IMAGE_MODEL, image);
+      type("API key", "sk-or-secret", image);
+
+      fireEvent.click(save(image));
+
+      const warning = await group(image).findByRole("alert");
+      expect(warning).toHaveTextContent(keyFileWarning);
+      fireEvent.click(within(warning).getByRole("button", { name: "Store in a file" }));
+
+      await waitFor(() => expect(field("API key", image)).toHaveAccessibleDescription(fileLine));
+      expect(calls.at(-1)).toEqual({
+        command: "image_provider_save",
+        args: { model: IMAGE_MODEL, key: "sk-or-secret", keyFile: true },
+      });
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(field("API key", image)).toHaveFocus();
+    });
+
+    it("removes only the image key after a confirmation with Cancel focused", async () => {
+      const { calls } = renderSettings(withImageKey, {
+        image_provider_key_remove: () => ({ ...withKey, imageProvider: imageProvider("none") }),
+      });
+      await dialog();
+
+      fireEvent.click(button("Remove key", image));
+      const confirmation = screen.getByRole("dialog", { name: "Remove the image API key?" });
+      expect(within(confirmation).getByRole("button", { name: "Cancel" })).toHaveFocus();
+      fireEvent.click(within(confirmation).getByRole("button", { name: "Remove key" }));
+
+      await waitFor(() =>
+        expect(field("API key", image)).toHaveAccessibleDescription(
+          "No key is stored. Images need an OpenRouter API key.",
+        ),
+      );
+      expect(calls.at(-1)?.command).toBe("image_provider_key_remove");
+      expect(group(image).queryByRole("button", { name: "Remove key" })).not.toBeInTheDocument();
+      expect(button("Test connection", image)).toBeDisabled();
+      expect(field("API key", image)).toHaveFocus();
+      expect(field("API key")).toHaveAccessibleDescription(keychainLine);
+    });
+
+    it("offers Test connection only without unsaved edits, and shows its success", async () => {
+      renderSettings(withImageKey, {
+        image_provider_test: () => ({ state: "success" }),
+      });
+      await dialog();
+      const test = button("Test connection", image);
+
+      type("Model", "another/model", image);
+      expect(test).toBeDisabled();
+      expect(test).toHaveAccessibleDescription(saveFirst);
+      // The text provider has no unsaved edits, so its test stays available.
+      expect(button("Test connection")).toBeEnabled();
+
+      type("Model", IMAGE_MODEL, image);
+      fireEvent.click(test);
+
+      expect(await group(image).findByRole("status")).toHaveTextContent(
+        `The connection works. OpenRouter accepted the key and lists ${IMAGE_MODEL} as an image model.`,
+      );
+    });
+
+    it.each([
+      ["key_refused", "OpenRouter did not accept the API key."],
+      ["no_credit", "The OpenRouter account is out of credit, or the key reached its limit."],
+      ["unknown_model", `${IMAGE_MODEL} is not one of OpenRouter's image models.`],
+      ["rate_limited", "OpenRouter is limiting requests. Wait a moment before trying again."],
+    ] satisfies [ImageFailure, string][])("explains a failed test: %s", async (reason, text) => {
+      renderSettings(withImageKey, {
+        image_provider_test: () => ({
+          state: "failed",
+          reason,
+          detail: null,
+          providerMessage: "Model <b>gone</b> & retired",
+        }),
+      });
+      await dialog();
+
+      fireEvent.click(button("Test connection", image));
+
+      const notice = await group(image).findByRole("alert");
+      expect(notice).toHaveTextContent(text);
+      expect(notice).toHaveTextContent("The provider's message: Model <b>gone</b> & retired");
+      expect(notice.querySelector("b")).toBeNull();
+      expect(notice.querySelector(".icon")).toHaveTextContent(
+        reason === "rate_limited" ? glyphs.warning : glyphs.error,
+      );
+    });
+
+    it("keeps its draft and test result when the text provider is saved", async () => {
+      renderSettings(withImageKey, {
+        image_provider_test: () => ({ state: "success" }),
+        provider_save: () => saved({ ...withImageKey, textProvider: provider("file") }),
+      });
+      await dialog();
+      fireEvent.click(button("Test connection", image));
+      const result = await group(image).findByRole("status");
+      type("API key", "sk-or-unsaved", image);
+
+      type("Model", "another/model");
+      fireEvent.click(save());
+
+      await waitFor(() => expect(field("API key")).toHaveAccessibleDescription(fileLine));
+      expect(result).toBeInTheDocument();
+      expect(field("API key", image)).toHaveValue("sk-or-unsaved");
+    });
   });
 });
