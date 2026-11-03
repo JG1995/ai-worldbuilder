@@ -25,8 +25,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::{AppError, ErrorKind, guard};
 use crate::history::{self, History, HistoryVersion, Kind};
 use crate::index::{
-    self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches, Stamp,
-    TextMatches,
+    self, Backlinks, BuildState, Content, EditorLinks, Index, LinkSuggestions, PageMatches,
+    Properties, Stamp, TextMatches,
 };
 pub(crate) use page::compare;
 pub(crate) use page::{DiffLine, PageText};
@@ -1421,6 +1421,13 @@ pub async fn backlinks_list(
     path: String,
 ) -> Result<Backlinks, AppError> {
     guard(|| state.backlinks(&path))
+}
+
+/// The properties of the frontmatter in `text`, a page's text, for the reading view. It needs no
+/// world: the text is all it reads.
+#[tauri::command]
+pub async fn page_properties(text: String) -> Result<Properties, AppError> {
+    guard(|| Ok(index::properties(&text)))
 }
 
 /// The links in `text`, the editor's text of the page at `path`, or whether the index is still

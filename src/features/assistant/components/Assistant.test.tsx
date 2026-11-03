@@ -1,4 +1,3 @@
-import { EditorView } from "@codemirror/view";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -366,9 +365,10 @@ describe("failures", () => {
 });
 
 describe("answers as references into the world", () => {
-  const text = "See [[Kesh Tor#Shrine]] and [[Nowhere]].";
+  const text =
+    "See [[Kesh Tor#Shrine]] and [[Nowhere]]. ![[shrine.png]] https://example.com **now**";
 
-  /** The core's links of `text`: Kesh Tor resolves, Nowhere does not. */
+  /** The core's links of `text`: Kesh Tor resolves, Nowhere does not, and the image is a file. */
   const keshTorLinks = (): EditorLinks => ({
     state: "ready",
     links: [
@@ -390,16 +390,26 @@ describe("answers as references into the world", () => {
         heading: null,
         block: null,
       },
+      {
+        from: 41,
+        to: 56,
+        state: "attachment",
+        target: "shrine.png",
+        path: null,
+        heading: null,
+        block: null,
+      },
     ],
   });
 
-  /** Puts the cursor in the link written as `written` in `answer`, and presses Alt+Enter. */
-  function follow(answer: HTMLElement, written: string) {
-    const view = EditorView.findFromDOM(answer);
-    if (!view) throw new Error("No editor");
-    const at = view.state.doc.toString().indexOf(written) + 2;
-    act(() => view.dispatch({ selection: { anchor: at } }));
-    fireEvent.keyDown(answer, { key: "Enter", altKey: true });
+  /** Clicks the link in `answer` whose shown text is `shown`. */
+  function follow(answer: HTMLElement, shown: string) {
+    const link = [...answer.querySelectorAll(".cm-link, .cm-link-unresolved")].find(
+      (element) => element.textContent === shown,
+    );
+    if (!link) throw new Error(`No link "${shown}"`);
+    // The pointer is on the text, inside the focusable element of a resolved link.
+    fireEvent.mouseDown(link.querySelector("[data-link]") ?? link, { button: 0 });
   }
 
   /** Sends a message whose answer ends with `text`, and returns the answer's editor. */
@@ -409,25 +419,30 @@ describe("answers as references into the world", () => {
     return answers()[0];
   }
 
-  it("marks an answer's links once it ends, and follows only a resolved one, in a new tab", async () => {
+  it("shows an answer in the reading rendering once it ends, and a click follows only a resolved link, in a new tab", async () => {
     const { calls, sends } = mockPendingSends(keshTorLinks);
     const ports = renderAssistant();
 
     const answer = await answered(sends);
 
     await waitFor(() =>
-      expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
+      expect(answer.querySelector(".cm-link")).toHaveTextContent(/^Kesh Tor > Shrine$/),
     );
-    expect(answer.querySelector(".cm-link-unresolved")).toHaveTextContent("[[Nowhere]]");
+    expect(answer.querySelector(".cm-link-unresolved")).toHaveTextContent(/^Nowhere$/);
+    // No syntax shows; the image is its name and the web address plain text.
+    expect(answer).toHaveTextContent(
+      /^See Kesh Tor > Shrine and Nowhere\. shrine\.png https:\/\/example\.com now$/,
+    );
+    expect(answer.querySelectorAll("a, img:not(.cm-widgetBuffer)")).toHaveLength(0);
     expect(calls.filter(({ command }) => command === "assistant_links")).toEqual([
       { command: "assistant_links", args: { text } },
     ]);
-    follow(answer, "[[Kesh Tor");
+    follow(answer, "Kesh Tor > Shrine");
     expect(ports.openPage).toHaveBeenCalledExactlyOnceWith("Places/Kesh Tor.md", {
       newTab: true,
       at: { heading: "Shrine", block: null },
     });
-    follow(answer, "[[Nowhere");
+    follow(answer, "Nowhere");
     expect(ports.openPage).toHaveBeenCalledOnce();
     // Nothing is created: the core is asked only to send, and for links, conversations and proposals.
     expect(new Set(calls.map(({ command }) => command))).toEqual(
@@ -450,7 +465,7 @@ describe("answers as references into the world", () => {
     ports.indexChanged();
 
     await waitFor(() =>
-      expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
+      expect(answer.querySelector(".cm-link")).toHaveTextContent(/^Kesh Tor > Shrine$/),
     );
     expect(asked()).toHaveLength(2);
   });
@@ -536,13 +551,14 @@ describe("saved conversations", () => {
     // The answer's editor can mount just after the question shows.
     const [answer] = await screen.findAllByRole("textbox", { name: "Answer" });
     await waitFor(() =>
-      expect(answer.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shrine]]"),
+      expect(answer.querySelector(".cm-link")).toHaveTextContent(/^Kesh Tor > Shrine$/),
     );
     fireEvent.click(screen.getByRole("button", { name: "Read 1 page" }));
     expect(screen.getByRole("button", { name: "Kesh Tor" })).toBeInTheDocument();
-    const view = EditorView.findFromDOM(answer);
-    act(() => view?.dispatch({ selection: { anchor: 8 } }));
-    fireEvent.keyDown(answer, { key: "Enter", altKey: true });
+    // Enter on the focused link follows it, as in the reading view.
+    const link = answer.querySelector<HTMLElement>("[data-link]");
+    act(() => link?.focus());
+    fireEvent.keyDown(link ?? answer, { key: "Enter" });
     expect(ports.openPage).toHaveBeenCalledWith("Places/Kesh Tor.md", {
       newTab: true,
       at: { heading: "Shrine", block: null },

@@ -209,6 +209,13 @@
   line-height: 1.65;
 }
 
+@utility body-reading {
+  font-family: var(--font-text);
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.6;
+}
+
 @utility assistant {
   font-family: var(--font-text);
   font-size: 14px;
@@ -460,6 +467,55 @@
   width: 100%;
   vertical-align: middle;
   border-top: 1px solid var(--color-divider);
+}
+
+/* The reading view follows a resolved link on a click. */
+.page-editor.cm-editor.page-reading [data-link] {
+  cursor: pointer;
+}
+
+/*
+ * The reading view's properties block (src/ui/properties-block.ts): a label-caps heading that
+ * expands and collapses it, then keys in ui-small text-muted beside values in ui text, nested
+ * values and unreadable frontmatter in mono.
+ */
+.page-editor.cm-editor .cm-properties {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding-bottom: 16px;
+}
+
+.page-editor.cm-editor .cm-properties-heading {
+  @apply label-caps;
+  color: var(--color-text-muted);
+}
+
+.page-editor.cm-editor .cm-properties-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 16px;
+  margin: 0;
+}
+
+.page-editor.cm-editor .cm-properties-list dt {
+  @apply ui-small;
+  color: var(--color-text-muted);
+}
+
+.page-editor.cm-editor .cm-properties-list dd {
+  @apply ui;
+  margin: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.page-editor.cm-editor .cm-properties-list dd.cm-properties-yaml,
+.page-editor.cm-editor .cm-properties-source {
+  @apply mono;
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 /*

@@ -24,6 +24,7 @@ import type {
   PageMatches,
   PageText,
   PageVersion,
+  Properties,
   ProposalCheck,
   ProposalKind,
   ProposalReview,
@@ -518,6 +519,33 @@ function aliasesOf(page: SamplePage) {
     .split(",")
     .map((alias) => alias.trim())
     .filter(Boolean);
+}
+
+/**
+ * The properties of a page's frontmatter from flat `key: value` and `key: [a, b]` lines: enough for
+ * the preview's pages. Any other line answers `source`. The core reads the frontmatter as YAML.
+ */
+function propertiesOf(text: string): Properties {
+  const lines = text.split("\n");
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  if (lines[0]?.trimEnd() !== "---" || end < 0) return { state: "none" };
+  const rows = [];
+  for (const line of lines.slice(1, end)) {
+    if (line.trim() === "") continue;
+    const found = /^([^\s:][^:]*):[ \t]*(.*)$/.exec(line);
+    if (!found) return { state: "source" };
+    const [, key, value] = found;
+    const list = /^\[(.*)\]$/.exec(value.trim());
+    rows.push({
+      key,
+      value: list
+        ? { kind: "list" as const, items: list[1].split(",").map((item) => item.trim()) }
+        : value.trim() === ""
+          ? { kind: "empty" as const }
+          : { kind: "text" as const, text: value.trim() },
+    });
+  }
+  return rows.length === 0 ? { state: "none" } : { state: "rows", rows };
 }
 
 /**
@@ -1434,6 +1462,10 @@ export const previewFixtures: Record<string, unknown> = {
   links_in: (args?: InvokeArgs): EditorLinks => {
     const { path, text } = args as { path: string; text: string };
     return { state: "ready", links: linksOf(requireWorld(), path, text) };
+  },
+  page_properties: (args?: InvokeArgs): Properties => {
+    const { text } = args as { text: string };
+    return propertiesOf(text);
   },
   link_create: (args?: InvokeArgs) => createLinked(args),
   link_suggest: (args?: InvokeArgs) => {

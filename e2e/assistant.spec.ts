@@ -157,7 +157,9 @@ test("an answer streams in, and its disclosure lists the active page and opens i
   await expect(answer(page)).toContainText("The pages I read");
   await expect(pane(page).getByRole("button", { name: "Send" })).toBeVisible();
   await expect(answer(page)).toContainText("Ask about another page to compare them.");
-  await expect(answer(page)).toContainText("[[Campaign overview]]");
+  // The answer shows in the reading rendering once its links are known: no syntax.
+  await expect(answer(page)).toContainText("say this about Campaign overview:");
+  await expect(answer(page)).not.toContainText("[[");
 
   await page.getByRole("treeitem", { name: "Session notes", exact: true }).click();
   await page.getByRole("treeitem", { name: "Session 1", exact: true }).click();
@@ -205,7 +207,7 @@ test("a rate-limited answer shows a warning with Retry, which answers again", as
 
 // The canned answer links [[Brother Ketil]] and [[Kesh Tor]], two pages of the sample world.
 
-test("a page the message links is read, and Ctrl+click on a link in the answer opens its page in a new tab", async ({
+test("a page the message links is read, and a click on a link in the answer opens its page in a new tab", async ({
   page,
 }) => {
   await openWithProvider(page);
@@ -216,8 +218,10 @@ test("a page the message links is read, and Ctrl+click on a link in the answer o
   await expect(pane(page).getByRole("button", { name: "Campaign overview" })).toBeVisible();
   await expect(pane(page).getByRole("button", { name: "Kesh Tor" })).toBeVisible();
 
-  const link = answer(page).locator(".cm-link", { hasText: "[[Kesh Tor]]" });
-  await link.click({ modifiers: ["Control"] });
+  // Its display text, with link styling.
+  const styled = answer(page).locator(".cm-link", { hasText: /^Kesh Tor$/ });
+  await expect(styled).toHaveCSS("text-decoration-line", "underline");
+  await answer(page).getByRole("link", { name: "Kesh Tor", exact: true }).click();
 
   await expect(page.getByRole("tab", { name: "Kesh Tor" })).toHaveAttribute(
     "aria-selected",

@@ -1,10 +1,11 @@
 import { isolateHistory } from "@codemirror/commands";
+import type { EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
-import type { EditorLink, HistoryVersion } from "@/types/api";
+import type { EditorLink, HistoryVersion, Properties } from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import {
@@ -16,12 +17,14 @@ import {
 } from "@/ui/MarkdownEditor";
 import { Notice } from "@/ui/Notice";
 import { PageView } from "@/ui/PageView";
+import { propertiesNeeded, setProperties } from "@/ui/properties-block";
 import {
   backlinksKey,
   backlinksList,
   historyRestore,
   historyUndo,
   linkSuggest,
+  pageProperties,
   pageRead,
   pageRestore,
   pageWrite,
@@ -63,7 +66,43 @@ type PageTabProps = {
   onCreateLink: (from: string, link: EditorLink) => void;
   /** Whether AI is on, which the History view's labels follow; off by default. */
   ai?: boolean;
+  /** Shows the page in the reading view, which never writes; the editing view by default. */
+  reading?: boolean;
 };
+
+/** Whether a text holds nothing but whitespace. */
+function isBlank(doc: Text) {
+  for (const chunk of doc.iter()) {
+    if (/\S/.test(chunk)) return false;
+  }
+  return true;
+}
+
+/**
+ * Keeps the reading view's properties block current in the running editor, which `view` holds
+ * while the page is ready: asked of the core when the reading view shows, and whenever the
+ * editor's frontmatter is one the core has not read, as after an edit or a reload, through the
+ * returned `check`. A failed read shows the frontmatter as typed.
+ */
+function usePageProperties(view: RefObject<EditorView | null> | undefined, reading: boolean) {
+  const asked = useRef<string | null>(null);
+  const check = (state: EditorState) => {
+    const text = propertiesNeeded(state);
+    if (text === null || text === asked.current) return;
+    asked.current = text;
+    const show = (properties: Properties) => {
+      if (asked.current === text) asked.current = null;
+      view?.current?.dispatch({ effects: setProperties(text, properties) });
+    };
+    pageProperties(text).then(show, () => show({ state: "source" }));
+  };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the reading view showing asks.
+  useEffect(() => {
+    const editor = view?.current;
+    if (editor) check(editor.state);
+  }, [view, reading]);
+  return check;
+}
 
 /**
  * The pages that link to the page at `path`, asked of the index again whenever it changes. The
@@ -185,6 +224,7 @@ export function PageTab({
   onOpenPage,
   onCreateLink,
   ai = false,
+  reading = false,
 }: PageTabProps) {
   const page = useWorldStore((store) => store.pages[path]);
   const changingWorld = useWorldStore((store) => store.changingWorld);
@@ -207,6 +247,8 @@ export function PageTab({
   // may be at a backlink's link, scrolls into view once React has settled the mounted editor.
   const editorView = ready ? page.view : undefined;
   const links = usePageLinks(path, editorView);
+  const checkProperties = usePageProperties(editorView, reading);
+  const [blank, setBlank] = useState<boolean | null>(null);
   useEffect(() => {
     if (!focusEditor || !editorView) return;
     createdPageShown();
@@ -317,9 +359,11 @@ export function PageTab({
       return null;
     };
     const hidden = comparing || showingHistory;
+    const showsBlank = reading && (blank ?? isBlank(page.editor.doc));
     return (
       <PageView
         title={title}
+        reading={reading}
         notices={
           notice && (
             <SaveNoticeBar
@@ -362,23 +406,33 @@ export function PageTab({
           <MarkdownEditor
             state={page.editor}
             readOnly={changingWorld || isReadOnlyNotice(notice)}
+            reading={reading}
             autoFocus={focusEditor}
             viewRef={view}
             onChange={(editor) => {
               saver.changed(editor.doc);
               links.changed();
+              setBlank(isBlank(editor.doc));
+              checkProperties(editor);
             }}
             onUnmount={(editor) => setEditor(session, path, editor)}
-            onReplace={links.replaced}
+            onReplace={(editor) => {
+              links.replaced();
+              setBlank(isBlank(editor.doc));
+              checkProperties(editor);
+            }}
             suggest={(query) => linkSuggest(path, query)}
-            onFollow={(link) =>
+            onFollow={(link) => {
+              // The editor follows only resolved links in the reading view, which never writes.
+              if (reading && link.state !== "resolved") return;
               followLink(path, link, view?.current ?? null, {
                 open: (target, at) => onOpenPage(target, { newTab: true, at }),
                 create: (unresolved) => onCreateLink(path, unresolved),
-              })
-            }
+              });
+            }}
           />
         </div>
+        {!hidden && showsBlank && <p className="text-text-muted">This page has no text yet.</p>}
         {!hidden && backlinks}
       </PageView>
     );

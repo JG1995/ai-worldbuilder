@@ -11,20 +11,29 @@ type Alignment = "left" | "center" | "right" | null;
 
 /**
  * Drawn text of a cell from `at`, with its formatting's classes, or a widget a decoration draws
- * in place of the syntax at `at`. Positions are offsets from the start of the table's first line.
+ * in place of the syntax at `at`; `link` is where the focusable link it belongs to starts, in the
+ * reading view. Positions are offsets from the start of the table's first line.
  */
-type Piece = { at: number; text: string; className: string } | { at: number; widget: Decoration };
+type Piece = ({ text: string; className: string } | { widget: Decoration }) & {
+  at: number;
+  link?: number;
+};
 
 /** A cell's place in the text, from its first to its last character, and what it draws. */
 type Cell = { from: number; to: number; pieces: Piece[] };
 
 type Grid = { alignments: Alignment[]; header: Cell[]; body: Cell[][] };
 
-/** Where each drawn text node's first character is, and where each cell's text ends. */
+/**
+ * Where each drawn text node's first character is, where each cell's text ends, and where each
+ * focusable link starts.
+ */
 const textStarts = new WeakMap<Node, number>();
 const cellEnds = new WeakMap<Element, number>();
+const linkStarts = new WeakMap<Element, number>();
 
 function samePiece(a: Piece, b: Piece) {
+  if (a.link !== b.link) return false;
   if ("widget" in a || "widget" in b) {
     return "widget" in a && "widget" in b && a.at === b.at && a.widget.eq(b.widget);
   }
@@ -66,6 +75,18 @@ export function gridPosition(view: EditorView, event: MouseEvent): number | null
   const caret = caretAt(event.clientX, event.clientY);
   const textStart = caret && cell.contains(caret.node) ? textStarts.get(caret.node) : undefined;
   return start + (caret && textStart !== undefined ? textStart + caret.offset : end);
+}
+
+/**
+ * Where the link that a focusable element the reading view draws, in a line or in a grid's cell,
+ * starts in the text. A grid keeps its links' places from its table's start, because an edit
+ * elsewhere moves a grid without drawing it again.
+ */
+export function linkStart(view: EditorView, link: Element): number | null {
+  const wrapper = link.closest(".cm-table-wrap");
+  if (!wrapper) return Number(link.getAttribute("data-link"));
+  const start = linkStarts.get(link);
+  return start === undefined ? null : view.posAtDOM(wrapper) + start;
 }
 
 /** A table drawn as a grid in place of its lines, built from text and elements, never HTML. */
@@ -115,10 +136,29 @@ class GridWidget extends WidgetType {
       const alignment = this.grid.alignments[index];
       if (alignment) element.className = `cm-align-${alignment}`;
       cellEnds.set(element, cell.to);
-      for (const piece of cell.pieces) element.append(this.draw(view, piece));
+      // The pieces of one link go in one element, which the reading view's Tab reaches once.
+      let link: HTMLElement | null = null;
+      for (const piece of cell.pieces) {
+        if (piece.link === undefined) link = null;
+        else if (!link || linkStarts.get(link) !== piece.link) {
+          link = this.link(piece.link);
+          element.append(link);
+        }
+        (link ?? element).append(this.draw(view, piece));
+      }
       row.append(element);
     });
     return row;
+  }
+
+  /** A focusable link of the reading view, as the lines draw it, starting at `start`. */
+  private link(start: number) {
+    const link = document.createElement("span");
+    link.setAttribute("tabindex", "0");
+    link.setAttribute("role", "link");
+    link.setAttribute("data-link", "");
+    linkStarts.set(link, start);
+    return link;
   }
 
   private draw(view: EditorView, piece: Piece): Node {
@@ -193,14 +233,24 @@ function gridOf(
     }
     const { from, to } = cell.node;
     const pieces: Piece[] = [];
+    /** Where the focusable link that `active` marks starts, if it marks one. */
+    const linkOf = (active: readonly Decoration[]) => {
+      const link = active.find((mark) => mark.spec.link !== undefined)?.spec.link;
+      return link === undefined ? {} : { link: link - start };
+    };
     RangeSet.spans([Decoration.set(decorate(cell.node), true), links], from, to, {
       span: (spanFrom, spanTo, active) => {
         if (spanFrom === spanTo) return;
-        const className = active.map((mark) => mark.spec.class).join(" ");
-        pieces.push({ at: spanFrom - start, text: state.sliceDoc(spanFrom, spanTo), className });
+        const className = active
+          .flatMap((mark) => (mark.spec.class ? [mark.spec.class] : []))
+          .join(" ");
+        const text = state.sliceDoc(spanFrom, spanTo);
+        pieces.push({ at: spanFrom - start, text, className, ...linkOf(active) });
       },
-      point: (pointFrom, _pointTo, decoration) => {
-        if (decoration.spec.widget) pieces.push({ at: pointFrom - start, widget: decoration });
+      point: (pointFrom, _pointTo, decoration, active) => {
+        if (decoration.spec.widget) {
+          pieces.push({ at: pointFrom - start, widget: decoration, ...linkOf(active) });
+        }
       },
     });
     return { from: from - start, to: to - start, pieces };

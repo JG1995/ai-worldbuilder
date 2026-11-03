@@ -11,6 +11,7 @@
 
 mod database;
 mod parse;
+mod properties;
 mod resolve;
 mod search;
 mod suggest;
@@ -25,6 +26,7 @@ use crate::order::{natural_order, path_order};
 pub use database::file;
 pub(crate) use parse::is_attachment;
 pub use parse::{Parsed, parse};
+pub use properties::{Properties, properties};
 use resolve::Table;
 pub use resolve::creation_path;
 pub use search::{PageMatches, TextMatches};

@@ -9,6 +9,11 @@ type PageViewProps = {
   notices?: ReactNode;
   /** After 300ms of loading, the title shows with a "Loading…" line in place of the body. */
   loading?: boolean;
+  /**
+   * The reading view: the body in `body-reading`, and the scrolling region a tab stop named by the
+   * title, so the keys that scroll it work once it has focus. Off by default.
+   */
+  reading?: boolean;
   children?: ReactNode;
 };
 
@@ -17,7 +22,13 @@ type PageViewProps = {
  * body in a centred column of at most the reading measure. Its side padding narrows when the pane,
  * not the window, is under 960px wide.
  */
-export function PageView({ title, notices, loading = false, children }: PageViewProps) {
+export function PageView({
+  title,
+  notices,
+  loading = false,
+  reading = false,
+  children,
+}: PageViewProps) {
   const [slow, setSlow] = useState(false);
 
   useEffect(() => {
@@ -29,12 +40,16 @@ export function PageView({ title, notices, loading = false, children }: PageView
     };
   }, [loading]);
 
+  // In the reading view the page is a tab stop, so the keys that scroll it work once it has focus.
+  const focusable = reading ? { role: "region", tabIndex: 0, "aria-label": title } : {};
   return (
-    <div className="@container h-full overflow-y-auto bg-page">
+    <div className="@container h-full overflow-y-auto bg-page" {...focusable}>
       {notices && <div className="flex flex-col">{notices}</div>}
       <div className="px-page-x-narrow pt-3xl pb-12 @wide:px-page-x">
         {(!loading || slow) && (
-          <article className="body mx-auto flex max-w-reading-measure flex-col gap-6 text-text">
+          <article
+            className={`${reading ? "body-reading" : "body"} mx-auto flex max-w-reading-measure flex-col gap-6 text-text`}
+          >
             <h1 className="page-title break-words">{title}</h1>
             {loading ? <p className="text-text-muted">Loading…</p> : children}
           </article>

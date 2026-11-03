@@ -5,6 +5,7 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import {
   Compartment,
   EditorState,
+  type Extension,
   Facet,
   RangeSetBuilder,
   StateField,
@@ -16,9 +17,10 @@ import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "rea
 import type { EditorLink } from "@/types/api";
 import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
 import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
-import { livePreview } from "./live-preview";
+import { livePreview, previewView } from "./live-preview";
 import { pageSyntax } from "./markdown-syntax";
-import { gridPosition, tableGrid } from "./table-grid";
+import { propertiesBlock } from "./properties-block";
+import { gridPosition, linkStart, tableGrid } from "./table-grid";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 const monoClass = "cm-mono";
@@ -59,10 +61,37 @@ function styleNonce() {
 /** The function the link suggestion list asks, which `MarkdownEditor` sets from its `suggest`. */
 const suggestion = new Compartment();
 
-const readOnlyMode = new Compartment();
-function setReadOnly(editor: EditorView, readOnly: boolean) {
-  if (editor.state.readOnly === readOnly) return;
-  editor.dispatch({ effects: readOnlyMode.reconfigure(EditorState.readOnly.of(readOnly)) });
+/**
+ * Whether the editor is editable and read-only, and which view the live preview shows, together:
+ * the reading view is never editable and always read-only, whatever order they were set in. It
+ * comes first among a state's extensions, so no other provider of those facets wins over it.
+ */
+const mode = new Compartment();
+const modes = new Map<string, Extension>();
+
+function modeOf(reading: boolean, readOnly: boolean) {
+  const key = `${reading} ${readOnly}`;
+  let extension = modes.get(key);
+  if (!extension) {
+    extension = [
+      EditorView.editable.of(!reading),
+      EditorState.readOnly.of(reading || readOnly),
+      previewView.of(reading ? "reading" : "editing"),
+      reading ? EditorView.editorAttributes.of({ class: "page-reading" }) : [],
+    ];
+    modes.set(key, extension);
+  }
+  return extension;
+}
+
+function setMode(editor: EditorView, extension: Extension) {
+  if (mode.get(editor.state) !== extension) {
+    editor.dispatch({ effects: mode.reconfigure(extension) });
+  }
+}
+
+function isReading(state: EditorState) {
+  return state.facet(previewView) === "reading";
 }
 
 /** Whether a state shows the live preview, so that a reload of it does too. */
@@ -89,9 +118,10 @@ export function createPageState(
     doc: text,
     selection: { anchor: cursor },
     extensions: [
+      mode.of(modeOf(false, false)),
       markdown({ extensions: pageSyntax }),
       previewOn.of(preview),
-      preview ? [livePreview, tableGrid] : [],
+      preview ? [livePreview, tableGrid, propertiesBlock] : [],
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
@@ -102,7 +132,6 @@ export function createPageState(
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.editorAttributes.of({ class: "page-editor" }),
       EditorView.contentAttributes.of({ "aria-label": label }),
-      readOnlyMode.of(EditorState.readOnly.of(false)),
       // Every editor carries it, because CodeMirror creates its element for the first one to mount.
       EditorView.cspNonce.of(styleNonce()),
     ],
@@ -128,28 +157,48 @@ export function reloadedState(previous: EditorState, text: string, label: string
 const replaceListeners = new WeakMap<EditorView, (state: EditorState) => void>();
 
 /**
- * Puts `state` in the running editor in place of its own, keeping whether it is read-only and the
- * function its link suggestions ask, and reports it through the editor's `onReplace`.
+ * Puts `state` in the running editor in place of its own, keeping its view, whether it is
+ * read-only and the function its link suggestions ask, and reports it through the editor's
+ * `onReplace`.
  */
 export function replaceState(editor: EditorView, state: EditorState) {
-  const readOnly = editor.state.readOnly;
+  const shown = mode.get(editor.state);
   const suggest = suggestion.get(editor.state);
   editor.setState(state);
-  setReadOnly(editor, readOnly);
+  if (shown) setMode(editor, shown);
   if (suggest) editor.dispatch({ effects: suggestion.reconfigure(suggest) });
   replaceListeners.get(editor)?.(editor.state);
 }
 
-/** Whether a mouse down asks to follow a link: the primary button with Ctrl or Cmd alone. */
-function isFollowClick(event: MouseEvent) {
-  return event.button === 0 && event.ctrlKey !== event.metaKey && !event.altKey && !event.shiftKey;
+/**
+ * Whether a mouse down asks to follow a link: the primary button with Ctrl or Cmd alone, or in the
+ * reading view with neither too.
+ */
+function isFollowClick(event: MouseEvent, reading: boolean) {
+  const plain = !event.ctrlKey && !event.metaKey;
+  return (
+    event.button === 0 &&
+    (event.ctrlKey !== event.metaKey || (reading && plain)) &&
+    !event.altKey &&
+    !event.shiftKey
+  );
 }
 
-/** Whether a key press asks to follow a link: Alt/Option+Enter alone. */
-function isFollowKey(event: KeyboardEvent) {
+/** Whether a key press asks to follow a link: Alt/Option+Enter alone, or Enter in the reading view. */
+function isFollowKey(event: KeyboardEvent, reading: boolean) {
   return (
-    event.key === "Enter" && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+    event.key === "Enter" &&
+    (event.altKey || reading) &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey
   );
+}
+
+/** The focusable link element of the reading view that `target` is in, in `editor`'s text. */
+function linkElement(editor: EditorView, target: EventTarget | null) {
+  const element = target instanceof Element ? target.closest("[data-link]") : null;
+  return element && editor.contentDOM.contains(element) ? element : null;
 }
 
 /** Replaces the whole document with `text` as one step that undo reverts on its own. */
@@ -164,6 +213,11 @@ type MarkdownEditorProps = {
   /** From `createPageState`. The editor starts from it when it mounts. */
   state: EditorState;
   readOnly: boolean;
+  /**
+   * Shows the reading view: read-only, not editable, with no syntax and with focusable links. It
+   * needs a state created with the live preview. Off by default.
+   */
+  reading?: boolean;
   /** Puts the cursor in the editor when it mounts. Later changes do nothing. */
   autoFocus?: boolean;
   /** Holds the running editor while it is mounted, for changes such as `replaceDocument`. */
@@ -175,8 +229,9 @@ type MarkdownEditorProps = {
   /** Receives the state that `replaceState` put in the editor, as after a reload. */
   onReplace?: (state: EditorState) => void;
   /**
-   * Receives a link to follow: Ctrl/Cmd+click on it, or Alt/Option+Enter with the cursor in it.
-   * Either then does nothing else; elsewhere both do what they always do.
+   * Receives a link to follow: Ctrl/Cmd+click on it, or Alt/Option+Enter with the cursor in it. In
+   * the reading view, a click or Enter on a resolved link, and only a resolved one. Each then does
+   * nothing else; elsewhere they do what they always do.
    */
   onFollow?: (link: EditorLink) => void;
   /**
@@ -188,11 +243,12 @@ type MarkdownEditorProps = {
 
 /**
  * A CodeMirror editor for one page's Markdown: plain, with the syntax visible, or with the live
- * preview when its state was created with it.
+ * preview when its state was created with it, in the editing or the reading view.
  */
 export function MarkdownEditor({
   state,
   readOnly,
+  reading = false,
   autoFocus = false,
   viewRef,
   onChange,
@@ -211,9 +267,8 @@ export function MarkdownEditor({
   const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const reportReplace = useEffectEvent((next: EditorState) => onReplace?.(next));
-  /** Follows the link at `position`, if there is one, and says whether it did. */
-  const follow = useEffectEvent((editor: EditorView, position: number | null) => {
-    const link = position === null ? null : linkAt(editor.state, position);
+  /** Follows `link`, if there is one, and says whether it did. */
+  const follow = useEffectEvent((link: EditorLink | null) => {
     if (!link || !onFollow) return false;
     onFollow(link);
     return true;
@@ -223,7 +278,9 @@ export function MarkdownEditor({
     if (!suggest) throw new Error("The editor no longer suggests pages.");
     return suggest(query);
   });
-  const applyReadOnly = useEffectEvent((editor: EditorView) => setReadOnly(editor, readOnly));
+  const applyMode = useEffectEvent((editor: EditorView) =>
+    setMode(editor, modeOf(reading, readOnly)),
+  );
   const share = useEffectEvent((editor: EditorView | null) => {
     if (viewRef) viewRef.current = editor;
   });
@@ -239,24 +296,41 @@ export function MarkdownEditor({
     });
     view.current = editor;
     share(editor);
-    applyReadOnly(editor);
+    applyMode(editor);
     if (suggestsAtMount) {
       const ask: Suggest = async (query) => askSuggest(query);
       editor.dispatch({ effects: suggestion.reconfigure(suggestFacet.of(ask)) });
     }
     replaceListeners.set(editor, reportReplace);
+    // The reading view follows only the resolved links it draws as focusable, by where they start.
+    const readingLink = (target: EventTarget | null) => {
+      const element = linkElement(editor, target);
+      const start = element && linkStart(editor, element);
+      const links = editor.state.field(editorLinks, false)?.links ?? [];
+      const link = links.find((link) => link.from === start);
+      return link?.state === "resolved" ? link : null;
+    };
     // In the capture phase, before CodeMirror's own handlers, which leave alone an event whose
     // default is prevented: a click that follows a link does not also move the cursor.
     const followClick = (event: MouseEvent) => {
-      if (!isFollowClick(event)) return;
-      const position =
-        gridPosition(editor, event) ?? editor.posAtCoords({ x: event.clientX, y: event.clientY });
-      if (follow(editor, position)) event.preventDefault();
+      const reading = isReading(editor.state);
+      if (!isFollowClick(event, reading)) return;
+      let link: EditorLink | null;
+      if (reading) link = readingLink(event.target);
+      else {
+        const position =
+          gridPosition(editor, event) ?? editor.posAtCoords({ x: event.clientX, y: event.clientY });
+        link = position === null ? null : linkAt(editor.state, position);
+      }
+      if (follow(link)) event.preventDefault();
     };
     const followKey = (event: KeyboardEvent) => {
-      if (isFollowKey(event) && follow(editor, editor.state.selection.main.head)) {
-        event.preventDefault();
-      }
+      const reading = isReading(editor.state);
+      if (!isFollowKey(event, reading)) return;
+      const link = reading
+        ? readingLink(event.target)
+        : linkAt(editor.state, editor.state.selection.main.head);
+      if (follow(link)) event.preventDefault();
     };
     const container = parent.current;
     container?.addEventListener("mousedown", followClick, true);
@@ -277,8 +351,8 @@ export function MarkdownEditor({
   }, [initialState, focusAtMount, suggestsAtMount]);
 
   useEffect(() => {
-    if (view.current) setReadOnly(view.current, readOnly);
-  }, [readOnly]);
+    if (view.current) setMode(view.current, modeOf(reading, readOnly));
+  }, [reading, readOnly]);
 
   return <div ref={parent} />;
 }

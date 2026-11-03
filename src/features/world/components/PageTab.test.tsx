@@ -2,14 +2,19 @@ import { undo } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockWorldIpc, testWorld } from "../api/test-ipc";
 import { useWorldStore } from "../stores/world-store";
 import { PageTab } from "./PageTab";
 
 const path = "Overview.md";
 
-function renderPage({ onDiscard = vi.fn() } = {}) {
+function renderPage({
+  onDiscard = vi.fn(),
+  onOpenPage = vi.fn(),
+  onCreateLink = vi.fn(),
+  reading = false,
+} = {}) {
   useWorldStore.getState().opened({
     ...testWorld,
     workspace: {
@@ -29,8 +34,9 @@ function renderPage({ onDiscard = vi.fn() } = {}) {
         session={testWorld.session}
         onClose={vi.fn()}
         onDiscard={onDiscard}
-        onOpenPage={vi.fn()}
-        onCreateLink={vi.fn()}
+        onOpenPage={onOpenPage}
+        onCreateLink={onCreateLink}
+        reading={reading}
       />
     </QueryClientProvider>,
   );
@@ -261,5 +267,103 @@ describe("the missing-page notice", () => {
 
     expect(onDiscard).toHaveBeenCalledWith(path);
     expect(writesOf(calls)).toHaveLength(1);
+  });
+});
+
+describe("the reading view", () => {
+  // CodeMirror measures the selection a click in its text sets; jsdom lays out nothing.
+  const range = Range.prototype as Partial<Range>;
+  beforeEach(() => {
+    range.getClientRects = () => [] as unknown as DOMRectList;
+    range.getBoundingClientRect = () => new DOMRect();
+  });
+  afterEach(() => {
+    delete range.getClientRects;
+    delete range.getBoundingClientRect;
+  });
+
+  it("follows a resolved link on a click and creates nothing for an unresolved one", async () => {
+    const text = "# Overview\nSee [[Mirela]] and [[Ghost]].";
+    const link = (target: string, state: "resolved" | "unresolved") => ({
+      from: text.indexOf(`[[${target}`),
+      to: text.indexOf(`[[${target}`) + target.length + 4,
+      state,
+      target,
+      path: state === "resolved" ? `${target}.md` : null,
+      heading: null,
+      block: null,
+    });
+    const calls = mockWorldIpc({
+      page_read: () => ({ text, version: "v1" }),
+      links_in: () => ({
+        state: "ready",
+        links: [link("Mirela", "resolved"), link("Ghost", "unresolved")],
+      }),
+    });
+    const onOpenPage = vi.fn();
+    const onCreateLink = vi.fn();
+    const textbox = await renderPage({ onOpenPage, onCreateLink, reading: true });
+    const resolved = await waitFor(() => {
+      const element = textbox.querySelector("[data-link]");
+      if (!element) throw new Error("The links are not marked yet");
+      return element;
+    });
+    const unresolved = textbox.querySelector(".cm-link-unresolved");
+    if (!unresolved) throw new Error("No unresolved link");
+
+    fireEvent.mouseDown(unresolved, { button: 0 });
+    fireEvent.mouseDown(unresolved, { button: 0, ctrlKey: true });
+    fireEvent.mouseDown(resolved, { button: 0 });
+
+    expect(onCreateLink).not.toHaveBeenCalled();
+    expect(onOpenPage).toHaveBeenCalledExactlyOnceWith("Mirela.md", {
+      newTab: true,
+      at: { heading: null, block: null },
+    });
+    expect(calls.filter(({ command }) => command === "link_create")).toEqual([]);
+  });
+
+  it("says a page of only whitespace has no text yet, above the backlinks, in a page that holds focus", async () => {
+    mockWorldIpc({ page_read: () => ({ text: "  \n\n", version: "v1" }) });
+    const textbox = await renderPage({ reading: true });
+
+    const line = screen.getByText("This page has no text yet.");
+    const backlinks = await screen.findByRole("heading", { name: /Linked from/ });
+    expect(line.compareDocumentPosition(backlinks) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Overview" })).toHaveAttribute("tabindex", "0");
+    expect(textbox.closest("article")).toHaveClass("body-reading");
+    act(() => editorOf(textbox).dispatch({ changes: { from: 0, insert: "Tide" } }));
+    expect(screen.queryByText("This page has no text yet.")).toBeNull();
+  });
+
+  it("shows the properties the core read from the frontmatter", async () => {
+    const text = "---\ntitle: Kesh Tor\n---\n# Overview\n";
+    const calls = mockWorldIpc({
+      page_read: () => ({ text, version: "v1" }),
+      page_properties: () => ({
+        state: "rows",
+        rows: [{ key: "title", value: { kind: "text", text: "Kesh Tor" } }],
+      }),
+    });
+    await renderPage({ reading: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Properties" }));
+
+    expect(screen.getByText("Kesh Tor", { selector: "dd" })).toBeVisible();
+    expect(calls.filter(({ command }) => command === "page_properties")).toEqual([
+      { command: "page_properties", args: { text: "---\ntitle: Kesh Tor\n---" } },
+    ]);
+    expect(writesOf(calls)).toEqual([]);
+  });
+});
+
+describe("the editing view", () => {
+  it("stays editable, with no properties block and no properties asked for", async () => {
+    const calls = mockWorldIpc({ page_read: () => ({ text: "---\na: b\n---\n", version: "v1" }) });
+    const textbox = await renderPage();
+
+    expect(textbox).toHaveAttribute("contenteditable", "true");
+    expect(screen.queryByRole("button", { name: "Properties" })).toBeNull();
+    expect(calls.filter(({ command }) => command === "page_properties")).toEqual([]);
   });
 });

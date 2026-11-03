@@ -117,6 +117,18 @@ const bullet = Decoration.replace({ widget: new TextWidget("•", "cm-bullet") }
 const rule = Decoration.replace({ widget: new RuleWidget() });
 const anchorSeparator = Decoration.replace({ widget: new TextWidget(" > ", "") });
 
+/**
+ * A resolved wiki link in the reading view, which Tab reaches although the text is not editable.
+ * `data-link` and the spec's `link` are where the link starts in the text; every change in the
+ * reading view draws the lines' decorations again, so the attribute stays current.
+ */
+function focusableLink(link: EditorLink) {
+  return Decoration.mark({
+    attributes: { tabindex: "0", role: "link", "data-link": String(link.from) },
+    link: link.from,
+  });
+}
+
 /** The formatting of inline elements, by their node's name. */
 const marks = new Map(
   Object.entries({
@@ -278,6 +290,8 @@ class RangeBuilder {
         this.wikiLink(node);
         return false;
       case "Image":
+        // Its text, while no image can show.
+        return this.reading && this.link(node, 2);
       case "Table":
       case "HTMLBlock":
       case "HTMLTag":
@@ -357,8 +371,11 @@ class RangeBuilder {
     return false;
   }
 
-  /** An inline link, `[text](address)`: its text shows, or its address when it has none. */
-  private link(node: SyntaxNodeRef) {
+  /**
+   * An inline link, `[text](address)`, or an image, `![text](address)`, whose opening mark is
+   * `opening` long: its text shows, or its address when it has none.
+   */
+  private link(node: SyntaxNodeRef, opening = 1) {
     const children = [];
     for (let child = node.node.firstChild; child; child = child.nextSibling) children.push(child);
     const close = children.find(
@@ -369,32 +386,42 @@ class RangeBuilder {
     );
     if (!close || !open || open.from !== close.to) return true;
     const url = children.find((child) => child.name === "URL");
-    if (close.from === node.from + 1 && url) {
+    const text = node.from + opening;
+    if (close.from === text && url) {
       this.replace(node.from, url.from);
       this.replace(url.to, node.to);
       return false;
     }
-    this.replace(node.from, node.from + 1);
+    this.replace(node.from, text);
     this.replace(close.from, node.to);
     return true;
   }
 
   /**
    * A wiki link or embed the core reported: its display text, the part after `|`, or the target
-   * with ` > ` before the heading or block. An image embed, or a link the core did not report, shows
-   * as typed.
+   * with ` > ` before the heading or block. A link the core did not report shows as typed, and so
+   * does an image embed in the editing view; the reading view shows an image embed's name. A
+   * resolved link in the reading view takes keyboard focus.
    */
   private wikiLink(node: SyntaxNodeRef) {
     const link = this.links.get(node.from);
     if (!link || link.to !== node.to) return;
-    if (link.state === "attachment" && imageFile.test(link.target)) return;
+    const image = link.state === "attachment" && imageFile.test(link.target);
+    if (image && !this.reading) return;
     const open = node.node.firstChild;
     const close = node.node.lastChild;
     if (!open || !close) return;
+    if (this.reading && link.state === "resolved") {
+      this.mark(node.from, node.to, focusableLink(link));
+    }
     this.replace(open.from, open.to);
     this.replace(close.from, close.to);
     const inner = this.state.sliceDoc(open.to, close.from);
     const pipe = inner.indexOf("|");
+    if (image) {
+      if (pipe >= 0) this.replace(open.to + pipe, close.from);
+      return;
+    }
     if (pipe >= 0 && inner.slice(pipe + 1).trim() !== "") {
       this.replace(open.to, open.to + pipe + 1);
       return;
