@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { AnswerReview } from "@/types/api";
+import type { AnswerReview, EditorLink } from "@/types/api";
 import {
   type AnswerState,
   type AssistantChat,
@@ -201,6 +201,35 @@ describe("AssistantPane's answers", () => {
     expect(shown.querySelector(".cm-image, .cm-image-placeholder")).toBeNull();
     expect(shown.closest(".assistant")).not.toBeNull();
     expect(shown.closest(".body-reading")).toBeNull();
+  });
+
+  it("opens no preview of a page an answer links to", async () => {
+    vi.useFakeTimers();
+    const text = "See [[Kesh Tor]].";
+    const link: EditorLink = {
+      from: 4,
+      to: text.length - 1,
+      state: "resolved",
+      target: "Kesh Tor",
+      path: "Kesh Tor.md",
+      heading: null,
+      block: null,
+    };
+    renderPane(
+      chatWith({
+        messages: [
+          { id: 1, role: "user", text: "Hello" },
+          { ...answer(2, "complete", text), links: [link] },
+        ],
+      }),
+    );
+    const shown = screen.getByRole("textbox", { name: "Answer" });
+
+    fireEvent.mouseOver(within(shown).getByRole("link", { name: "Kesh Tor" }));
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    vi.useRealTimers();
+
+    expect(document.querySelector(".cm-link-preview")).toBeNull();
   });
 
   it("says when no answer arrived for a message, offering Retry only on the last one", () => {

@@ -363,6 +363,104 @@ describe("web links", () => {
   });
 });
 
+describe("link previews", () => {
+  const text = "Ruled from [[Saltmere]].\n\nThe end.";
+  const saltmere: EditorLink = {
+    from: text.indexOf("[["),
+    to: text.indexOf("]]") + 2,
+    state: "resolved",
+    target: "Saltmere",
+    path: "Saltmere.md",
+    heading: null,
+    block: null,
+  };
+  const page = "# Saltmere\n\nTrades with [[Kesh Tor]]. ![[gate.png]]";
+  const kesh: EditorLink = { ...saltmere, from: page.indexOf("[["), to: page.indexOf("]]") + 2 };
+
+  /** `text` with the cursor on its last line and its link, previewing with `props`. */
+  function renderLinked(props: Partial<Parameters<typeof MarkdownEditor>[0]>) {
+    const state = createPageState(text, "Kesh Tor", text.length, { preview: true });
+    render(
+      <MarkdownEditor
+        state={state.update({ effects: setLinks([saltmere]) }).state}
+        readOnly={false}
+        {...props}
+      />,
+    );
+    const view = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Kesh Tor" }));
+    if (!view) throw new Error("No editor");
+    return view;
+  }
+
+  async function rest(view: EditorView) {
+    const link = view.contentDOM.querySelector(".cm-link");
+    if (!link) throw new Error("No link");
+    fireEvent.mouseOver(link);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+  }
+
+  const preview = () => document.querySelector(".cm-link-preview");
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("opens none without readPreview", async () => {
+    const view = renderLinked({ onFollow: vi.fn() });
+
+    await rest(view);
+
+    expect(preview()).toBeNull();
+  });
+
+  it("shows the page in the reading view with its links and images, also after a reload", async () => {
+    const readPreview = vi.fn(async () => page);
+    const linksFor = vi.fn(async () => [kesh]);
+    const imagesFor = vi.fn(async () => [
+      { state: "found", path: "gate.png", stamp: "7" } satisfies ImageEmbed,
+    ]);
+    const view = renderLinked({
+      readPreview,
+      linksFor,
+      imagesFor,
+      imageUrl: (path, stamp) => `test-image://${path}?v=${stamp}`,
+    });
+
+    act(() => replaceState(view, reloadedState(view.state, `${text}\n`, "Kesh Tor")));
+    act(() => view.dispatch({ effects: setLinks([saltmere]) }));
+    await rest(view);
+
+    const shown = screen.getByRole("textbox", { name: "Saltmere" });
+    expect(readPreview).toHaveBeenCalledWith("Saltmere.md");
+    expect(linksFor).toHaveBeenCalledWith("Saltmere.md", page);
+    expect(shown).toHaveAttribute("contenteditable", "false");
+    expect(shown.querySelector(".cm-link")).toHaveTextContent(/^Kesh Tor$/);
+    expect(shown.querySelector(".cm-image img")).toHaveAttribute(
+      "src",
+      "test-image://gate.png?v=7",
+    );
+  });
+
+  it("follows the link on a click on the preview, and closes it", async () => {
+    const onFollow = vi.fn();
+    const view = renderLinked({ readPreview: async () => page, onFollow });
+    await rest(view);
+    const shown = preview();
+    if (!shown) throw new Error("No preview");
+    // The link is under the preview: a Ctrl+click on the preview is not one on the link.
+    vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue(saltmere.from + 3);
+
+    fireEvent.mouseDown(shown, { button: 0, ctrlKey: true });
+    fireEvent.click(shown, { button: 0 });
+
+    expect(onFollow.mock.calls).toEqual([[saltmere]]);
+    expect(preview()).toBeNull();
+  });
+});
+
 describe("the live preview", () => {
   const tasks = "Before the tide:\n\n- [ ] Bar the gate\n- [x] Ring the bell\n";
 

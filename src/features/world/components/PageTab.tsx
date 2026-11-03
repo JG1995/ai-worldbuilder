@@ -23,8 +23,10 @@ import {
   backlinksList,
   historyRestore,
   historyUndo,
+  imagesResolve,
   linkOpen,
   linkSuggest,
+  linksIn,
   pageProperties,
   pageRead,
   pageRestore,
@@ -486,6 +488,12 @@ export function PageTab({
             }}
             suggest={(query) => linkSuggest(path, query)}
             imageUrl={(image, stamp) => imageUrl(session, image, stamp)}
+            // Previews read pages as last saved, and write nothing.
+            readPreview={(target) => pageRead(target).then((read) => read.text)}
+            linksFor={(target, text) =>
+              linksIn(target, text).then((answer) => (answer.state === "ready" ? answer.links : []))
+            }
+            imagesFor={imagesResolve}
             onFollow={(link) => {
               // The editor follows only resolved links in the reading view, which never writes.
               if (reading && link.state !== "resolved") return;

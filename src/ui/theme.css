@@ -518,6 +518,62 @@
 }
 
 /*
+ * A linked page's preview (src/ui/link-previews.ts), a popover drawn as the link suggestion list
+ * is, which fades in as menus do: the title in ui-strong, then the page in body text with the
+ * reading view's rendering, scrolling inside it. A click anywhere on it follows the link.
+ */
+.page-editor.cm-editor .cm-tooltip.cm-link-preview {
+  @apply body;
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(400px, calc(100vw - 16px));
+  max-height: 320px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background-color: var(--color-raised);
+  color: var(--color-text);
+  box-shadow: var(--level-2-shadow);
+  cursor: pointer;
+  transition: opacity var(--duration-fade) ease-out;
+
+  @starting-style {
+    opacity: 0;
+  }
+
+  /* This rule outweighs the reduced-motion rule at the end of this file, so it repeats it. */
+  @media (prefers-reduced-motion: reduce) {
+    transition-duration: 0s;
+  }
+}
+
+.page-editor.cm-editor .cm-link-preview-title {
+  @apply ui-strong;
+  margin: 0;
+}
+
+.page-editor.cm-editor .cm-link-preview-body,
+.page-editor.cm-editor .cm-link-preview-body > .cm-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.page-editor.cm-editor .cm-link-preview-body .cm-scroller {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.page-editor.cm-editor .cm-link-preview-line {
+  @apply ui;
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/*
  * The reading view's properties block (src/ui/properties-block.ts): a label-caps heading that
  * expands and collapses it, then keys in ui-small text-muted beside values in ui text, nested
  * values and unreadable frontmatter in mono.
