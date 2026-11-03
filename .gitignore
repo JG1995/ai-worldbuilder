@@ -2,9 +2,14 @@
 .wiki/
 AGENTS.md
 CLAUDE.md
+.github/copilot-instructions.md
 /scripts/
 .work/
 .claude/worktrees/
+
+# Code-intelligence indexes
+.codegraph/
+.repowise/
 
 # Dependencies and build output
 node_modules/
