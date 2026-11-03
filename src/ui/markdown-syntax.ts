@@ -90,15 +90,11 @@ function opensComment(text: string, from: number) {
   return text.charCodeAt(from) === percent && text.charCodeAt(from + 1) === percent;
 }
 
-/** Whether a line of `text` ends in a `%%` that starts at or after `from`. */
-function closesComment(text: string, from: number) {
-  const trimmed = text.trimEnd();
-  return trimmed.length - from >= 2 && trimmed.endsWith("%%");
-}
-
 /**
- * Comments: `%%…%%` inside a paragraph, and a block from a line starting `%%` to the next line
- * ending `%%`, or to the end of the page when no line closes it, as Obsidian reads them. Nothing
+ * Comments: `%%…%%` inside a paragraph, and a block from a line starting `%%` to the first later
+ * line holding `%%`, or to the end of the page when no line closes it, as Obsidian reads them. A
+ * line holding a second `%%` before its end starts a paragraph with an inline comment instead. The
+ * block takes the whole closing line, so text after its closing `%%` stays in the comment. Nothing
  * inside a comment is parsed.
  */
 const comments: MarkdownConfig = {
@@ -127,18 +123,21 @@ const comments: MarkdownConfig = {
       before: "FencedCode",
       parse(cx: BlockContext, line: Line) {
         if (!opensComment(line.text, line.pos)) return false;
+        // A second `%%` on the opening line closes the comment there, which is a block only at
+        // the line's end; before it, the line is a paragraph that starts with an inline comment.
+        let close = line.text.indexOf("%%", line.pos + 2);
+        if (close >= 0 && close + 2 < line.text.trimEnd().length) return false;
         const start = cx.lineStart + line.pos;
         const marks = [cx.elt("PageCommentMark", start, start + 2)];
-        // The opening line closes the comment itself when it ends in a second `%%`.
-        let closed = closesComment(line.text, line.pos + 2);
-        while (!closed && cx.nextLine()) closed = closesComment(line.text, line.pos);
-        if (!closed) {
+        while (close < 0 && cx.nextLine()) close = line.text.indexOf("%%", line.pos);
+        if (close < 0) {
           cx.addElement(cx.elt("PageCommentBlock", start, cx.prevLineEnd(), marks));
           return true;
         }
-        const end = cx.lineStart + line.text.trimEnd().length;
+        const end = cx.lineStart + close + 2;
         marks.push(cx.elt("PageCommentMark", end - 2, end));
-        cx.addElement(cx.elt("PageCommentBlock", start, end, marks));
+        const lineEnd = cx.lineStart + line.text.trimEnd().length;
+        cx.addElement(cx.elt("PageCommentBlock", start, lineEnd, marks));
         cx.nextLine();
         return true;
       },

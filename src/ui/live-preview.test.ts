@@ -1,9 +1,9 @@
-import { EditorSelection } from "@codemirror/state";
+import { EditorSelection, Prec, StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it } from "vitest";
 import type { EditorLink } from "@/types/api";
 import { setLinks } from "./editor-links";
-import { revealedLines } from "./live-preview";
+import { previewView, revealedLines } from "./live-preview";
 import { createPageState } from "./MarkdownEditor";
 
 let view: EditorView | null = null;
@@ -230,6 +230,26 @@ describe("away from the cursor, the live preview", () => {
 
     expect(drawnLines(editor).slice(0, 3)).toEqual(["a <!-- note --> b", "", "<!-- block -->"]);
     expect(editor.contentDOM.querySelector(".cm-comment")).toBeNull();
+  });
+});
+
+describe("a line that starts with an inline comment", () => {
+  const lines = ["%%note%% text", "# After"];
+
+  it("leaves the heading after it a heading in the editing view", () => {
+    const editor = show(lines);
+
+    expect(drawnLines(editor).slice(0, 2)).toEqual(["note text", "After"]);
+    expect(editor.contentDOM.querySelectorAll(".cm-line")[1].classList).toContain("cm-heading-1");
+  });
+
+  it("leaves the heading after it in the reading view", () => {
+    const editor = show(lines);
+    editor.dispatch({
+      effects: StateEffect.appendConfig.of(Prec.highest(previewView.of("reading"))),
+    });
+
+    expect(drawnLines(editor)).toContain("After");
   });
 });
 
