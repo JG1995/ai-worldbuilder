@@ -500,6 +500,7 @@ describe("changing worlds", () => {
         assistantOpen: true,
         assistantWidth: 360,
         assistantConversation: null,
+        reading: [],
       },
     };
     let world = 1;

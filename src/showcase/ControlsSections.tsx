@@ -143,7 +143,7 @@ function TooltipSection() {
   return (
     <Section title="Tooltip" use="Hover or focus a control. Tooltips stay inside the window.">
       <div className="flex items-center justify-between gap-4">
-        <Tooltip text="Export the world as a folder of Markdown files" shortcut="Ctrl+E">
+        <Tooltip text="Export the world as a folder of Markdown files" shortcut="Ctrl+Shift+E">
           {(describedBy) => (
             <Button variant="secondary" aria-describedby={describedBy}>
               Export…

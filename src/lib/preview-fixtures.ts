@@ -309,10 +309,13 @@ function requireWorld() {
 }
 
 /**
- * The conversation each preview world's assistant showed last. An approximation for the preview:
- * of the workspace, only this survives reopening a world.
+ * The tabs, their views and the conversation the assistant showed last of each preview world. An
+ * approximation for the preview: of the workspace, only these survive reopening a world.
  */
-const lastShownConversations = new Map<PreviewWorld, number | null>();
+const lastWorkspaces = new Map<
+  PreviewWorld,
+  Pick<Workspace, "tabs" | "active" | "reading" | "assistantConversation">
+>();
 
 function opened(next: PreviewWorld): WorldOpened {
   world = next;
@@ -323,11 +326,13 @@ function opened(next: PreviewWorld): WorldOpened {
     workspace: {
       tabs: [],
       active: null,
+      reading: [],
+      assistantConversation: null,
+      ...lastWorkspaces.get(next),
       expanded: [],
       treeWidth: 264,
       assistantOpen: true,
       assistantWidth: 360,
-      assistantConversation: lastShownConversations.get(next) ?? null,
     },
   };
 }
@@ -1450,8 +1455,9 @@ export const previewFixtures: Record<string, unknown> = {
     return opened(recent.world);
   },
   workspace_save: (args?: InvokeArgs) => {
-    const { workspace } = args as { workspace: Workspace };
-    lastShownConversations.set(requireWorld(), workspace.assistantConversation);
+    const { tabs, active, reading, assistantConversation } = (args as { workspace: Workspace })
+      .workspace;
+    lastWorkspaces.set(requireWorld(), { tabs, active, reading, assistantConversation });
     return null;
   },
   app_close: () => null,

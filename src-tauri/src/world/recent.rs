@@ -24,11 +24,11 @@ const DEFAULT_TREE_WIDTH: u32 = 264;
 const DEFAULT_ASSISTANT_WIDTH: u32 = 360;
 
 /// The open tabs in order, the active tab, the expanded folders, the tree width, whether the
-/// assistant's side pane is open and its width, and the conversation the assistant showed last, of
-/// a world. Paths are relative to the world.
+/// assistant's side pane is open and its width, the conversation the assistant showed last and the
+/// tabs in the reading view, of a world. Paths are relative to the world.
 ///
-/// The assistant's fields came later in format 1; a document written before them loads with their
-/// defaults.
+/// The assistant's fields and `reading` came later in format 1; a document written before them
+/// loads with their defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +44,9 @@ pub struct Workspace {
     /// An id in the world's conversation store; none shows an empty conversation.
     #[serde(default)]
     pub assistant_conversation: Option<i64>,
+    /// The tabs that show the reading view; every other tab shows the editing view.
+    #[serde(default)]
+    pub reading: Vec<String>,
 }
 
 fn default_assistant_open() -> bool {
@@ -64,6 +67,7 @@ impl Default for Workspace {
             assistant_open: default_assistant_open(),
             assistant_width: default_assistant_width(),
             assistant_conversation: None,
+            reading: Vec::new(),
         }
     }
 }
@@ -313,6 +317,7 @@ mod tests {
             assistant_open: false,
             assistant_width: 480,
             assistant_conversation: Some(7),
+            reading: vec!["Places/Kesh Tor.md".into()],
         };
         recent.set_workspace(&id, workspace.clone());
 
@@ -343,6 +348,10 @@ mod tests {
             document["worlds"][0]["workspace"]["assistantConversation"],
             7
         );
+        assert_eq!(
+            document["worlds"][0]["workspace"]["reading"],
+            json!(["Places/Kesh Tor.md"])
+        );
         assert!(document["worlds"][0]["lastOpened"].as_u64().unwrap() > 0);
 
         let loaded = Recent::load(app_data.path());
@@ -352,12 +361,13 @@ mod tests {
     }
 
     #[test]
-    fn documents_from_before_the_assistant_s_fields_load_with_their_worlds_and_the_defaults() {
+    fn documents_from_before_the_later_fields_load_with_their_worlds_and_the_defaults() {
         let app_data = tempfile::tempdir().unwrap();
         let (_parent, roots) = worlds(2);
         fs::create_dir(app_data.path().join("grimoire-data")).unwrap();
-        // World 2 has the shape written before the workspace held the conversation last shown,
-        // and world 1 the shape written before it held the assistant pane's state.
+        // World 2 has the shape written before the workspace held the conversation last shown and
+        // the reading tabs, and world 1 the shape written before it held the assistant pane's
+        // state.
         let document = json!({
             "format": 1,
             "nextId": 3,
@@ -402,6 +412,7 @@ mod tests {
                 assistant_open: false,
                 assistant_width: 480,
                 assistant_conversation: None,
+                reading: Vec::new(),
             })
         );
         assert_eq!(recent.workspace("1"), Some(Workspace::default()));

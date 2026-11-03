@@ -6,7 +6,12 @@ import { type PageStatus, useWorldStore, workspaceSaveDelay } from "./world-stor
 
 const store = () => useWorldStore.getState();
 
-function openWorld(tabs: string[] = [], active: string | null = null, session = 1) {
+function openWorld(
+  tabs: string[] = [],
+  active: string | null = null,
+  session = 1,
+  reading: string[] = [],
+) {
   store().opened({
     name: "Sample",
     session,
@@ -18,6 +23,7 @@ function openWorld(tabs: string[] = [], active: string | null = null, session = 
       assistantOpen: true,
       assistantWidth: 360,
       assistantConversation: null,
+      reading,
     },
   });
 }
@@ -184,6 +190,116 @@ describe("new entries", () => {
     expect(store().createdPage).toBe("Places/Kesh Tor.md");
     store().createdPageShown();
     expect(store().createdPage).toBeNull();
+  });
+});
+
+describe("views", () => {
+  const reading = () => [...store().reading].sort();
+
+  it("open a new tab in the active tab's view, and keep an open page's own", () => {
+    openWorld(["A.md", "B.md"], "A.md", 1, ["A.md"]);
+
+    store().openPage("C.md", { newTab: true });
+    store().activate("B.md");
+    store().openPage("D.md", { newTab: true });
+    store().openPage("A.md", { newTab: true });
+
+    expect(reading()).toEqual(["A.md", "C.md"]);
+  });
+
+  it("give a page that replaces a tab's page that tab's view", () => {
+    openWorld(["A.md", "B.md"], "A.md", 1, ["A.md"]);
+
+    store().openPage("C.md", { newTab: false });
+    store().activate("B.md");
+    store().openPage("D.md", { newTab: false });
+
+    expect(store().tabs).toEqual(["C.md", "D.md"]);
+    expect(reading()).toEqual(["C.md"]);
+  });
+
+  it("open a created page in the editing view, and drop a closed tab's view", () => {
+    openWorld(["A.md", "B.md"], "A.md", 1, ["A.md", "B.md"]);
+
+    store().pageCreated("New.md");
+    store().closeTab("B.md");
+
+    expect(reading()).toEqual(["A.md"]);
+  });
+
+  it("switch an open tab only", () => {
+    openWorld(["A.md"], "A.md");
+
+    store().setView("A.md", true);
+    store().setView("Gone.md", true);
+    expect(reading()).toEqual(["A.md"]);
+
+    store().setView("A.md", false);
+    expect(reading()).toEqual([]);
+  });
+});
+
+describe("the reading layout", () => {
+  const sidebars = () => ({
+    tree: store().readingTreeOpen,
+    assistant: store().readingAssistantOpen,
+  });
+  const openBoth = () => {
+    store().setReadingTreeOpen(true);
+    store().setReadingAssistantOpen(true);
+  };
+  const saved = () => ({
+    treeOverlayOpen: store().treeOverlayOpen,
+    assistantOpen: store().assistantOpen,
+    assistantOverlayOpen: store().assistantOverlayOpen,
+  });
+
+  it("starts with both sidebars closed on switching, and ends on switching back", () => {
+    openWorld(["A.md"], "A.md");
+    store().setAssistantOpen(false);
+    store().setTreeOverlayOpen(true);
+    const editing = saved();
+
+    store().setView("A.md", true);
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
+    openBoth();
+    expect(sidebars()).toEqual({ tree: true, assistant: true });
+
+    store().setView("A.md", false);
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
+    expect(saved()).toEqual(editing);
+
+    store().setView("A.md", true);
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
+  });
+
+  it("keeps its sidebars between reading tabs, and ends on activating an editing tab", () => {
+    openWorld(["A.md", "B.md", "C.md"], "A.md", 1, ["A.md", "B.md"]);
+    openBoth();
+
+    store().activate("B.md");
+    expect(sidebars()).toEqual({ tree: true, assistant: true });
+
+    store().activate("C.md");
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
+    // Ignored while the active tab is an editing tab.
+    openBoth();
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
+
+    store().activate("A.md");
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
+  });
+
+  it("ends when the last tab closes, and starts when a closing tab leaves a reading tab active", () => {
+    openWorld(["A.md", "B.md"], "B.md", 1, ["A.md"]);
+
+    store().closeTab("B.md");
+    expect(store().active).toBe("A.md");
+    openBoth();
+    expect(sidebars()).toEqual({ tree: true, assistant: true });
+
+    store().closeTab("A.md");
+    expect(sidebars()).toEqual({ tree: false, assistant: false });
   });
 });
 
@@ -428,6 +544,7 @@ describe("the workspace", () => {
           assistantOpen: true,
           assistantWidth: 360,
           assistantConversation: null,
+          reading: [],
         },
       },
     ]);
@@ -450,6 +567,7 @@ describe("the workspace", () => {
           assistantOpen: true,
           assistantWidth: 360,
           assistantConversation: null,
+          reading: [],
         },
       },
     ]);
@@ -468,6 +586,7 @@ describe("the workspace", () => {
         assistantOpen: false,
         assistantWidth: 480,
         assistantConversation: 7,
+        reading: [],
       },
     });
     expect(store()).toMatchObject({
@@ -492,6 +611,7 @@ describe("the workspace", () => {
       treeWidth: 264,
       assistantOpen: true,
       assistantWidth: 401,
+      reading: [],
     };
     expect(saves(calls)).toEqual([
       { workspace: { ...workspace, assistantConversation: 7 } },
@@ -501,6 +621,25 @@ describe("the workspace", () => {
     // The overlay closes and the conversation is the next world's when the world changes.
     openWorld([], null, 2);
     expect(store()).toMatchObject({ assistantOverlayOpen: false, assistantConversation: null });
+  });
+
+  it("restores the tabs' views and saves their changes in tab order, but not the reading layout", async () => {
+    const calls = mockWorldIpc();
+    openWorld(["A.md", "B.md"], "A.md", 1, ["B.md", "A.md"]);
+    expect([...store().reading].sort()).toEqual(["A.md", "B.md"]);
+
+    store().setReadingTreeOpen(true);
+    store().setReadingAssistantOpen(true);
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+    expect(saves(calls)).toEqual([]);
+
+    store().setView("B.md", false);
+    store().openPage("C.md", { newTab: true });
+    await vi.advanceTimersByTimeAsync(workspaceSaveDelay);
+
+    expect(saves(calls)).toMatchObject([
+      { workspace: { tabs: ["A.md", "B.md", "C.md"], reading: ["A.md", "C.md"] } },
+    ]);
   });
 
   it("saves nothing for a world that closed or changed before the delay ended", async () => {

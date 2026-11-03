@@ -25,6 +25,7 @@ function renderPage({
       assistantOpen: true,
       assistantWidth: 360,
       assistantConversation: null,
+      reading: [],
     },
   });
   render(

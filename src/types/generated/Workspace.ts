@@ -2,14 +2,18 @@
 
 /**
  * The open tabs in order, the active tab, the expanded folders, the tree width, whether the
- * assistant's side pane is open and its width, and the conversation the assistant showed last, of
- * a world. Paths are relative to the world.
+ * assistant's side pane is open and its width, the conversation the assistant showed last and the
+ * tabs in the reading view, of a world. Paths are relative to the world.
  *
- * The assistant's fields came later in format 1; a document written before them loads with their
- * defaults.
+ * The assistant's fields and `reading` came later in format 1; a document written before them
+ * loads with their defaults.
  */
 export type Workspace = { tabs: Array<string>, active: string | null, expanded: Array<string>, treeWidth: number, assistantOpen: boolean, assistantWidth: number, 
 /**
  * An id in the world's conversation store; none shows an empty conversation.
  */
-assistantConversation: number | null, };
+assistantConversation: number | null, 
+/**
+ * The tabs that show the reading view; every other tab shows the editing view.
+ */
+reading: Array<string>, };
