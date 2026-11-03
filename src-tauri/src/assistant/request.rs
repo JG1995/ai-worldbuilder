@@ -131,6 +131,7 @@ mod tests {
             text,
             answer,
             proposals: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -204,6 +205,7 @@ mod tests {
             text: text.to_owned(),
             answer: Some(AnswerState::Complete),
             proposals: proposals.iter().map(|line| (*line).to_owned()).collect(),
+            images: Vec::new(),
         };
         let earlier = [
             with(

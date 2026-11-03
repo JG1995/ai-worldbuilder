@@ -3,17 +3,19 @@
 //! database by `history::file_name`. The file records the world folder's path too, so two paths
 //! with the same hash never share their conversations.
 //!
-//! Format 2, named by `PRAGMA user_version`:
+//! Format 3, named by `PRAGMA user_version`:
 //!
 //! - `meta`: one row, the world folder's path.
 //! - `conversations`: each conversation's `title`, from its first message, and the times it was
 //!   `created` and `updated` by its latest message, in seconds since the Unix epoch.
 //! - `messages`: each message of a conversation in order (`id`): its `role` (`user` or
-//!   `assistant`), `text` and `time`, and for an answer how it ended (`state`: `complete`,
-//!   `stopped` or `cut_off`), how many earlier messages its request `left_out`, whether the
-//!   world was still `indexing` as its pages were chosen, how many of its proposals were
-//!   `unreadable`, and whether it ended inside one (`unfinished`). An answer's text is its prose
-//!   alone; its proposals are kept in their own tables.
+//!   `assistant`), `text` and `time`; for a user message the image it `regenerates`, if any,
+//!   without a foreign key, so it reads as none once that image is gone; and for an answer how it
+//!   ended (`state`: `complete`, `stopped` or `cut_off`), how many earlier messages its request
+//!   `left_out`, whether the world was still `indexing` as its pages were chosen, how many of its
+//!   proposals were `unreadable`, whether it ended inside one (`unfinished`), and the same two
+//!   notes for its image requests (`image_unreadable`, `image_unfinished`). An answer's text is
+//!   its prose alone; its proposals and images are kept in their own tables.
 //! - `read_pages`: the path of each page an answer's request carried, in the order chosen
 //!   (`ordinal`), and whether only part of it was read. Never a page's text.
 //! - `accepts`: each set of an answer's proposals that an accept began: the history change it
@@ -28,18 +30,31 @@
 //!   or `rejected`), whether it was `undone`, and the set it belongs to (`accept`).
 //! - `proposal_changes`: each passage of an edit, in order: the text to `find` and its
 //!   `replace`ment.
+//! - `images`: each image request of an answer in order (`ordinal`): its `name`, `frame`
+//!   (`square`, `portrait` or `landscape`) and `prompt`; the image it `revises`, for a
+//!   regeneration; what its generation did with that image (`reference`: `sent`, `not_taken` or
+//!   `gone`); its `state` (`not_generated`, `generating`, `pending`, `approving`, `approved`,
+//!   `undoing` or `rejected`), with the `reason` it is not generated (`stopped`, `answer_failed`,
+//!   `over_limit`, `cancelled`, `interrupted`, `no_provider` or `failed`); whether it was
+//!   `undone`; and while it is approved or marked, the `path` its approval writes and the history
+//!   change it recorded (`change`, `started`). `approving` and `undoing` are marks set before an
+//!   approval or its undo touches a file and settled from that file; `generating` rows left by an
+//!   earlier opening become `not_generated` (`interrupted`) when the store opens.
+//! - `image_bytes`: a generated image's `media_type` and `bytes`, from its generation until it is
+//!   rejected. Never a page's text or a key.
 //!
 //! Hashes are stored as the bits of a signed integer. Format 1 lacked the notes and the proposal
-//! tables; a format-1 file is updated in place, in one transaction, when its world opens.
+//! tables, and format 2 the image columns and tables; an earlier file is updated in place, through
+//! each format, in one transaction, when its world opens.
 //!
-//! Deleting a conversation deletes its messages with their pages, proposals and sets. Each
-//! message is written in one transaction, and the file syncs fully, so after a crash a message is
-//! there whole or not at all.
+//! Deleting a conversation deletes its messages with their pages, proposals, sets, images and
+//! image bytes. Each message is written in one transaction, and the file syncs fully, so after a
+//! crash a message is there whole or not at all.
 //!
 //! A damaged file is set aside, as a damaged history database is, and a new one replaces it. A file
 //! in a newer format, holding unknown data, or recording another world is left untouched; so is
-//! everything when the world's path cannot name a file or there is no app data folder; so is a
-//! format-1 file whose update fails. The store then keeps this opening's conversations in memory.
+//! everything when the world's path cannot name a file or there is no app data folder; so is an
+//! earlier file whose update fails. The store then keeps this opening's conversations in memory.
 //! A write to the file that fails moves the store to memory too, with what the file held, for the
 //! rest of the opening.
 
@@ -57,10 +72,10 @@ use crate::error::{AppError, ErrorKind};
 use crate::history;
 
 /// The format this version writes. A file in a newer format is never written.
-const FORMAT: i64 = 2;
+const FORMAT: i64 = 3;
 
-/// The tables of format 1, with the notes format 2 added to `messages` last, where the update from
-/// format 1 adds them, so an updated file and a new one have their columns in the same order.
+/// The tables of format 1, with the columns formats 2 and 3 added to `messages` last, where the
+/// updates add them, so an updated file and a new one have their columns in the same order.
 const SCHEMA: &str = "
     CREATE TABLE conversations (
         id INTEGER PRIMARY KEY,
@@ -78,7 +93,10 @@ const SCHEMA: &str = "
         left_out INTEGER,
         indexing INTEGER,
         unreadable INTEGER NOT NULL DEFAULT 0,
-        unfinished INTEGER NOT NULL DEFAULT 0
+        unfinished INTEGER NOT NULL DEFAULT 0,
+        regenerates INTEGER,
+        image_unreadable INTEGER NOT NULL DEFAULT 0,
+        image_unfinished INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX messages_by_conversation ON messages (conversation, id);
     CREATE TABLE read_pages (
@@ -126,14 +144,49 @@ const PROPOSAL_SCHEMA: &str = "
         PRIMARY KEY (proposal, ordinal)
     );
 ";
-/// The tables that hold conversations, in an order that keeps their references valid.
-const TABLES: [&str; 6] = [
+/// The columns format 3 added to `messages` in an earlier file. `regenerates` names an image
+/// without a foreign key, because `images` comes after `messages` in `TABLES`.
+const IMAGE_NOTES: &str = "
+    ALTER TABLE messages ADD COLUMN regenerates INTEGER;
+    ALTER TABLE messages ADD COLUMN image_unreadable INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN image_unfinished INTEGER NOT NULL DEFAULT 0;
+";
+/// The tables format 3 added, created as they are in a new file and in an updated one.
+const IMAGE_SCHEMA: &str = "
+    CREATE TABLE images (
+        id INTEGER PRIMARY KEY,
+        message INTEGER REFERENCES messages ON DELETE CASCADE,
+        ordinal INTEGER,
+        name TEXT,
+        frame TEXT,
+        prompt TEXT,
+        revises INTEGER REFERENCES images ON DELETE SET NULL,
+        reference TEXT,
+        state TEXT,
+        reason TEXT,
+        undone INTEGER,
+        path TEXT,
+        change INTEGER,
+        started INTEGER
+    );
+    CREATE INDEX images_by_message ON images (message, ordinal);
+    CREATE TABLE image_bytes (
+        image INTEGER PRIMARY KEY REFERENCES images ON DELETE CASCADE,
+        media_type TEXT,
+        bytes BLOB
+    );
+";
+/// The tables that hold conversations, in an order that keeps their references valid, apart from
+/// an image's `revises`, which can name any image.
+const TABLES: [&str; 8] = [
     "conversations",
     "messages",
     "read_pages",
     "accepts",
     "proposals",
     "proposal_changes",
+    "images",
+    "image_bytes",
 ];
 /// The most characters of a conversation's title, from its first message's first line.
 const TITLE_LIMIT: usize = 60;
@@ -172,12 +225,13 @@ impl AnswerState {
 
 /// A stored message as a request carries it: a user message (`answer` is `None`) or an answer and
 /// how it ended, with one line for each of its proposals that names its kind, its path and what
-/// became of it.
+/// became of it, and one for each of its images that names it and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub text: String,
     pub answer: Option<AnswerState>,
     pub proposals: Vec<String>,
+    pub images: Vec<String>,
 }
 
 /// What an answer's request carried, saved with the answer.
@@ -194,6 +248,12 @@ pub struct Answer<'a> {
     pub unreadable: u32,
     /// Whether the answer ended inside a proposal, which was dropped.
     pub unfinished: bool,
+    /// The image requests read from the answer, in order.
+    pub images: &'a [NewImage],
+    /// How many image requests could not be read.
+    pub image_unreadable: u32,
+    /// Whether the answer ended inside an image request, which was dropped.
+    pub image_unfinished: bool,
 }
 
 /// A proposal as an answer saves it.
@@ -346,6 +406,291 @@ pub enum Settling {
     AlreadySettled,
 }
 
+/// The shape an image request asks for.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFrame {
+    Square,
+    Portrait,
+    Landscape,
+}
+
+impl ImageFrame {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Square => "square",
+            Self::Portrait => "portrait",
+            Self::Landscape => "landscape",
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "square" => Some(Self::Square),
+            "portrait" => Some(Self::Portrait),
+            "landscape" => Some(Self::Landscape),
+            _ => None,
+        }
+    }
+}
+
+/// Where an image stands. `Approving` and `Undoing` are marks: an approval or its undo is writing
+/// the image's file, or stopped before it could settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageState {
+    NotGenerated,
+    Generating,
+    Pending,
+    Approving,
+    Approved,
+    Undoing,
+    Rejected,
+}
+
+impl ImageState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotGenerated => "not_generated",
+            Self::Generating => "generating",
+            Self::Pending => "pending",
+            Self::Approving => "approving",
+            Self::Approved => "approved",
+            Self::Undoing => "undoing",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "not_generated" => Some(Self::NotGenerated),
+            "generating" => Some(Self::Generating),
+            "pending" => Some(Self::Pending),
+            "approving" => Some(Self::Approving),
+            "approved" => Some(Self::Approved),
+            "undoing" => Some(Self::Undoing),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// Why an image is not generated.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotGenerated {
+    /// Its answer was stopped.
+    Stopped,
+    /// Its answer failed.
+    AnswerFailed,
+    /// Its answer requested more images than are generated for one answer.
+    OverLimit,
+    Cancelled,
+    /// Its generation never finished, or never started.
+    Interrupted,
+    /// No image provider was saved.
+    NoProvider,
+    Failed,
+}
+
+impl NotGenerated {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::AnswerFailed => "answer_failed",
+            Self::OverLimit => "over_limit",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::NoProvider => "no_provider",
+            Self::Failed => "failed",
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "stopped" => Some(Self::Stopped),
+            "answer_failed" => Some(Self::AnswerFailed),
+            "over_limit" => Some(Self::OverLimit),
+            "cancelled" => Some(Self::Cancelled),
+            "interrupted" => Some(Self::Interrupted),
+            "no_provider" => Some(Self::NoProvider),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// What a regeneration's generation did with the image it revises: sent it, left it out because
+/// the model takes no image input, or found it gone.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageReference {
+    Sent,
+    NotTaken,
+    Gone,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+impl ImageReference {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::NotTaken => "not_taken",
+            Self::Gone => "gone",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "sent" => Some(Self::Sent),
+            "not_taken" => Some(Self::NotTaken),
+            "gone" => Some(Self::Gone),
+            _ => None,
+        }
+    }
+}
+
+/// An image request as an answer saves it, not generated yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewImage {
+    pub name: String,
+    pub frame: ImageFrame,
+    pub prompt: String,
+    /// The image it regenerates, kept only when that image exists.
+    pub revises: Option<i64>,
+    /// Why it is not generated yet.
+    pub reason: NotGenerated,
+}
+
+/// A saved image request and where it stands.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedImage {
+    pub id: i64,
+    pub name: String,
+    pub frame: ImageFrame,
+    pub prompt: String,
+    /// The image it regenerates, while that image exists.
+    pub revises: Option<i64>,
+    /// What its generation did with the image it revises, once it is generated.
+    pub reference: Option<ImageReference>,
+    pub state: ImageState,
+    /// Why it is not generated, while it is not.
+    pub reason: Option<NotGenerated>,
+    /// It was approved, and that approval was undone.
+    pub undone: bool,
+    /// While it is approved or marked: the path its approval writes, and the change the approval
+    /// recorded, or none when history was not recording.
+    pub path: Option<String>,
+    pub change: Option<HistoryChange>,
+}
+
+/// A generated image's file content and its media type.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBytes {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// An image with its conversation, its answer and its bytes, which it has from its generation
+/// until it is rejected.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredImage {
+    pub conversation: i64,
+    pub answer: i64,
+    pub image: SavedImage,
+    pub bytes: Option<ImageBytes>,
+}
+
+/// An answer's images and its notes about image requests.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedAnswerImages {
+    pub answer: i64,
+    /// How many image requests could not be read.
+    pub unreadable: u32,
+    /// Whether the answer ended inside an image request.
+    pub unfinished: bool,
+    pub images: Vec<SavedImage>,
+}
+
+/// A user message that regenerates an image, by the message's id, with the image's name.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedRegeneration {
+    pub message: i64,
+    pub image: i64,
+    pub name: String,
+}
+
+/// A conversation's answers that have images or notes about them, in order, and its regeneration
+/// messages.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedImages {
+    pub answers: Vec<SavedAnswerImages>,
+    pub regenerations: Vec<SavedRegeneration>,
+}
+
+/// The image a regeneration message revises, with what a request tells the model of it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "regenerations arrive in package image-approval")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Regenerated {
+    pub image: i64,
+    pub name: String,
+    pub prompt: String,
+}
+
+/// An image marked `approving` or `undoing`, with the path its approval writes, to be resolved
+/// from what that file holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageMark {
+    pub image: i64,
+    pub path: String,
+}
+
 /// Why the conversations are kept differently than usual until the world closes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -419,6 +764,12 @@ pub struct Store {
     notice: Option<StoreNotice>,
     /// The sets an earlier process or opening left unfinished, until they are taken to be resolved.
     unfinished: Vec<UnfinishedSet>,
+    /// The images an earlier process or opening left marked, until they are taken to be resolved.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    marks: Vec<ImageMark>,
 }
 
 /// Why a message could not be written.
@@ -450,12 +801,17 @@ impl Store {
     /// cannot be used, the store is in memory, and its notice says why.
     pub fn open(app_data: Option<&Path>, world: &Path, now: u64) -> Result<Self, AppError> {
         match open_file(app_data, world, now) {
-            Ok((connection, set_aside)) => Ok(Self {
-                unfinished: unfinished_sets(&connection).map_err(store_error)?,
-                connection,
-                saving: true,
-                notice: set_aside.then_some(StoreNotice::SetAside),
-            }),
+            Ok((connection, set_aside)) => {
+                let mut store = Self {
+                    unfinished: unfinished_sets(&connection).map_err(store_error)?,
+                    marks: image_marks(&connection).map_err(store_error)?,
+                    connection,
+                    saving: true,
+                    notice: set_aside.then_some(StoreNotice::SetAside),
+                };
+                store.interrupt_generations()?;
+                Ok(store)
+            }
             Err(reason) => {
                 let connection = memory_database().map_err(store_error)?;
                 Ok(Self {
@@ -463,15 +819,53 @@ impl Store {
                     saving: false,
                     notice: Some(StoreNotice::NotSaved { reason }),
                     unfinished: Vec::new(),
+                    marks: Vec::new(),
                 })
             }
         }
+    }
+
+    /// Makes every image an earlier process or opening left generating not generated
+    /// (interrupted). A file without one is not written, so a read-only file opens as before.
+    fn interrupt_generations(&mut self) -> Result<(), AppError> {
+        let generating: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM images WHERE state = ?1)",
+                [ImageState::Generating.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(store_error)?;
+        if generating {
+            self.write(|transaction| {
+                transaction.execute(
+                    "UPDATE images SET state = ?2, reason = ?3 WHERE state = ?1",
+                    params![
+                        ImageState::Generating.as_str(),
+                        ImageState::NotGenerated.as_str(),
+                        NotGenerated::Interrupted.as_str()
+                    ],
+                )?;
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     /// Takes the sets that were unfinished when the store opened, so they are resolved once. Sets
     /// begun since are never among them.
     pub fn take_unfinished(&mut self) -> Vec<UnfinishedSet> {
         std::mem::take(&mut self.unfinished)
+    }
+
+    /// Takes the images that were marked when the store opened, so they are resolved once. Marks
+    /// made since are never among them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    pub fn take_image_marks(&mut self) -> Vec<ImageMark> {
+        std::mem::take(&mut self.marks)
     }
 
     /// Runs `write` in one transaction. When writing to the file fails, the store moves to memory,
@@ -510,14 +904,27 @@ impl Store {
     }
 
     /// Adds a user message to `conversation`, or to a new conversation titled by the message when
-    /// there is none, and returns the conversation's id.
+    /// there is none, and returns the conversation's id. A message that `regenerates` an image
+    /// must be added to that image's conversation.
     pub fn add_user_message(
         &mut self,
         conversation: Option<i64>,
         text: &str,
+        regenerates: Option<i64>,
         now: i64,
     ) -> Result<i64, AppError> {
         self.write(|transaction| {
+            if let Some(image) = regenerates {
+                let in_conversation: bool = transaction.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM images JOIN messages ON messages.id = images.message
+                                    WHERE images.id = ?1 AND messages.conversation = ?2)",
+                    params![image, conversation],
+                    |row| row.get(0),
+                )?;
+                if !in_conversation {
+                    return Err(WriteFailure::Refused(no_image()));
+                }
+            }
             let conversation = match conversation {
                 Some(id) => {
                     let updated = transaction.execute(
@@ -538,17 +945,18 @@ impl Store {
                 }
             };
             transaction.execute(
-                "INSERT INTO messages (conversation, role, text, time) VALUES (?1, ?2, ?3, ?4)",
-                params![conversation, USER, text, now],
+                "INSERT INTO messages (conversation, role, text, time, regenerates)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![conversation, USER, text, now, regenerates],
             )?;
             Ok(conversation)
         })
     }
 
     /// Readies `conversation` to answer its last message again: that message must be a user
-    /// message whose answer is missing or stopped, and a stopped answer is removed, unless one of
-    /// its proposals belongs to a set, accepted or still being accepted. Returns the message's
-    /// text.
+    /// message whose answer is missing or stopped, and a stopped answer is removed with its images,
+    /// unless one of its proposals belongs to a set, accepted or still being accepted, or one of
+    /// its images is approved, being approved or being undone. Returns the message's text.
     pub fn prepare_retry(&mut self, conversation: i64) -> Result<String, AppError> {
         self.write(|transaction| {
             let last: Vec<(i64, String, String, Option<String>)> = transaction
@@ -577,6 +985,23 @@ impl Store {
                             "The last answer has accepted proposals.",
                         )));
                     }
+                    let approved: bool = transaction.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM images
+                                        WHERE message = ?1 AND state IN (?2, ?3, ?4))",
+                        params![
+                            answer,
+                            ImageState::Approving.as_str(),
+                            ImageState::Approved.as_str(),
+                            ImageState::Undoing.as_str()
+                        ],
+                        |row| row.get(0),
+                    )?;
+                    if approved {
+                        return Err(WriteFailure::Refused(AppError::new(
+                            ErrorKind::Conflict,
+                            "The last answer has an approved image.",
+                        )));
+                    }
                     transaction.execute("DELETE FROM messages WHERE id = ?1", [answer])?;
                     Ok(text.clone())
                 }
@@ -590,18 +1015,19 @@ impl Store {
     }
 
     /// Saves the answer to `conversation`'s last message, with the pages its request carried and
-    /// its proposals, and returns the answer's id.
+    /// its proposals and its image requests, and returns the answer's id and its images' ids in
+    /// order.
     pub fn add_answer(
         &mut self,
         conversation: i64,
         answer: &Answer,
         now: i64,
-    ) -> Result<i64, AppError> {
+    ) -> Result<(i64, Vec<i64>), AppError> {
         self.write(|transaction| {
             transaction.execute(
                 "INSERT INTO messages (conversation, role, text, time, state, left_out, indexing,
-                                       unreadable, unfinished)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                       unreadable, unfinished, image_unreadable, image_unfinished)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     conversation,
                     ASSISTANT,
@@ -611,7 +1037,9 @@ impl Store {
                     answer.left_out,
                     answer.indexing,
                     answer.unreadable,
-                    answer.unfinished
+                    answer.unfinished,
+                    answer.image_unreadable,
+                    answer.image_unfinished
                 ],
             )?;
             let message = transaction.last_insert_rowid();
@@ -625,11 +1053,205 @@ impl Store {
             for (ordinal, proposal) in answer.proposals.iter().enumerate() {
                 add_proposal(transaction, message, ordinal, proposal)?;
             }
+            let mut images = Vec::new();
+            for (ordinal, image) in answer.images.iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO images (message, ordinal, name, frame, prompt, revises, state,
+                                         reason, undone)
+                     VALUES (?1, ?2, ?3, ?4, ?5, (SELECT id FROM images WHERE id = ?6), ?7, ?8, 0)",
+                    params![
+                        message,
+                        ordinal as i64,
+                        image.name,
+                        image.frame.as_str(),
+                        image.prompt,
+                        image.revises,
+                        ImageState::NotGenerated.as_str(),
+                        image.reason.as_str()
+                    ],
+                )?;
+                images.push(transaction.last_insert_rowid());
+            }
             transaction.execute(
                 "UPDATE conversations SET updated = ?2 WHERE id = ?1",
                 params![conversation, now],
             )?;
-            Ok(message)
+            Ok((message, images))
+        })
+    }
+
+    /// Starts generating an image that is not generated.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    pub fn start_generating(&mut self, image: i64) -> Result<(), AppError> {
+        self.write(|transaction| {
+            require(
+                transaction,
+                image,
+                ImageState::NotGenerated,
+                "The image is being generated or was generated already.",
+            )?;
+            transaction.execute(
+                "UPDATE images SET state = ?2, reason = NULL WHERE id = ?1",
+                params![image, ImageState::Generating.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Keeps a generating image's `bytes`, of `media_type`, and makes it pending. `reference` says
+    /// what a regeneration did with the image it revises.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    pub fn generated(
+        &mut self,
+        image: i64,
+        media_type: &str,
+        bytes: &[u8],
+        reference: Option<ImageReference>,
+    ) -> Result<(), AppError> {
+        self.write(|transaction| {
+            require(transaction, image, ImageState::Generating, NOT_GENERATING)?;
+            transaction.execute(
+                "UPDATE images SET state = ?2, reference = ?3 WHERE id = ?1",
+                params![
+                    image,
+                    ImageState::Pending.as_str(),
+                    reference.map(ImageReference::as_str)
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO image_bytes (image, media_type, bytes) VALUES (?1, ?2, ?3)",
+                params![image, media_type, bytes],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Ends a generating image's generation without an image, for `reason`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    pub fn not_generated(&mut self, image: i64, reason: NotGenerated) -> Result<(), AppError> {
+        self.write(|transaction| {
+            require(transaction, image, ImageState::Generating, NOT_GENERATING)?;
+            transaction.execute(
+                "UPDATE images SET state = ?2, reason = ?3 WHERE id = ?1",
+                params![image, ImageState::NotGenerated.as_str(), reason.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Rejects a pending image for good and deletes its bytes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    pub fn reject_image(&mut self, image: i64) -> Result<(), AppError> {
+        self.write(|transaction| {
+            require(transaction, image, ImageState::Pending, NOT_PENDING_IMAGE)?;
+            transaction.execute(
+                "UPDATE images SET state = ?2 WHERE id = ?1",
+                params![image, ImageState::Rejected.as_str()],
+            )?;
+            transaction.execute("DELETE FROM image_bytes WHERE image = ?1", [image])?;
+            Ok(())
+        })
+    }
+
+    /// Marks a pending image as being approved, before its approval writes anything, with the path
+    /// the approval writes and the change it recorded, or none when history was not recording.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    pub fn begin_approving(
+        &mut self,
+        image: i64,
+        path: &str,
+        change: Option<HistoryChange>,
+    ) -> Result<(), AppError> {
+        self.write(|transaction| {
+            require(transaction, image, ImageState::Pending, NOT_PENDING_IMAGE)?;
+            transaction.execute(
+                "UPDATE images SET state = ?2, path = ?3, change = ?4, started = ?5 WHERE id = ?1",
+                params![
+                    image,
+                    ImageState::Approving.as_str(),
+                    path,
+                    change.map(|change| change.id),
+                    change.map(|change| change.started as i64)
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Marks an approved image as being undone, before the undo writes anything.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    pub fn begin_undoing(&mut self, image: i64) -> Result<(), AppError> {
+        self.write(|transaction| {
+            require(
+                transaction,
+                image,
+                ImageState::Approved,
+                "The image is no longer approved.",
+            )?;
+            transaction.execute(
+                "UPDATE images SET state = ?2 WHERE id = ?1",
+                params![image, ImageState::Undoing.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Settles a marked image by whether the file at its path holds its bytes (`written`): an
+    /// image being approved becomes approved when it does and pending otherwise, and an image being
+    /// undone stays approved when it does and becomes pending and undone otherwise. This finishes
+    /// an approval or an undo, and resolves a mark a stop left. An image that is no longer marked,
+    /// or no longer exists, is left as it is.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "approvals arrive in package image-approval")
+    )]
+    pub fn settle_image(&mut self, image: i64, written: bool) -> Result<Settling, AppError> {
+        self.write(|transaction| {
+            let state = transaction
+                .query_row("SELECT state FROM images WHERE id = ?1", [image], |row| {
+                    stored(row, 0, ImageState::parse)
+                })
+                .optional()?;
+            match (state, written) {
+                (Some(ImageState::Approving | ImageState::Undoing), true) => {
+                    transaction.execute(
+                        "UPDATE images SET state = ?2, undone = 0 WHERE id = ?1",
+                        params![image, ImageState::Approved.as_str()],
+                    )?;
+                }
+                (Some(state @ (ImageState::Approving | ImageState::Undoing)), false) => {
+                    transaction.execute(
+                        "UPDATE images SET state = ?2, undone = undone OR ?3, path = NULL,
+                                           change = NULL, started = NULL
+                         WHERE id = ?1",
+                        params![
+                            image,
+                            ImageState::Pending.as_str(),
+                            state == ImageState::Undoing
+                        ],
+                    )?;
+                }
+                _ => return Ok(Settling::AlreadySettled),
+            }
+            Ok(Settling::Settled)
         })
     }
 
@@ -781,6 +1403,9 @@ impl Store {
         let mut proposals = self.connection.prepare(
             "SELECT kind, path, state, undone FROM proposals WHERE message = ?1 ORDER BY ordinal",
         )?;
+        let mut images = self.connection.prepare(
+            "SELECT name, state, undone, path FROM images WHERE message = ?1 ORDER BY ordinal",
+        )?;
         let mut statement = self
             .connection
             .prepare("SELECT id, text, state FROM messages WHERE conversation = ?1 ORDER BY id")?;
@@ -800,6 +1425,9 @@ impl Store {
                             proposal.get(3)?,
                         ))
                     })?
+                    .collect::<Result<_, _>>()?,
+                images: images
+                    .query_map([row.get::<_, i64>(0)?], image_line)?
                     .collect::<Result<_, _>>()?,
             });
         }
@@ -854,6 +1482,153 @@ impl Store {
             .into_iter()
             .find(|proposals| proposals.answer == answer)
             .ok_or_else(no_proposal)
+    }
+
+    /// The image `image` with its conversation, its answer and its bytes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    pub fn image(&self, image: i64) -> Result<StoredImage, AppError> {
+        self.read_image(image)
+            .map_err(store_error)?
+            .ok_or_else(no_image)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    fn read_image(&self, image: i64) -> rusqlite::Result<Option<StoredImage>> {
+        let Some((conversation, answer, saved)) = self
+            .connection
+            .query_row(
+                &format!(
+                    "SELECT messages.conversation, images.message, {IMAGE_COLUMNS}
+                     FROM images JOIN messages ON messages.id = images.message
+                     WHERE images.id = ?1"
+                ),
+                [image],
+                |row| Ok((row.get(0)?, row.get(1)?, saved_image(row, 2)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let bytes = self
+            .connection
+            .query_row(
+                "SELECT media_type, bytes FROM image_bytes WHERE image = ?1",
+                [image],
+                |row| {
+                    Ok(ImageBytes {
+                        media_type: row.get(0)?,
+                        bytes: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(Some(StoredImage {
+            conversation,
+            answer,
+            image: saved,
+            bytes,
+        }))
+    }
+
+    /// The answers of `conversation` that have images or notes about them, in order, each with its
+    /// images, and the conversation's regeneration messages whose image still exists.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    pub fn images(&self, conversation: i64) -> Result<SavedImages, AppError> {
+        self.read_images(conversation)
+            .map_err(store_error)?
+            .ok_or_else(no_conversation)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "generations arrive in package image-generation")
+    )]
+    fn read_images(&self, conversation: i64) -> rusqlite::Result<Option<SavedImages>> {
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1)",
+            [conversation],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let mut images = self.connection.prepare(&format!(
+            "SELECT {IMAGE_COLUMNS} FROM images WHERE message = ?1 ORDER BY ordinal"
+        ))?;
+        let answers = self
+            .connection
+            .prepare(
+                "SELECT id, image_unreadable, image_unfinished FROM messages
+                 WHERE conversation = ?1 AND role = ?2
+                   AND (image_unreadable > 0 OR image_unfinished
+                        OR EXISTS (SELECT 1 FROM images WHERE message = messages.id))
+                 ORDER BY id",
+            )?
+            .query_map(params![conversation, ASSISTANT], |row| {
+                let answer: i64 = row.get(0)?;
+                Ok(SavedAnswerImages {
+                    answer,
+                    unreadable: row.get(1)?,
+                    unfinished: row.get(2)?,
+                    images: images
+                        .query_map([answer], |image| saved_image(image, 0))?
+                        .collect::<Result<_, _>>()?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let regenerations = self
+            .connection
+            .prepare(
+                "SELECT messages.id, images.id, images.name
+                 FROM messages JOIN images ON images.id = messages.regenerates
+                 WHERE messages.conversation = ?1 ORDER BY messages.id",
+            )?
+            .query_map([conversation], |row| {
+                Ok(SavedRegeneration {
+                    message: row.get(0)?,
+                    image: row.get(1)?,
+                    name: row.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(Some(SavedImages {
+            answers,
+            regenerations,
+        }))
+    }
+
+    /// The image that `conversation`'s last message regenerates, when it is a regeneration message
+    /// and the image still exists.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "regenerations arrive in package image-approval")
+    )]
+    pub fn last_regeneration(&self, conversation: i64) -> Result<Option<Regenerated>, AppError> {
+        self.connection
+            .query_row(
+                "SELECT images.id, images.name, images.prompt
+                 FROM messages JOIN images ON images.id = messages.regenerates
+                 WHERE messages.id = (SELECT max(id) FROM messages WHERE conversation = ?1)",
+                [conversation],
+                |row| {
+                    Ok(Regenerated {
+                        image: row.get(0)?,
+                        name: row.get(1)?,
+                        prompt: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(store_error)
     }
 
     /// The set `set`.
@@ -1089,9 +1864,9 @@ fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     let format: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match format {
         0 => create(&mut connection, world)?,
-        1 => {
+        1 | 2 => {
             check_world(&connection, world)?;
-            update_from_format_1(&mut connection)?;
+            update(&mut connection, format)?;
         }
         FORMAT => check_world(&connection, world)?,
         _ => {
@@ -1117,6 +1892,7 @@ fn create(connection: &mut Connection, world: &str) -> Result<(), Refusal> {
     transaction.execute_batch("CREATE TABLE meta (world TEXT NOT NULL);")?;
     transaction.execute_batch(SCHEMA)?;
     transaction.execute_batch(PROPOSAL_SCHEMA)?;
+    transaction.execute_batch(IMAGE_SCHEMA)?;
     transaction.execute("INSERT INTO meta (world) VALUES (?1)", [world])?;
     transaction.pragma_update(None, "user_version", FORMAT)?;
     transaction.commit()?;
@@ -1134,12 +1910,17 @@ fn check_world(connection: &Connection, world: &str) -> Result<(), Refusal> {
     }
 }
 
-/// Updates a format-1 file to the format in one transaction, so a failure leaves it format 1.
-fn update_from_format_1(connection: &mut Connection) -> Result<(), Refusal> {
+/// Updates a file in the earlier format `from` to the format, through each format between, in one
+/// transaction, so a failure leaves it as it was.
+fn update(connection: &mut Connection, from: i64) -> Result<(), Refusal> {
     let update = |connection: &mut Connection| -> rusqlite::Result<()> {
         let transaction = connection.transaction()?;
-        transaction.execute_batch(NOTES)?;
-        transaction.execute_batch(PROPOSAL_SCHEMA)?;
+        if from < 2 {
+            transaction.execute_batch(NOTES)?;
+            transaction.execute_batch(PROPOSAL_SCHEMA)?;
+        }
+        transaction.execute_batch(IMAGE_NOTES)?;
+        transaction.execute_batch(IMAGE_SCHEMA)?;
         transaction.pragma_update(None, "user_version", FORMAT)?;
         transaction.commit()
     };
@@ -1157,6 +1938,7 @@ fn memory_database() -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.execute_batch(SCHEMA)?;
     connection.execute_batch(PROPOSAL_SCHEMA)?;
+    connection.execute_batch(IMAGE_SCHEMA)?;
     Ok(connection)
 }
 
@@ -1164,6 +1946,8 @@ fn memory_database() -> rusqlite::Result<Connection> {
 fn copied(from: &Connection) -> rusqlite::Result<Connection> {
     let mut memory = memory_database()?;
     let transaction = memory.transaction()?;
+    // An image's `revises` can name an image copied after it; references are checked at commit.
+    transaction.pragma_update(None, "defer_foreign_keys", true)?;
     for table in TABLES {
         let mut select = from.prepare(&format!("SELECT * FROM {table}"))?;
         let columns = select.column_count();
@@ -1310,6 +2094,100 @@ fn unfinished_sets(connection: &Connection) -> rusqlite::Result<Vec<UnfinishedSe
         .collect()
 }
 
+/// The columns `saved_image` reads, in order.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+const IMAGE_COLUMNS: &str = "images.id, images.name, images.frame, images.prompt, images.revises,
+    images.reference, images.state, images.reason, images.undone, images.path, images.change,
+    images.started";
+
+/// The image in `row`, read from `IMAGE_COLUMNS` starting at the column `first`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+fn saved_image(row: &rusqlite::Row, first: usize) -> rusqlite::Result<SavedImage> {
+    let reference: Option<String> = row.get(first + 5)?;
+    let reason: Option<String> = row.get(first + 7)?;
+    Ok(SavedImage {
+        id: row.get(first)?,
+        name: row.get(first + 1)?,
+        frame: stored(row, first + 2, ImageFrame::parse)?,
+        prompt: row.get(first + 3)?,
+        revises: row.get(first + 4)?,
+        reference: reference
+            .map(|_| stored(row, first + 5, ImageReference::parse))
+            .transpose()?,
+        state: stored(row, first + 6, ImageState::parse)?,
+        reason: reason
+            .map(|_| stored(row, first + 7, NotGenerated::parse))
+            .transpose()?,
+        undone: row.get(first + 8)?,
+        path: row.get(first + 9)?,
+        change: history_change(row.get(first + 10)?, row.get(first + 11)?),
+    })
+}
+
+/// Refuses unless `image` is in the state `from`, with `refusal` when it is in another.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+fn require(
+    transaction: &Transaction,
+    image: i64,
+    from: ImageState,
+    refusal: &'static str,
+) -> Result<(), WriteFailure> {
+    let state = transaction
+        .query_row("SELECT state FROM images WHERE id = ?1", [image], |row| {
+            stored(row, 0, ImageState::parse)
+        })
+        .optional()?
+        .ok_or_else(|| WriteFailure::Refused(no_image()))?;
+    if state != from {
+        return Err(WriteFailure::Refused(AppError::new(
+            ErrorKind::Conflict,
+            refusal,
+        )));
+    }
+    Ok(())
+}
+
+/// The images that are marked, with the paths their approvals write.
+fn image_marks(connection: &Connection) -> rusqlite::Result<Vec<ImageMark>> {
+    connection
+        .prepare("SELECT id, path FROM images WHERE state IN (?1, ?2) ORDER BY id")?
+        .query_map(
+            [ImageState::Approving.as_str(), ImageState::Undoing.as_str()],
+            |row| {
+                Ok(ImageMark {
+                    image: row.get(0)?,
+                    path: row.get(1)?,
+                })
+            },
+        )?
+        .collect()
+}
+
+/// The line a request carries for an image, read from its `name, state, undone, path`: its name
+/// and what became of it. An image being approved or undone counts as it was before.
+fn image_line(row: &rusqlite::Row) -> rusqlite::Result<String> {
+    let name: String = row.get(0)?;
+    let outcome = match (stored(row, 1, ImageState::parse)?, row.get(2)?) {
+        (ImageState::NotGenerated | ImageState::Generating, _) => "not generated".to_owned(),
+        (ImageState::Pending | ImageState::Approving, false) => "pending".to_owned(),
+        (ImageState::Pending | ImageState::Approving, true) => "undone".to_owned(),
+        (ImageState::Approved | ImageState::Undoing, _) => {
+            format!("saved as {}", row.get::<_, String>(3)?)
+        }
+        (ImageState::Rejected, _) => "rejected".to_owned(),
+    };
+    Ok(format!("[Image \"{name}\": {outcome}]"))
+}
+
 /// The value in `column` of `row`, read as text by `parse`.
 fn stored<T>(
     row: &rusqlite::Row,
@@ -1376,6 +2254,21 @@ fn not_pending() -> AppError {
     AppError::new(ErrorKind::Conflict, "The proposal is no longer pending.")
 }
 
+fn no_image() -> AppError {
+    AppError::new(ErrorKind::NotFound, "The image does not exist.")
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+const NOT_PENDING_IMAGE: &str = "The image is no longer pending.";
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generations arrive in package image-generation")
+)]
+const NOT_GENERATING: &str = "The image is no longer being generated.";
+
 fn no_set() -> AppError {
     AppError::new(ErrorKind::NotFound, "The accepted proposals do not exist.")
 }
@@ -1431,6 +2324,7 @@ mod tests {
             text: text.to_owned(),
             answer: None,
             proposals: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -1444,6 +2338,9 @@ mod tests {
             proposals: &[],
             unreadable: 0,
             unfinished: false,
+            images: &[],
+            image_unreadable: 0,
+            image_unfinished: false,
         }
     }
 
@@ -1470,26 +2367,24 @@ mod tests {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
         let long = format!("  {}\nsecond line", "x".repeat(70));
-        let first = store.add_user_message(None, &long, 10).unwrap();
-        let second = store.add_user_message(None, "Saltmere", 20).unwrap();
+        let first = store.add_user_message(None, &long, None, 10).unwrap();
+        let second = store.add_user_message(None, "Saltmere", None, 20).unwrap();
         let pages = [("Places/Saltmere.md".to_owned(), true)];
-        let answer = store
+        let (answer, _) = store
             .add_answer(
                 first,
                 &Answer {
-                    state: AnswerState::CutOff,
-                    text: "Long",
                     pages: &pages,
                     left_out: 2,
                     indexing: true,
-                    proposals: &[],
-                    unreadable: 0,
-                    unfinished: false,
+                    ..answer(AnswerState::CutOff, "Long")
                 },
                 30,
             )
             .unwrap();
-        store.add_user_message(Some(first), "Next", 40).unwrap();
+        store
+            .add_user_message(Some(first), "Next", None, 40)
+            .unwrap();
         drop(store);
 
         let store = opened(&app_data);
@@ -1541,14 +2436,14 @@ mod tests {
         let world: String = connection
             .query_row("SELECT world FROM meta", [], |row| row.get(0))
             .unwrap();
-        assert_eq!((format, world.as_str()), (2, WORLD));
+        assert_eq!((format, world.as_str()), (3, WORLD));
     }
 
     #[test]
     fn a_message_is_written_whole_or_not_at_all() {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
-        let conversation = store.add_user_message(None, "Hello", 1).unwrap();
+        let conversation = store.add_user_message(None, "Hello", None, 1).unwrap();
         // Fails the write of an answer's second page, inside its transaction.
         store
             .connection
@@ -1563,14 +2458,8 @@ mod tests {
             .add_answer(
                 conversation,
                 &Answer {
-                    state: AnswerState::Complete,
-                    text: "Hi",
                     pages: &pages,
-                    left_out: 0,
-                    indexing: false,
-                    proposals: &[],
-                    unreadable: 0,
-                    unfinished: false,
+                    ..answer(AnswerState::Complete, "Hi")
                 },
                 2,
             )
@@ -1590,6 +2479,7 @@ mod tests {
                     text: "Hi".to_owned(),
                     answer: Some(AnswerState::Complete),
                     proposals: Vec::new(),
+                    images: Vec::new(),
                 }
             ]
         );
@@ -1623,7 +2513,7 @@ mod tests {
             fs::read(data_file::with_suffix(&journal, ".damaged-1000")).unwrap(),
             b"\0left over"
         );
-        store.add_user_message(None, "Hello", 1).unwrap();
+        store.add_user_message(None, "Hello", None, 1).unwrap();
         assert_eq!(rows_in_file(&app_data), [1, 1, 0]);
     }
 
@@ -1631,7 +2521,7 @@ mod tests {
     fn a_newer_unknown_or_foreign_file_is_left_untouched_and_the_store_works_in_memory() {
         let cases: [(&str, &str, &str); 3] = [
             (
-                "PRAGMA user_version = 3;",
+                "PRAGMA user_version = 4;",
                 "",
                 "The conversation store is in a newer format than this version of Grimoire.md knows.",
             ),
@@ -1651,7 +2541,7 @@ mod tests {
             let app_data = tempfile::tempdir().unwrap();
             let file = file_of(&app_data);
             let mut store = opened(&app_data);
-            store.add_user_message(None, "Kept", 1).unwrap();
+            store.add_user_message(None, "Kept", None, 1).unwrap();
             drop(store);
             let connection = Connection::open(&file).unwrap();
             connection.execute_batch(change).unwrap();
@@ -1660,7 +2550,7 @@ mod tests {
             let before = snapshot(&file);
 
             let mut store = opened(&app_data);
-            let conversation = store.add_user_message(None, "In memory", 2).unwrap();
+            let conversation = store.add_user_message(None, "In memory", None, 2).unwrap();
 
             assert_eq!(
                 store.conversations().unwrap().notice,
@@ -1699,7 +2589,7 @@ mod tests {
             ));
         }
         for (mut store, reason) in stores {
-            store.add_user_message(None, "Hello", 1).unwrap();
+            store.add_user_message(None, "Hello", None, 1).unwrap();
 
             assert_eq!(
                 store.conversations().unwrap(),
@@ -1725,13 +2615,13 @@ mod tests {
         let app_data = tempfile::tempdir().unwrap();
         let file = file_of(&app_data);
         let mut store = opened(&app_data);
-        let earlier = store.add_user_message(None, "Earlier", 1).unwrap();
+        let earlier = store.add_user_message(None, "Earlier", None, 1).unwrap();
         drop(store);
         fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
 
         let mut store = opened(&app_data);
         assert_eq!(store.conversations().unwrap().notice, None);
-        let later = store.add_user_message(None, "Later", 2).unwrap();
+        let later = store.add_user_message(None, "Later", None, 2).unwrap();
 
         assert_eq!(
             store.conversations().unwrap().notice,
@@ -1742,7 +2632,7 @@ mod tests {
         assert_eq!(titles(&store), ["Later", "Earlier"]);
         assert_eq!(store.messages(earlier).unwrap(), [user("Earlier")]);
         store
-            .add_user_message(Some(later), "Still here", 3)
+            .add_user_message(Some(later), "Still here", None, 3)
             .unwrap();
         drop(store);
 
@@ -1753,18 +2643,21 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_conversation_removes_its_messages_pages_proposals_and_sets_and_nothing_else() {
+    fn deleting_a_conversation_removes_its_messages_pages_proposals_sets_and_images_and_nothing_else()
+     {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
-        let gone = store.add_user_message(None, "Gone", 1).unwrap();
+        let gone = store.add_user_message(None, "Gone", None, 1).unwrap();
         let pages = [("A.md".to_owned(), false)];
         let gone_proposals = [new_page("Gone.md"), edit("A.md")];
-        let gone_answer = store
+        let images = [new_image("Gate"), new_image("Tower")];
+        let (gone_answer, gone_images) = store
             .add_answer(
                 gone,
                 &Answer {
                     pages: &pages,
                     proposals: &gone_proposals,
+                    images: &images,
                     ..answer(AnswerState::Complete, "Hi")
                 },
                 2,
@@ -1774,24 +2667,29 @@ mod tests {
         store
             .begin_accept(gone_answer, &pages_of(&ids), None, 2)
             .unwrap();
-        let kept = store.add_user_message(None, "Kept", 3).unwrap();
+        drive(&mut store, gone_images[0], ImageState::Approved);
+        let kept = store.add_user_message(None, "Kept", None, 3).unwrap();
         let kept_proposals = [new_page("Kept.md")];
-        store
+        let (_, kept_images) = store
             .add_answer(
                 kept,
                 &Answer {
                     pages: &pages,
                     proposals: &kept_proposals,
+                    images: &images[..1],
                     ..answer(AnswerState::Complete, "Hi")
                 },
                 4,
             )
             .unwrap();
+        drive(&mut store, kept_images[0], ImageState::Pending);
 
         store.delete(gone).unwrap();
 
         assert_eq!(rows_in_file(&app_data), [1, 2, 1]);
         assert_eq!(proposal_rows_in_file(&app_data), [0, 1, 0]);
+        assert_eq!(image_rows_in_file(&app_data), [1, 1]);
+        assert!(store.image(kept_images[0]).unwrap().bytes.is_some());
         assert_eq!(titles(&store), ["Kept"]);
         assert_eq!(store.delete(gone).unwrap_err().kind, ErrorKind::NotFound);
     }
@@ -1800,7 +2698,7 @@ mod tests {
     fn retry_replaces_a_stopped_answer_accepts_a_missing_one_and_refuses_after_an_answer() {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
-        let conversation = store.add_user_message(None, "Hello", 1).unwrap();
+        let conversation = store.add_user_message(None, "Hello", None, 1).unwrap();
 
         assert_eq!(store.prepare_retry(conversation).unwrap(), "Hello");
 
@@ -1829,7 +2727,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .add_user_message(Some(99), "Lost", 4)
+                .add_user_message(Some(99), "Lost", None, 4)
                 .unwrap_err()
                 .kind,
             ErrorKind::NotFound
@@ -1972,9 +2870,9 @@ mod tests {
     /// A conversation whose stopped answer proposes the pages `A.md`, `B.md` and `C.md`: its id,
     /// the answer's id and the proposals' ids.
     fn with_proposals(store: &mut Store) -> (i64, i64, [i64; 3]) {
-        let conversation = store.add_user_message(None, "Propose", 1).unwrap();
+        let conversation = store.add_user_message(None, "Propose", None, 1).unwrap();
         let proposals = [new_page("A.md"), new_page("B.md"), edit("C.md")];
-        let answer = store
+        let (answer, _) = store
             .add_answer(
                 conversation,
                 &Answer {
@@ -2029,72 +2927,152 @@ mod tests {
 
     use ProposalState::{Accepted, Pending, Rejected};
 
-    #[test]
-    fn a_format_1_file_is_updated_in_place_keeping_every_row() {
-        let app_data = tempfile::tempdir().unwrap();
-        let file = write_format_1(&app_data, "");
-        let connection = Connection::open(&file).unwrap();
-        let before = FORMAT_1_ROWS.map(|query| rows(&connection, query));
-        drop(connection);
-
-        let store = opened(&app_data);
-
-        assert_eq!(store.conversations().unwrap().notice, None);
-        assert_eq!(titles(&store), ["Kesh", "Saltmere"]);
-        drop(store);
-        let connection = Connection::open(&file).unwrap();
-        assert_eq!(FORMAT_1_ROWS.map(|query| rows(&connection, query)), before);
-        assert_eq!(
-            rows(&connection, "SELECT unreadable, unfinished FROM messages"),
-            vec![vec![Value::Integer(0), Value::Integer(0)]; 4]
+    /// What a format-2 file adds to the format-1 file: the notes, the proposal tables, and an
+    /// answer's accepted, pending (undone) and rejected proposals with an edit's passages.
+    const FORMAT_2: &str = "
+        ALTER TABLE messages ADD COLUMN unreadable INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE messages ADD COLUMN unfinished INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE accepts (
+            id INTEGER PRIMARY KEY,
+            message INTEGER REFERENCES messages ON DELETE CASCADE,
+            change INTEGER,
+            started INTEGER,
+            state TEXT,
+            time INTEGER
         );
-        let format: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(format, 2);
-        // A move to memory copies the columns in order, so they must match a new file's.
-        let new = tempfile::tempdir().unwrap();
-        drop(opened(&new));
-        assert_eq!(columns(&file), columns(&file_of(&new)));
+        CREATE TABLE proposals (
+            id INTEGER PRIMARY KEY,
+            message INTEGER REFERENCES messages ON DELETE CASCADE,
+            ordinal INTEGER,
+            kind TEXT,
+            path TEXT,
+            text TEXT,
+            base INTEGER,
+            result INTEGER,
+            state TEXT,
+            undone INTEGER,
+            accept INTEGER REFERENCES accepts ON DELETE SET NULL
+        );
+        CREATE INDEX proposals_by_message ON proposals (message, ordinal);
+        CREATE TABLE proposal_changes (
+            proposal INTEGER REFERENCES proposals ON DELETE CASCADE,
+            ordinal INTEGER,
+            find TEXT,
+            replace TEXT,
+            PRIMARY KEY (proposal, ordinal)
+        );
+        UPDATE messages SET unreadable = 2, unfinished = 1 WHERE id = 4;
+        INSERT INTO accepts VALUES (1, 2, 7, 1700000000, 'accepted', 35);
+        INSERT INTO proposals VALUES
+            (1, 2, 0, 'new_page', 'Places/Kesh Tor.md', '# Kesh Tor', NULL, -5, 'accepted', 0, 1),
+            (2, 2, 1, 'edit', 'People/Ada.md', NULL, -2, NULL, 'pending', 1, NULL),
+            (3, 4, 0, 'new_page', 'Kesh/Gate.md', '# Gate', NULL, NULL, 'rejected', 0, NULL);
+        INSERT INTO proposal_changes VALUES (2, 0, 'old', 'new'), (2, 1, 'grey', 'green');
+        PRAGMA user_version = 2;
+    ";
+
+    /// The format-2 tables' rows, in the columns format 2 has.
+    const FORMAT_2_ROWS: [&str; 6] = [
+        "SELECT * FROM conversations ORDER BY id",
+        "SELECT id, conversation, role, text, time, state, left_out, indexing, unreadable,
+                unfinished FROM messages ORDER BY id",
+        "SELECT * FROM read_pages ORDER BY message, ordinal",
+        "SELECT * FROM accepts ORDER BY id",
+        "SELECT * FROM proposals ORDER BY id",
+        "SELECT * FROM proposal_changes ORDER BY proposal, ordinal",
+    ];
+
+    #[test]
+    fn an_earlier_file_is_updated_in_place_to_format_3_keeping_every_row() {
+        let cases: [(&str, &str, &[&str]); 2] = [
+            ("format 1", "", &FORMAT_1_ROWS),
+            ("format 2", FORMAT_2, &FORMAT_2_ROWS),
+        ];
+        for (name, extra, queries) in cases {
+            let app_data = tempfile::tempdir().unwrap();
+            let file = write_format_1(&app_data, extra);
+            let connection = Connection::open(&file).unwrap();
+            let before: Vec<_> = queries
+                .iter()
+                .map(|query| rows(&connection, query))
+                .collect();
+            drop(connection);
+
+            let store = opened(&app_data);
+
+            assert_eq!(store.conversations().unwrap().notice, None, "{name}");
+            assert_eq!(titles(&store), ["Kesh", "Saltmere"], "{name}");
+            drop(store);
+            let connection = Connection::open(&file).unwrap();
+            let after: Vec<_> = queries
+                .iter()
+                .map(|query| rows(&connection, query))
+                .collect();
+            assert_eq!(after, before, "{name}");
+            assert_eq!(
+                rows(
+                    &connection,
+                    "SELECT regenerates, image_unreadable, image_unfinished FROM messages"
+                ),
+                vec![vec![Value::Null, Value::Integer(0), Value::Integer(0)]; 4],
+                "{name}"
+            );
+            let format: i64 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(format, 3, "{name}");
+            // A move to memory copies the columns in order, so they must match a new file's.
+            let new = tempfile::tempdir().unwrap();
+            drop(opened(&new));
+            assert_eq!(columns(&file), columns(&file_of(&new)), "{name}");
+        }
     }
 
     #[test]
-    fn a_format_1_file_whose_update_fails_is_left_as_it_was_and_the_store_works_in_memory() {
-        let app_data = tempfile::tempdir().unwrap();
-        // A table in the way of the update, which fails after the notes were added.
-        let file = write_format_1(&app_data, "CREATE TABLE accepts (id INTEGER);");
-        let before = fs::read(&file).unwrap();
+    fn an_earlier_file_whose_update_fails_is_left_as_it_was_and_the_store_works_in_memory() {
+        // A table in the way of the last step of the update, so a format-1 file fails after its
+        // update to format 2.
+        let in_the_way = "CREATE TABLE images (id INTEGER);";
+        for (name, extra) in [
+            ("format 1", in_the_way.to_owned()),
+            ("format 2", format!("{FORMAT_2}{in_the_way}")),
+        ] {
+            let app_data = tempfile::tempdir().unwrap();
+            let file = write_format_1(&app_data, &extra);
+            let before = fs::read(&file).unwrap();
 
-        let mut store = opened(&app_data);
-        store.add_user_message(None, "In memory", 1).unwrap();
+            let mut store = opened(&app_data);
+            store.add_user_message(None, "In memory", None, 1).unwrap();
 
-        let Some(StoreNotice::NotSaved { reason }) = store.conversations().unwrap().notice else {
-            panic!("the store is not saved");
-        };
-        assert!(
-            reason.starts_with(
-                "The conversation store could not be updated to this version's format."
-            ),
-            "{reason}"
-        );
-        assert_eq!(titles(&store), ["In memory"]);
-        drop(store);
-        assert_eq!(fs::read(&file).unwrap(), before);
+            let Some(StoreNotice::NotSaved { reason }) = store.conversations().unwrap().notice
+            else {
+                panic!("the store is not saved ({name})");
+            };
+            assert!(
+                reason.starts_with(
+                    "The conversation store could not be updated to this version's format."
+                ),
+                "{name}: {reason}"
+            );
+            assert_eq!(titles(&store), ["In memory"], "{name}");
+            drop(store);
+            assert_eq!(fs::read(&file).unwrap(), before, "{name}");
+        }
     }
 
     #[test]
     fn an_answer_keeps_its_proposals_passages_and_notes_across_reopening() {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
-        let conversation = store.add_user_message(None, "Propose", 1).unwrap();
+        let conversation = store.add_user_message(None, "Propose", None, 1).unwrap();
         store
             .add_answer(conversation, &answer(AnswerState::Complete, "Plain"), 2)
             .unwrap();
         store
-            .add_user_message(Some(conversation), "Again", 3)
+            .add_user_message(Some(conversation), "Again", None, 3)
             .unwrap();
         let proposals = [new_page("Places/Saltmere"), edit("People/Ada.md")];
-        let answer_id = store
+        let (answer_id, _) = store
             .add_answer(
                 conversation,
                 &Answer {
@@ -2331,11 +3309,15 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_moves_proposals_and_sets_to_memory_from_a_new_or_an_updated_file() {
-        for format_1 in [false, true] {
+    fn a_failed_write_moves_proposals_sets_and_images_to_memory_from_a_new_or_an_updated_file() {
+        for (name, file) in [
+            ("new", None),
+            ("format 1", Some("")),
+            ("format 2", Some(FORMAT_2)),
+        ] {
             let app_data = tempfile::tempdir().unwrap();
-            if format_1 {
-                write_format_1(&app_data, "");
+            if let Some(extra) = file {
+                write_format_1(&app_data, extra);
             }
             let mut store = opened(&app_data);
             let (conversation, answer, [a, b, c]) = with_proposals(&mut store);
@@ -2352,7 +3334,20 @@ mod tests {
                 .begin_accept(answer, &pages_of(&[b]), None, 4)
                 .unwrap();
             store.reject(c).unwrap();
+            let (_, _, [earlier_image, _]) =
+                with_images(&mut store, Some(conversation), ["Gate", "Tower"]);
+            drive(&mut store, earlier_image, ImageState::Approved);
+            let revising = regenerate(&mut store, conversation, earlier_image);
+            // The copy must not depend on an image being copied after the image it revises.
+            store
+                .connection
+                .execute(
+                    "UPDATE images SET revises = ?2 WHERE id = ?1",
+                    [earlier_image, revising],
+                )
+                .unwrap();
             let before = store.proposals(conversation).unwrap();
+            let images_before = store.images(conversation).unwrap();
             let earlier = titles(&store);
             store
                 .connection
@@ -2363,7 +3358,7 @@ mod tests {
                 .unwrap();
 
             store
-                .add_user_message(Some(conversation), "Fails", 5)
+                .add_user_message(Some(conversation), "Fails", None, 5)
                 .unwrap();
 
             assert!(
@@ -2371,14 +3366,15 @@ mod tests {
                     store.conversations().unwrap().notice,
                     Some(StoreNotice::NotSaved { .. })
                 ),
-                "format 1: {format_1}"
+                "{name}"
             );
-            assert_eq!(
-                store.proposals(conversation).unwrap(),
-                before,
-                "format 1: {format_1}"
-            );
-            assert_eq!(titles(&store), earlier, "format 1: {format_1}");
+            assert_eq!(store.proposals(conversation).unwrap(), before, "{name}");
+            assert_eq!(store.images(conversation).unwrap(), images_before, "{name}");
+            assert_eq!(images_before.regenerations.len(), 1, "{name}");
+            for image in [earlier_image, revising] {
+                assert_eq!(store.image(image).unwrap().bytes, Some(png()), "{name}");
+            }
+            assert_eq!(titles(&store), earlier, "{name}");
             assert_eq!(
                 store.messages(conversation).unwrap().last(),
                 Some(&user("Fails"))
@@ -2412,5 +3408,607 @@ mod tests {
         assert_eq!(store.prepare_retry(conversation).unwrap(), "Propose");
         assert_eq!(store.messages(conversation).unwrap(), [user("Propose")]);
         assert_eq!(proposal_rows_in_file(&app_data), [0, 0, 0]);
+    }
+
+    /// A generated image's bytes, with a NUL and a high byte, which a BLOB keeps.
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\xff";
+    const CHANGE: HistoryChange = HistoryChange {
+        id: 4,
+        started: 1_700_000_000,
+    };
+    const IMAGE_STATES: [ImageState; 7] = [
+        ImageState::NotGenerated,
+        ImageState::Generating,
+        ImageState::Pending,
+        ImageState::Approving,
+        ImageState::Approved,
+        ImageState::Undoing,
+        ImageState::Rejected,
+    ];
+
+    fn png() -> ImageBytes {
+        ImageBytes {
+            media_type: "image/png".to_owned(),
+            bytes: PNG.to_vec(),
+        }
+    }
+
+    fn new_image(name: &str) -> NewImage {
+        NewImage {
+            name: name.to_owned(),
+            frame: ImageFrame::Portrait,
+            prompt: format!("An ink drawing of {name}"),
+            revises: None,
+            reason: NotGenerated::Interrupted,
+        }
+    }
+
+    /// Adds a message to `conversation`, or to a new one, and a stopped answer requesting the
+    /// images named `names`: the conversation's id, the answer's id and the images' ids.
+    fn with_images<const N: usize>(
+        store: &mut Store,
+        conversation: Option<i64>,
+        names: [&str; N],
+    ) -> (i64, i64, [i64; N]) {
+        let conversation = store
+            .add_user_message(conversation, "Draw", None, 1)
+            .unwrap();
+        let images = names.map(new_image);
+        let (answer, ids) = store
+            .add_answer(
+                conversation,
+                &Answer {
+                    images: &images,
+                    ..answer(AnswerState::Stopped, "Here")
+                },
+                2,
+            )
+            .unwrap();
+        (conversation, answer, ids.try_into().unwrap())
+    }
+
+    /// The path an approval of `image` writes in these tests.
+    fn path_of(image: i64) -> String {
+        format!("images/{image}.png")
+    }
+
+    /// Takes a not-generated image to `state` through the operations that lead there.
+    fn drive(store: &mut Store, image: i64, state: ImageState) {
+        if state == ImageState::NotGenerated {
+            return;
+        }
+        store.start_generating(image).unwrap();
+        if state == ImageState::Generating {
+            return;
+        }
+        store.generated(image, "image/png", PNG, None).unwrap();
+        if state == ImageState::Rejected {
+            store.reject_image(image).unwrap();
+        }
+        if matches!(state, ImageState::Pending | ImageState::Rejected) {
+            return;
+        }
+        store
+            .begin_approving(image, &path_of(image), Some(CHANGE))
+            .unwrap();
+        if state == ImageState::Approving {
+            return;
+        }
+        store.settle_image(image, true).unwrap();
+        if state == ImageState::Undoing {
+            store.begin_undoing(image).unwrap();
+        }
+    }
+
+    /// Adds a message regenerating `image` to `conversation`, and an answer whose one image
+    /// revises it, which is pending; returns that image's id.
+    fn regenerate(store: &mut Store, conversation: i64, image: i64) -> i64 {
+        store
+            .add_user_message(Some(conversation), "Brighter", Some(image), 5)
+            .unwrap();
+        let revising = [NewImage {
+            revises: Some(image),
+            ..new_image("Gate at dawn")
+        }];
+        let (_, ids) = store
+            .add_answer(
+                conversation,
+                &Answer {
+                    images: &revising,
+                    ..answer(AnswerState::Complete, "Again")
+                },
+                6,
+            )
+            .unwrap();
+        drive(store, ids[0], ImageState::Pending);
+        ids[0]
+    }
+
+    /// The number of rows in each table format 3 added, in the world's file.
+    fn image_rows_in_file(app_data: &TempDir) -> [i64; 2] {
+        let connection = Connection::open(file_of(app_data)).unwrap();
+        ["images", "image_bytes"].map(|table| {
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+    }
+
+    fn state_of(store: &Store, image: i64) -> ImageState {
+        store.image(image).unwrap().image.state
+    }
+
+    #[test]
+    fn an_answer_keeps_its_images_notes_and_bytes_and_a_regeneration_its_image_across_reopening() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let conversation = store.add_user_message(None, "Draw", None, 1).unwrap();
+        store
+            .add_answer(conversation, &answer(AnswerState::Complete, "Plain"), 2)
+            .unwrap();
+        store
+            .add_user_message(Some(conversation), "Again", None, 3)
+            .unwrap();
+        let requested = [
+            NewImage {
+                frame: ImageFrame::Landscape,
+                ..new_image("Gate")
+            },
+            NewImage {
+                reason: NotGenerated::OverLimit,
+                revises: Some(999),
+                ..new_image("Tower")
+            },
+        ];
+        let (first, ids) = store
+            .add_answer(
+                conversation,
+                &Answer {
+                    images: &requested,
+                    image_unreadable: 2,
+                    image_unfinished: true,
+                    ..answer(AnswerState::Complete, "Here")
+                },
+                4,
+            )
+            .unwrap();
+        let [gate, tower] = ids[..] else {
+            panic!("two images are saved, not {ids:?}");
+        };
+        drive(&mut store, gate, ImageState::Pending);
+        store
+            .add_user_message(Some(conversation), "Brighter", Some(gate), 5)
+            .unwrap();
+        assert_eq!(
+            store.last_regeneration(conversation).unwrap(),
+            Some(Regenerated {
+                image: gate,
+                name: "Gate".to_owned(),
+                prompt: "An ink drawing of Gate".to_owned(),
+            })
+        );
+        let revising = [NewImage {
+            revises: Some(gate),
+            ..new_image("Gate at dawn")
+        }];
+        let (second, revised) = store
+            .add_answer(
+                conversation,
+                &Answer {
+                    images: &revising,
+                    ..answer(AnswerState::Complete, "Again")
+                },
+                6,
+            )
+            .unwrap();
+        assert_eq!(store.last_regeneration(conversation).unwrap(), None);
+        let other = store.add_user_message(None, "Other", None, 7).unwrap();
+        for (conversation, image) in [(Some(other), gate), (None, gate), (Some(conversation), 999)]
+        {
+            assert_eq!(
+                store
+                    .add_user_message(conversation, "Lost", Some(image), 8)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::NotFound,
+                "a message regenerates only an image of its own conversation"
+            );
+        }
+        drop(store);
+
+        let store = opened(&app_data);
+
+        let message: i64 = store
+            .connection
+            .query_row(
+                "SELECT id FROM messages WHERE text = 'Brighter'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let not_generated = |id, name: &str, reason| SavedImage {
+            id,
+            name: name.to_owned(),
+            frame: ImageFrame::Portrait,
+            prompt: format!("An ink drawing of {name}"),
+            revises: None,
+            reference: None,
+            state: ImageState::NotGenerated,
+            reason: Some(reason),
+            undone: false,
+            path: None,
+            change: None,
+        };
+        let gate_image = SavedImage {
+            frame: ImageFrame::Landscape,
+            state: ImageState::Pending,
+            reason: None,
+            ..not_generated(gate, "Gate", NotGenerated::Interrupted)
+        };
+        assert_eq!(
+            store.images(conversation).unwrap(),
+            SavedImages {
+                answers: vec![
+                    SavedAnswerImages {
+                        answer: first,
+                        unreadable: 2,
+                        unfinished: true,
+                        images: vec![
+                            gate_image.clone(),
+                            not_generated(tower, "Tower", NotGenerated::OverLimit),
+                        ],
+                    },
+                    SavedAnswerImages {
+                        answer: second,
+                        unreadable: 0,
+                        unfinished: false,
+                        images: vec![SavedImage {
+                            revises: Some(gate),
+                            ..not_generated(revised[0], "Gate at dawn", NotGenerated::Interrupted)
+                        }],
+                    },
+                ],
+                regenerations: vec![SavedRegeneration {
+                    message,
+                    image: gate,
+                    name: "Gate".to_owned(),
+                }],
+            },
+            "only answers with images or notes are listed, and a missing image is revised by none"
+        );
+        assert_eq!(
+            store.image(gate).unwrap(),
+            StoredImage {
+                conversation,
+                answer: first,
+                image: gate_image,
+                bytes: Some(png()),
+            }
+        );
+        assert_eq!(store.image(tower).unwrap().bytes, None);
+        assert_eq!(store.image(999).unwrap_err().kind, ErrorKind::NotFound);
+        assert_eq!(store.images(99).unwrap_err().kind, ErrorKind::NotFound);
+        assert_eq!(
+            store.images(other).unwrap(),
+            SavedImages {
+                answers: vec![],
+                regenerations: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn each_image_operation_moves_an_image_only_from_its_own_state() {
+        type Operation = fn(&mut Store, i64) -> Result<(), AppError>;
+        let operations: [(&str, ImageState, Operation, ImageState); 6] = [
+            (
+                "start generating",
+                ImageState::NotGenerated,
+                |store, image| store.start_generating(image),
+                ImageState::Generating,
+            ),
+            (
+                "generated",
+                ImageState::Generating,
+                |store, image| store.generated(image, "image/png", PNG, None),
+                ImageState::Pending,
+            ),
+            (
+                "not generated",
+                ImageState::Generating,
+                |store, image| store.not_generated(image, NotGenerated::Cancelled),
+                ImageState::NotGenerated,
+            ),
+            (
+                "reject",
+                ImageState::Pending,
+                |store, image| store.reject_image(image),
+                ImageState::Rejected,
+            ),
+            (
+                "begin approving",
+                ImageState::Pending,
+                |store, image| store.begin_approving(image, "images/Gate.png", None),
+                ImageState::Approving,
+            ),
+            (
+                "begin undoing",
+                ImageState::Approved,
+                |store, image| store.begin_undoing(image),
+                ImageState::Undoing,
+            ),
+        ];
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        for (name, from, operation, to) in operations {
+            for state in IMAGE_STATES {
+                let (_, _, [image]) = with_images(&mut store, None, ["Gate"]);
+                drive(&mut store, image, state);
+
+                let result = operation(&mut store, image);
+
+                if state == from {
+                    result.unwrap();
+                    assert_eq!(state_of(&store, image), to, "{name}");
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().kind,
+                        ErrorKind::Conflict,
+                        "{name} from {state:?}"
+                    );
+                    assert_eq!(state_of(&store, image), state, "{name} from {state:?}");
+                }
+            }
+            assert_eq!(
+                operation(&mut store, 999).unwrap_err().kind,
+                ErrorKind::NotFound,
+                "{name}"
+            );
+        }
+        // Refusals are not failures: the store still saves to its file.
+        assert_eq!(store.conversations().unwrap().notice, None);
+    }
+
+    #[test]
+    fn operations_keep_reasons_bytes_and_paths_and_a_rejection_deletes_the_bytes() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (_, _, [image, rejected]) = with_images(&mut store, None, ["Gate", "Tower"]);
+
+        store.start_generating(image).unwrap();
+        assert_eq!(store.image(image).unwrap().image.reason, None);
+        store.not_generated(image, NotGenerated::Failed).unwrap();
+        assert_eq!(
+            store.image(image).unwrap().image.reason,
+            Some(NotGenerated::Failed)
+        );
+        store.start_generating(image).unwrap();
+        store
+            .generated(image, "image/png", PNG, Some(ImageReference::NotTaken))
+            .unwrap();
+        store
+            .begin_approving(image, "images/Gate.png", Some(CHANGE))
+            .unwrap();
+        let stored = store.image(image).unwrap();
+        assert_eq!(
+            (
+                stored.image.reason,
+                stored.image.reference,
+                stored.image.path.as_deref(),
+                stored.image.change,
+                stored.bytes
+            ),
+            (
+                None,
+                Some(ImageReference::NotTaken),
+                Some("images/Gate.png"),
+                Some(CHANGE),
+                Some(png())
+            )
+        );
+
+        drive(&mut store, rejected, ImageState::Pending);
+        assert_eq!(image_rows_in_file(&app_data), [2, 2]);
+        store.reject_image(rejected).unwrap();
+        assert_eq!(store.image(rejected).unwrap().bytes, None);
+        assert_eq!(image_rows_in_file(&app_data), [2, 1]);
+    }
+
+    #[test]
+    fn settling_a_marked_image_follows_its_file_and_leaves_other_images_alone() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        // The mark, whether the file holds the image's bytes, and the state and undone mark that
+        // follow, with whether the path and change are kept.
+        let cases = [
+            (
+                ImageState::Approving,
+                true,
+                ImageState::Approved,
+                false,
+                true,
+            ),
+            (
+                ImageState::Approving,
+                false,
+                ImageState::Pending,
+                false,
+                false,
+            ),
+            (ImageState::Undoing, true, ImageState::Approved, false, true),
+            (ImageState::Undoing, false, ImageState::Pending, true, false),
+        ];
+        for (mark, written, state, undone, kept) in cases {
+            let (_, _, [image]) = with_images(&mut store, None, ["Gate"]);
+            drive(&mut store, image, mark);
+
+            assert_eq!(
+                store.settle_image(image, written).unwrap(),
+                Settling::Settled
+            );
+
+            let stored = store.image(image).unwrap();
+            let case = format!("{mark:?} written: {written}");
+            assert_eq!(
+                (
+                    stored.image.state,
+                    stored.image.undone,
+                    stored.image.path.is_some(),
+                    stored.image.change.is_some()
+                ),
+                (state, undone, kept, kept),
+                "{case}"
+            );
+            assert_eq!(stored.bytes, Some(png()), "{case}");
+            assert_eq!(
+                store.settle_image(image, !written).unwrap(),
+                Settling::AlreadySettled,
+                "{case}"
+            );
+        }
+
+        // Approved again, an undone image is no longer undone.
+        let (_, _, [image]) = with_images(&mut store, None, ["Gate"]);
+        drive(&mut store, image, ImageState::Undoing);
+        store.settle_image(image, false).unwrap();
+        store
+            .begin_approving(image, "images/Gate.png", None)
+            .unwrap();
+        store.settle_image(image, true).unwrap();
+        assert!(!store.image(image).unwrap().image.undone);
+
+        for state in IMAGE_STATES {
+            if matches!(state, ImageState::Approving | ImageState::Undoing) {
+                continue;
+            }
+            let (_, _, [image]) = with_images(&mut store, None, ["Gate"]);
+            drive(&mut store, image, state);
+            assert_eq!(
+                store.settle_image(image, false).unwrap(),
+                Settling::AlreadySettled,
+                "{state:?}"
+            );
+            assert_eq!(state_of(&store, image), state, "{state:?}");
+        }
+        assert_eq!(
+            store.settle_image(999, true).unwrap(),
+            Settling::AlreadySettled
+        );
+    }
+
+    #[test]
+    fn retry_is_refused_while_an_image_of_the_stopped_answer_is_approved_and_removes_its_images() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (conversation, _, [image, other]) = with_images(&mut store, None, ["Gate", "Tower"]);
+        drive(&mut store, other, ImageState::Pending);
+        drive(&mut store, image, ImageState::Pending);
+        let refused = |store: &mut Store, while_: &str| {
+            assert_eq!(
+                store.prepare_retry(conversation).unwrap_err().kind,
+                ErrorKind::Conflict,
+                "while {while_}"
+            );
+        };
+
+        store
+            .begin_approving(image, "images/Gate.png", None)
+            .unwrap();
+        refused(&mut store, "it is being approved");
+        store.settle_image(image, true).unwrap();
+        refused(&mut store, "it is approved");
+        store.begin_undoing(image).unwrap();
+        refused(&mut store, "its approval is being undone");
+        store.settle_image(image, false).unwrap();
+
+        assert_eq!(store.prepare_retry(conversation).unwrap(), "Draw");
+        assert_eq!(store.messages(conversation).unwrap(), [user("Draw")]);
+        assert_eq!(image_rows_in_file(&app_data), [0, 0]);
+    }
+
+    #[test]
+    fn images_left_generating_open_as_interrupted_and_marks_are_listed_once() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (_, _, [generating, approving, undoing, pending]) =
+            with_images(&mut store, None, ["Gate", "Tower", "Quay", "Moor"]);
+        drive(&mut store, generating, ImageState::Generating);
+        drive(&mut store, approving, ImageState::Approving);
+        drive(&mut store, undoing, ImageState::Undoing);
+        drive(&mut store, pending, ImageState::Pending);
+        assert_eq!(store.take_image_marks(), []);
+        drop(store);
+
+        let mut store = opened(&app_data);
+        store
+            .begin_approving(pending, "images/Moor.png", None)
+            .unwrap();
+
+        let interrupted = store.image(generating).unwrap().image;
+        assert_eq!(
+            (interrupted.state, interrupted.reason),
+            (ImageState::NotGenerated, Some(NotGenerated::Interrupted))
+        );
+        assert_eq!(
+            store.take_image_marks(),
+            [
+                ImageMark {
+                    image: approving,
+                    path: path_of(approving)
+                },
+                ImageMark {
+                    image: undoing,
+                    path: path_of(undoing)
+                }
+            ]
+        );
+        assert_eq!(store.take_image_marks(), []);
+        assert_eq!(store.conversations().unwrap().notice, None);
+        drop(store);
+        let store = opened(&app_data);
+        assert_eq!(state_of(&store, generating), ImageState::NotGenerated);
+    }
+
+    #[test]
+    fn earlier_messages_carry_a_line_for_each_image_and_what_became_of_it() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let names = [
+            "Gate", "Tower", "Quay", "Moor", "Fen", "Ford", "Mill", "Weir",
+        ];
+        let (conversation, _, ids) = with_images(&mut store, None, names);
+        let states = [
+            ImageState::NotGenerated,
+            ImageState::Generating,
+            ImageState::Pending,
+            ImageState::Approving,
+            ImageState::Approved,
+            ImageState::Undoing,
+            ImageState::Rejected,
+            ImageState::Undoing,
+        ];
+        for (image, state) in ids.into_iter().zip(states) {
+            drive(&mut store, image, state);
+        }
+        store.settle_image(ids[7], false).unwrap();
+
+        let messages = store.messages(conversation).unwrap();
+
+        assert_eq!(
+            messages[1].images,
+            [
+                "[Image \"Gate\": not generated]".to_owned(),
+                "[Image \"Tower\": not generated]".to_owned(),
+                "[Image \"Quay\": pending]".to_owned(),
+                "[Image \"Moor\": pending]".to_owned(),
+                format!("[Image \"Fen\": saved as {}]", path_of(ids[4])),
+                format!("[Image \"Ford\": saved as {}]", path_of(ids[5])),
+                "[Image \"Mill\": rejected]".to_owned(),
+                "[Image \"Weir\": undone]".to_owned(),
+            ]
+        );
+        assert_eq!(messages[0].images, Vec::<String>::new());
     }
 }
