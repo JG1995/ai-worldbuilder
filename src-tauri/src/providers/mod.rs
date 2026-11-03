@@ -1,8 +1,9 @@
 //! The `providers` area: where requests to an AI provider go. It holds the rules a text provider's
-//! base URL must follow, and the only code that sends a request: the connection test in `chat` and
-//! the streamed answer in `stream`.
+//! base URL must follow, and the only code that sends a request: the connection test in `chat`,
+//! the streamed answer in `stream` and the image provider's requests in `images`.
 
 mod chat;
+pub mod images;
 mod stream;
 
 use std::net::IpAddr;

@@ -24,8 +24,12 @@ const provider = (key: TextProvider["key"]): TextProvider => ({
   host: "openrouter.ai",
 });
 
-const withKey: SavedSettings = { ai: true, textProvider: provider("keychain") };
-const empty: SavedSettings = { ai: true, textProvider: null };
+const withKey: SavedSettings = {
+  ai: true,
+  textProvider: provider("keychain"),
+  imageProvider: null,
+};
+const empty: SavedSettings = { ai: true, textProvider: null, imageProvider: null };
 const saved = (settings: SavedSettings): ProviderSaved => ({ state: "saved", settings });
 
 const keychainLine = "Stored in the system keychain. Sent only to openrouter.ai.";
@@ -177,7 +181,9 @@ describe("Settings", () => {
   it("asks before storing the key in a file, and Store in a file stores it there", async () => {
     const { calls } = renderSettings(empty, {
       provider_save: ({ keyFile }) =>
-        keyFile ? saved({ ai: true, textProvider: provider("file") }) : { state: "no_keychain" },
+        keyFile
+          ? saved({ ai: true, textProvider: provider("file"), imageProvider: null })
+          : { state: "no_keychain" },
     });
     await dialog();
     type("Base URL", BASE_URL);
@@ -270,7 +276,11 @@ describe("Settings", () => {
 
   it("removes the key after a confirmation with Cancel focused", async () => {
     const { calls } = renderSettings(withKey, {
-      provider_key_remove: () => ({ ai: true, textProvider: provider("none") }),
+      provider_key_remove: () => ({
+        ai: true,
+        textProvider: provider("none"),
+        imageProvider: null,
+      }),
     });
     await dialog();
 
