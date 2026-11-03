@@ -3,6 +3,7 @@ import { EditorState, RangeSet, StateField, type Transaction } from "@codemirror
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
 import { editorLinks } from "./editor-links";
+import { imageCells, imagesRedraw } from "./image-embeds";
 import { bodyStart, inlineDecorator, previewView, revealedLines } from "./live-preview";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
@@ -216,8 +217,8 @@ function rowCells(row: SyntaxNode) {
 }
 
 /**
- * The grid of a `Table` node whose first line starts at `start`, its cells decorated by `decorate`
- * and marked with the core's `links`.
+ * The grid of a `Table` node whose first line starts at `start`, its cells decorated by `decorate`,
+ * marked with the core's `links` and with `images` in place of their image embeds.
  */
 function gridOf(
   state: EditorState,
@@ -225,6 +226,7 @@ function gridOf(
   start: number,
   decorate: ReturnType<typeof inlineDecorator>,
   links: DecorationSet,
+  images: DecorationSet,
 ): Grid {
   const cellOf = (cell: ReturnType<typeof rowCells>[number]): Cell => {
     if (!cell.node) {
@@ -238,7 +240,7 @@ function gridOf(
       const link = active.find((mark) => mark.spec.link !== undefined)?.spec.link;
       return link === undefined ? {} : { link: link - start };
     };
-    RangeSet.spans([Decoration.set(decorate(cell.node), true), links], from, to, {
+    RangeSet.spans([Decoration.set(decorate(cell.node), true), links, images], from, to, {
       span: (spanFrom, spanTo, active) => {
         if (spanFrom === spanTo) return;
         const className = active
@@ -322,6 +324,7 @@ function grids(
   const revealed = revealedKey(state, tables);
   let decorate: ReturnType<typeof inlineDecorator> | null = null;
   const links = state.field(editorLinks, false)?.marks ?? Decoration.none;
+  const images = imageCells(state);
   const ranges = tables.flatMap(({ node, first, last }, index) => {
     if (revealed[index] === "1") return [];
     const from = state.doc.line(first).from;
@@ -336,7 +339,7 @@ function grids(
     }
     if (!grid) {
       decorate ??= inlineDecorator(state);
-      const widget = new GridWidget(gridOf(state, node, from, decorate, links));
+      const widget = new GridWidget(gridOf(state, node, from, decorate, links, images));
       grid = Decoration.replace({ block: true, widget });
     }
     return [grid.range(from, to)];
@@ -345,15 +348,17 @@ function grids(
 }
 
 /**
- * Whether every grid may draw differently: the core reported new links, or the view changed. An
- * edit's own moving of the links changes only the grids of the tables it touches.
+ * Whether every grid may draw differently: the core reported new links or images, images were
+ * switched on, or the view changed. An edit's own moving of the links changes only the grids of
+ * the tables it touches.
  */
 function redrawsAll(transaction: Transaction) {
   const { startState, state } = transaction;
   const linksChanged = startState.field(editorLinks, false) !== state.field(editorLinks, false);
   return (
     (linksChanged && (!transaction.docChanged || transaction.effects.length > 0)) ||
-    startState.facet(previewView) !== state.facet(previewView)
+    startState.facet(previewView) !== state.facet(previewView) ||
+    imagesRedraw(startState, state)
   );
 }
 

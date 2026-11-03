@@ -188,6 +188,8 @@ describe("AssistantPane's answers", () => {
     expect(shown).toHaveAttribute("contenteditable", "false");
     expect(shown).toHaveTextContent(/^Bold code the map site$/);
     expect(shown.querySelector("a, [data-link]")).toBeNull();
+    // An image embed shows its name, and no image loads.
+    expect(shown.querySelector(".cm-image, .cm-image-placeholder")).toBeNull();
     expect(shown.closest(".assistant")).not.toBeNull();
     expect(shown.closest(".body-reading")).toBeNull();
   });

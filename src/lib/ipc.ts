@@ -1,4 +1,4 @@
-import { Channel, type InvokeArgs, invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc, type InvokeArgs, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ErrorKind } from "@/types/api";
 
@@ -71,9 +71,27 @@ export async function invokeStreaming<T, E>(
   throw unavailable(name);
 }
 
+/** The browser preview's fixtures, once loaded. Development builds only. */
+let previewModule: typeof import("./preview-fixtures") | undefined;
+
+/**
+ * The URL of the image at `path` in the world opened as `session`, whose file has `stamp`: in
+ * Tauri, the core's `grimoire-image` scheme, with the stamp in the query so that a changed image
+ * gets a new URL; in the browser preview, its sample image, which exists once the preview has
+ * resolved the page's images.
+ */
+export function imageUrl(session: number, path: string, stamp: string) {
+  if (isTauri()) {
+    const url = convertFileSrc(`${session}/${path}`, "grimoire-image");
+    return `${url}?v=${encodeURIComponent(stamp)}`;
+  }
+  return previewModule?.previewImageUrl(path) ?? "";
+}
+
 /** The browser preview's fixture for `name`. Development builds only. */
 async function previewFixture(name: string) {
-  const { previewFixtures } = await import("./preview-fixtures");
+  previewModule = await import("./preview-fixtures");
+  const { previewFixtures } = previewModule;
   if (!Object.hasOwn(previewFixtures, name)) {
     throw new IpcError("ipc", `The browser preview has no sample data for command "${name}".`);
   }

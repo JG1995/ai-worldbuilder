@@ -40,7 +40,17 @@ function sameLines(a: Set<number>, b: Set<number>) {
 }
 
 /** Extensions of the image files an embed can show; the core reports them as attachments. */
-const imageFile = /\.(png|jpe?g|gif|bmp|svg|webp|avif)$/i;
+export const imageFile = /\.(png|jpe?g|gif|bmp|svg|webp|avif)$/i;
+
+/**
+ * Whether the image embeds' extension (src/ui/image-embeds.ts) draws the embed that starts at a
+ * position, which the live preview then leaves alone. Without it, image embeds show as typed in the
+ * editing view and as their names in the reading view.
+ */
+export const drawnImages = Facet.define<
+  (state: EditorState, from: number) => boolean,
+  ((state: EditorState, from: number) => boolean) | null
+>({ combine: (values) => values[0] ?? null });
 
 class TextWidget extends WidgetType {
   constructor(
@@ -183,6 +193,10 @@ class RangeBuilder {
     return this.state.facet(previewView) === "reading";
   }
 
+  private drawsImage(from: number) {
+    return this.state.facet(drawnImages)?.(this.state, from) ?? false;
+  }
+
   /** Whether any line from `from` to `to` holds part of the cursor or the selection. */
   private isRevealed(from: number, to: number) {
     const { doc } = this.state;
@@ -287,11 +301,11 @@ class RangeBuilder {
         return !this.reading;
       case "WikiLink":
       case "WikiEmbed":
-        this.wikiLink(node);
+        if (!this.drawsImage(node.from)) this.wikiLink(node);
         return false;
       case "Image":
         // Its text, while no image can show.
-        return this.reading && this.link(node, 2);
+        return !this.drawsImage(node.from) && this.reading && this.link(node, 2);
       case "Table":
       case "HTMLBlock":
       case "HTMLTag":
@@ -510,6 +524,7 @@ export const livePreview = ViewPlugin.fromClass(
         update.viewportChanged ||
         !sameLines(revealed, this.revealed) ||
         update.startState.facet(previewView) !== update.state.facet(previewView) ||
+        update.startState.facet(drawnImages) !== update.state.facet(drawnImages) ||
         update.startState.field(editorLinks, false) !== update.state.field(editorLinks, false) ||
         syntaxTree(update.startState) !== syntaxTree(update.state);
       this.revealed = revealed;

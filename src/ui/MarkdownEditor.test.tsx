@@ -1,8 +1,9 @@
 import { EditorView } from "@codemirror/view";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EditorLink } from "@/types/api";
+import type { EditorLink, ImageEmbed } from "@/types/api";
 import { setLinks } from "./editor-links";
+import { imageRequests, setImages } from "./image-embeds";
 import { createPageState, MarkdownEditor, reloadedState, replaceState } from "./MarkdownEditor";
 import { PageView } from "./PageView";
 
@@ -377,10 +378,39 @@ describe("the reading view", () => {
     expect(screen.getByRole("checkbox", { name: "Bar the gate" })).toBeInTheDocument();
   });
 
-  it("shows image embeds as their names while no image can show", () => {
+  it("shows image embeds as their names, with no image or placeholder, without an image URL", () => {
     renderReading();
 
     expect(lineWith("map.png and the map")).toBeInTheDocument();
+    expect(document.querySelector(".cm-image, .cm-image-placeholder")).toBeNull();
+  });
+
+  it("shows image embeds as images given an image URL, also after a reload", () => {
+    const state = createPageState(text, "Kesh Tor", 0, { preview: true });
+    render(
+      <MarkdownEditor
+        state={state}
+        readOnly={false}
+        reading
+        imageUrl={(path, stamp) => `test-image://${path}?v=${stamp}`}
+      />,
+    );
+    const view = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Kesh Tor" }));
+    if (!view) throw new Error("No editor");
+    const sources = () =>
+      [...document.querySelectorAll(".cm-image img")].map((image) => image.getAttribute("src"));
+    const resolve = (stamp: string) => {
+      const requests = imageRequests(view.state);
+      const found = requests.map((): ImageEmbed => ({ state: "found", path: "map.png", stamp }));
+      act(() => view.dispatch({ effects: setImages(requests, found) }));
+    };
+
+    resolve("1");
+    expect(sources()).toEqual(["test-image://map.png?v=1", "test-image://map.png?v=1"]);
+
+    act(() => replaceState(view, reloadedState(view.state, `${text}\n`, "Kesh Tor")));
+    resolve("2");
+    expect(sources()).toEqual(["test-image://map.png?v=2", "test-image://map.png?v=2"]);
   });
 
   it("lets Tab reach its resolved links in order, the grid's too, and no others", () => {

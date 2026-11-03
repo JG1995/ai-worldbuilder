@@ -17,6 +17,8 @@ import type {
   EditorLink,
   EditorLinks,
   HistoryVersion,
+  ImageEmbed,
+  ImageRequest,
   KeyStorage,
   LinkedPage,
   LinkSuggestions,
@@ -140,6 +142,91 @@ A [plain link](https://example.com) and an escaped \\*star\\*.
 | Old ford | granite | slate | flint | sandstone | chalk | marble | schist | quartzite | limestone | gneiss | yearly |
 `,
 };
+
+/**
+ * The sample world's image files, their PNG bytes in base64. The tree shows no images, so they
+ * leave the specs' tree and searches as they are.
+ */
+const sampleImages: Record<string, string> = {
+  // 1200 × 300, wider than the reading measure.
+  "Maps/The Glass Steppe.png":
+    "iVBORw0KGgoAAAANSUhEUgAABLAAAAEsCAIAAABc390HAAAF50lEQVR42u3XQQ0AIAwAsUlBBy+kEFQgiSAIPfjYmlTB/S5anwAAABQUEgAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAhlAFAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAMAQqgAAAGAIAQAAMIQAAAAYQgAAAAwhAAAAaYbw3QUAAEBBhhAAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAMIQSAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAACGUAUAAABDCAAAgCEEAADAEAIAAGAIAQAAyDOEZw8AAAAKMoQAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAADCEAAACGEAAAAEMIAACAIQQAAMAQAgAAYAgBAAAwhAAAABhCAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAgCGUAAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAIAhBAAAwBACAABgCAEAADCEAAAAGEIAAAAMIQAAAIYQAAAAQwgAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAADAEAIAAGAIAQAAMIQAAAAYQgAAAAwhAAAAhhAAAABDCAAAgCEEAAAwhCoAAAAYQgAAAAwhAAAAhhAAAABDCAAAQBoflZQadXZsLJ0AAAAASUVORK5CYII=",
+  // 120 × 160.
+  "Characters/Brother Ketil.png":
+    "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAIAAABIaz/HAAAA/ElEQVR42u3QQREAEBAAwIvjKYAAAgggiijCCKaC1z3MzmyCjVYLCUKBaNGIFi3agmjRiBYt2oJo0YgWLRrRohEtWjSiRSNatGhEi0a0aNGIFo1o0aIRLRrRokUjWjSiRYtGtGhEixaNaNE8R5+9SCBatGhEixatQLRoRIsWbUG0aESLFm1BtGhEixaNaNGIFi0a0aIRLVo0okUjWrRoRItGtGjRiBaNaNGiES0a0aJFI/qL6DE7CUSLFo1o0aIViBaNaNGiLYgWjWjRoi2IFo1o0aIRLRrRokUjWjSiRYtGtGhEixaNaNGIFi0a0aIRLVo0okUjWrRoRP/gAp3PFEved0J+AAAAAElFTkSuQmCC",
+  // Bytes no browser can decode, for the "cannot be shown" placeholder.
+  "Maps/Torn map.png": "dG9ybiBtYXA=",
+};
+
+/** The blob: URL of each sample image, made when the preview first resolves images. */
+const sampleImageUrls = new Map<string, string>();
+
+/** The URL of the sample image at `path`, once the preview has resolved images; empty otherwise. */
+export function previewImageUrl(path: string) {
+  return sampleImageUrls.get(path) ?? "";
+}
+
+function makeSampleImageUrls() {
+  if (sampleImageUrls.size > 0) return;
+  for (const [path, base64] of Object.entries(sampleImages)) {
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    sampleImageUrls.set(path, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
+  }
+}
+
+/**
+ * What an image embed of the page at `from` resolves to among the sample world's images, by the
+ * core's rules for the cases the specs use. An approximation for the preview: the core also
+ * refuses symbolic links and orders same-named images as the tree does.
+ */
+function imageOf(open: PreviewWorld, from: string, { target, form }: ImageRequest): ImageEmbed {
+  const images = open === sampleWorld ? Object.keys(sampleImages) : [];
+  let wanted = target;
+  if (form === "markdown") {
+    try {
+      wanted = decodeURIComponent(wanted.replace(/^<(.*)>$/, "$1"));
+    } catch {
+      return { state: "missing" };
+    }
+  }
+  if (/^(https?:|\/\/|data:)/i.test(wanted)) return { state: "web" };
+  if (wanted.startsWith("/") || wanted.includes("\\") || /^[a-z]:/i.test(wanted)) {
+    return { state: "outside" };
+  }
+  const folder = from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : "";
+  /** `wanted` from `base`, or null when its `..` leaves the world. */
+  const joined = (base: string) => {
+    const segments = base === "" ? [] : base.split("/");
+    for (const segment of wanted.split("/")) {
+      if (segment === "..") {
+        if (segments.pop() === undefined) return null;
+      } else if (segment !== "." && segment !== "") segments.push(segment);
+    }
+    return segments.join("/");
+  };
+  const bare = !wanted.includes("/");
+  const relative = wanted.startsWith("./") || wanted.startsWith("../");
+  let candidates: (string | null)[] = [joined(folder), joined("")];
+  if (form === "wiki") candidates = relative ? [joined(folder)] : bare ? [] : [joined("")];
+  const lexical = candidates.filter((candidate) => candidate !== null);
+  if (candidates.length > 0 && lexical.length === 0) return { state: "outside" };
+  if (lexical.some((path) => path.split("/").some((segment) => segment.startsWith(".")))) {
+    return { state: "outside" };
+  }
+  const at = (path: string) => images.find((image) => image.toLowerCase() === path.toLowerCase());
+  let found = lexical.map(at).find((image) => image !== undefined);
+  if (!found && bare) {
+    const named = images.filter(
+      (image) => image.split("/").at(-1)?.toLowerCase() === wanted.toLowerCase(),
+    );
+    const depth = (image: string) => image.split("/").length;
+    const inFolder = (image: string) => image.slice(0, Math.max(0, image.lastIndexOf("/")));
+    found =
+      named.find((image) => inFolder(image) === folder) ??
+      named.sort((a, b) => depth(a) - depth(b))[0];
+  }
+  return found ? { state: "found", path: found, stamp: "1" } : { state: "missing" };
+}
 
 /** The page whose saves always fail, so the failed-save notice and dialog can be seen. */
 const lockedPage = "Locations/Locked chronicle.md";
@@ -1468,6 +1555,12 @@ export const previewFixtures: Record<string, unknown> = {
   links_in: (args?: InvokeArgs): EditorLinks => {
     const { path, text } = args as { path: string; text: string };
     return { state: "ready", links: linksOf(requireWorld(), path, text) };
+  },
+  images_resolve: (args?: InvokeArgs): ImageEmbed[] => {
+    const { path, embeds } = args as { path: string; embeds: ImageRequest[] };
+    const open = requireWorld();
+    makeSampleImageUrls();
+    return embeds.map((embed) => imageOf(open, path, embed));
   },
   page_properties: (args?: InvokeArgs): Properties => {
     const { text } = args as { text: string };
