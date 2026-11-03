@@ -4,7 +4,7 @@ import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemir
 import type { SyntaxNode } from "@lezer/common";
 import { editorLinks } from "./editor-links";
 import { imageCells, imagesRedraw } from "./image-embeds";
-import { bodyStart, inlineDecorator, previewView, revealedLines } from "./live-preview";
+import { bodyStart, gridRows, inlineDecorator, previewView, revealedLines } from "./live-preview";
 import { webLinksShown } from "./web-links";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
@@ -214,29 +214,6 @@ function alignments(delimiterRow: string): Alignment[] {
 }
 
 /**
- * A row's cells between its pipes, as GFM reads them: a leading or trailing pipe opens or closes
- * the row, and nothing between two pipes is an empty cell.
- */
-function rowCells(row: SyntaxNode) {
-  const cells: { from: number; to: number; node: SyntaxNode | null }[] = [];
-  let from = row.from;
-  let node: SyntaxNode | null = null;
-  for (let child = row.firstChild; child; child = child.nextSibling) {
-    if (child.name === "TableCell") node = child;
-    if (child.name !== "TableDelimiter") continue;
-    cells.push({ from, to: child.from, node });
-    from = child.to;
-    node = null;
-  }
-  cells.push({ from, to: row.to, node });
-  const first = row.firstChild;
-  const last = row.lastChild;
-  if (first?.name === "TableDelimiter" && first.from === row.from) cells.shift();
-  if (last?.name === "TableDelimiter" && last.to === row.to) cells.pop();
-  return cells;
-}
-
-/**
  * The grid of a `Table` node whose first line starts at `start`, its cells decorated by `decorate`,
  * marked with the core's `links` and with `images` in place of their image embeds.
  */
@@ -248,7 +225,7 @@ function gridOf(
   links: DecorationSet,
   images: DecorationSet,
 ): Grid {
-  const cellOf = (cell: ReturnType<typeof rowCells>[number]): Cell => {
+  const cellOf = (cell: ReturnType<typeof gridRows>["header"][number]): Cell => {
     if (!cell.node) {
       const at = Math.min(cell.from + 1, cell.to) - start;
       return { from: at, to: at, pieces: [] };
@@ -285,11 +262,11 @@ function gridOf(
     });
     return { from: from - start, to: to - start, pieces };
   };
-  const header = table.getChild("TableHeader");
-  const columns = header ? rowCells(header).map(cellOf) : [];
+  const { header, rows } = gridRows(table);
+  const columns = header.map(cellOf);
   // A row shows as many cells as the header: missing ones are empty, extra ones are not shown.
-  const fitted = (row: SyntaxNode) => {
-    const cells = rowCells(row).slice(0, columns.length).map(cellOf);
+  const fitted = (row: (typeof rows)[number]) => {
+    const cells = row.cells.map(cellOf);
     while (cells.length < columns.length)
       cells.push({ from: row.to - start, to: row.to - start, pieces: [] });
     return cells;
@@ -298,7 +275,7 @@ function gridOf(
   return {
     alignments: delimiterRow ? alignments(state.sliceDoc(delimiterRow.from, delimiterRow.to)) : [],
     header: columns,
-    body: table.getChildren("TableRow").map(fitted),
+    body: rows.map(fitted),
   };
 }
 

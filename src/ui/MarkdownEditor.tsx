@@ -20,7 +20,7 @@ import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
 import { type ImageUrl, imageEmbeds } from "./image-embeds";
 import { closeLinkPreview, linkPreviews, type PreviewSource } from "./link-previews";
 import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
-import { livePreview, previewView } from "./live-preview";
+import { focusableLinkStarts, livePreview, previewView } from "./live-preview";
 import { pageSyntax } from "./markdown-syntax";
 import { propertiesBlock } from "./properties-block";
 import { gridPosition, linkStart, tableGrid } from "./table-grid";
@@ -160,6 +160,11 @@ const previewOn = Facet.define<boolean, boolean>({
 type PageStateOptions = {
   /** Shows the live preview, which hides Markdown syntax away from the cursor; off by default. */
   preview?: boolean;
+  /**
+   * With the live preview, shows the reading view's properties block in place of the leading
+   * frontmatter; on by default. Without it, the frontmatter shows as typed.
+   */
+  properties?: boolean;
 };
 
 /**
@@ -170,7 +175,7 @@ export function createPageState(
   text: string,
   label: string,
   cursor = 0,
-  { preview = false }: PageStateOptions = {},
+  { preview = false, properties = true }: PageStateOptions = {},
 ) {
   return EditorState.create({
     doc: text,
@@ -181,7 +186,7 @@ export function createPageState(
       restoreEditingSelection,
       markdown({ extensions: pageSyntax }),
       previewOn.of(preview),
-      preview ? [livePreview, tableGrid, propertiesBlock] : [],
+      preview ? [livePreview, tableGrid, properties ? propertiesBlock : []] : [],
       images.of([]),
       web.of([]),
       previews.of([]),
@@ -268,6 +273,34 @@ function isFollowKey(event: KeyboardEvent, reading: boolean) {
 function linkElement(editor: EditorView, target: EventTarget | null) {
   const element = target instanceof Element ? target.closest("[data-link]") : null;
   return element && editor.contentDOM.contains(element) ? element : null;
+}
+
+/**
+ * Focuses the first of the reading view's focusable links that start at `starts`, in order, first
+ * scrolling one into view when CodeMirror has not drawn it, which it does then by the next measure.
+ * A start with no link drawn even then gives way to the next one.
+ */
+function focusLink(editor: EditorView, starts: readonly number[]) {
+  const [from, ...rest] = starts;
+  if (from === undefined) return;
+  const drawn = () =>
+    [...editor.contentDOM.querySelectorAll<HTMLElement>("[data-link]")].find(
+      (element) => linkStart(editor, element) === from,
+    );
+  const element = drawn();
+  if (element) {
+    element.focus();
+    return;
+  }
+  editor.dispatch({ effects: EditorView.scrollIntoView(from, { y: "center" }) });
+  editor.requestMeasure({
+    read: () => null,
+    write: () => {
+      const found = drawn();
+      if (found) found.focus();
+      else focusLink(editor, rest);
+    },
+  });
 }
 
 /** Replaces the whole document with `text` as one step that undo reverts on its own. */
@@ -488,13 +521,31 @@ export function MarkdownEditor({
         : followAt(editor.state.selection.main.head);
       if (followed) event.preventDefault();
     };
+    // Tab and Shift+Tab from a focusable link of the reading view go to the next or the previous
+    // one in the text, also one CodeMirror has not drawn; past the last or the first, they go on as
+    // they would.
+    const tabLink = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return;
+      const element = isReading(editor.state) ? linkElement(editor, event.target) : null;
+      const from = element && linkStart(editor, element);
+      if (from === null) return;
+      const starts = focusableLinkStarts(editor.state);
+      const next = event.shiftKey
+        ? starts.filter((start) => start < from).reverse()
+        : starts.filter((start) => start > from);
+      if (next.length === 0) return;
+      event.preventDefault();
+      focusLink(editor, next);
+    };
     const container = parent.current;
     container?.addEventListener("mousedown", followClick, true);
     container?.addEventListener("keydown", followKey, true);
+    container?.addEventListener("keydown", tabLink, true);
     if (focusAtMount) editor.focus();
     return () => {
       container?.removeEventListener("mousedown", followClick, true);
       container?.removeEventListener("keydown", followKey, true);
+      container?.removeEventListener("keydown", tabLink, true);
       replaceListeners.delete(editor);
       share(null);
       // The page resumes from this state, as when its tab comes back: with no suggestion list open,

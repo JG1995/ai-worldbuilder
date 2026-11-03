@@ -682,6 +682,70 @@ describe("the reading view", () => {
     }
   });
 
+  it("moves Tab and Shift+Tab between its links in the text's order, also ones not drawn", async () => {
+    const filler = Array.from({ length: 3000 }, (_, index) => `Line ${index} of the long road.`);
+    const long = [
+      "[[Mirela]] rules.",
+      ...filler,
+      "Read https://tide.example first.",
+      ...filler,
+      "| Who |",
+      "| --- |",
+      "| [[Mirela]] |",
+    ].join("\n");
+    const first = linkTo("[[Mirela]]", 0, {});
+    const last = linkTo("[[Mirela]]", long.lastIndexOf("[[Mirela]]"), {});
+    const state = createPageState(long, "Long road", 0, { preview: true });
+    render(
+      <MarkdownEditor
+        state={state.update({ effects: setLinks([first, last]) }).state}
+        readOnly={false}
+        reading
+        onOpenWeb={vi.fn()}
+      />,
+    );
+    const textbox = screen.getByRole("textbox", { name: "Long road" });
+    const focused = () => document.activeElement?.textContent;
+    const press = (shiftKey = false) =>
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Tab", shiftKey });
+    // CodeMirror draws only the lines near the top, with the first link alone.
+    expect(focusableLinks(textbox).map((link) => link.textContent)).toEqual(["Mirela"]);
+
+    act(() => focusableLinks(textbox)[0].focus());
+    expect(press()).toBe(false);
+    await waitFor(() => expect(focused()).toBe("https://tide.example"));
+    expect(press()).toBe(false);
+    await waitFor(() => expect(focused()).toBe("Mirela"));
+    expect(press()).toBe(true);
+    expect(press(true)).toBe(false);
+    await waitFor(() => expect(focused()).toBe("https://tide.example"));
+  });
+
+  it("moves Tab past a link in a cell the grid does not draw", async () => {
+    const short = "[[A]] first\n\n| H |\n| - |\n| x | [[B]] |\n\n[[C]] last";
+    const links = ["[[A]]", "[[B]]", "[[C]]"].map((link) => linkTo(link, short.indexOf(link), {}));
+    const state = createPageState(short, "Short", 0, { preview: true });
+    render(
+      <MarkdownEditor
+        state={state.update({ effects: setLinks(links) }).state}
+        readOnly={false}
+        reading
+      />,
+    );
+    const textbox = screen.getByRole("textbox", { name: "Short" });
+    const focused = () => document.activeElement?.textContent;
+    const press = (shiftKey = false) =>
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Tab", shiftKey });
+    expect(focusableLinks(textbox).map((link) => link.textContent)).toEqual(["A", "C"]);
+
+    act(() => focusableLinks(textbox)[0].focus());
+    expect(press()).toBe(false);
+    await waitFor(() => expect(focused()).toBe("C"));
+    expect(press()).toBe(true);
+    expect(press(true)).toBe(false);
+    await waitFor(() => expect(focused()).toBe("A"));
+  });
+
   it("follows a resolved link on a click, a Ctrl+click and Enter, in a line or a grid", () => {
     const { onFollow, textbox, view } = renderReading();
     const [inLine, gridLink] = focusableLinks(textbox);
