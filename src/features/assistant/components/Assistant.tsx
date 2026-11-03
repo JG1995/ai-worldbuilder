@@ -1,13 +1,20 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import type { IpcError } from "@/lib/ipc";
 import type {
+  Accepted,
+  AcceptFailure,
   AnswerEnd,
   AnswerEvent,
+  AnswerReview,
   ContextPage,
   ConversationSummary,
   EditorLink,
+  ProposalKind,
+  ProposalReview,
   SavedMessage,
   StoreNotice,
+  Undone,
+  WrittenPage,
 } from "@/types/api";
 import {
   type AnswerFailure,
@@ -17,12 +24,16 @@ import {
 } from "@/ui/AssistantPane";
 import type { LinkAnchor } from "@/ui/editor-links";
 import {
+  assistantAccept,
   assistantConversation,
   assistantConversations,
   assistantDelete,
   assistantLinks,
+  assistantReject,
+  assistantReview,
   assistantSend,
   assistantStop,
+  assistantUndo,
 } from "../api/commands";
 
 /** What the assistant gets from the open world. */
@@ -42,6 +53,19 @@ export type AssistantPorts = {
   flushActive: () => Promise<void>;
   /** Whether the world still has the page at `path`. */
   hasPage: (path: string) => boolean;
+  /**
+   * Saves the pending edits of the open pages among `paths`, and resolves once each has saved or
+   * failed to: false when any could not be saved, so nothing is written.
+   */
+  flushPages: (paths: string[]) => Promise<boolean>;
+  /** Takes in pages a core write wrote; with `flash`, which only an accept sets, their rows flash. */
+  pagesWritten: (pages: WrittenPage[], options: { flash: boolean }) => Promise<void>;
+  /** Takes in pages a core write deleted. */
+  pagesDeleted: (paths: string[]) => Promise<void>;
+  /** Shows a toast in this world, with an action such as Undo when `action` is given. */
+  showToast: (message: string, action?: { label: string; run: () => void }) => void;
+  /** Marks the tabs of `paths` as having changes waiting for review. */
+  setReviewPaths: (paths: string[]) => void;
 };
 
 type AssistantProps = {
@@ -68,6 +92,10 @@ type AnswerMessage = {
   failure: AnswerFailure | null;
   /** The links the core found in `text`, which are stale once the text differs. */
   linked: { text: string; links: readonly EditorLink[] } | null;
+  /** The saved answer's id, which its review names; null until it is saved, or when it was not. */
+  saved: number | null;
+  /** The proposals begun while it arrived. */
+  proposals: { change: ProposalKind; path: string }[];
 };
 
 type Message = UserMessage | AnswerMessage;
@@ -93,6 +121,15 @@ const announcements: Record<AnswerEnd["state"], string> = {
 /** The conversations list while it shows: its rows, null while they load, and its error. */
 type ListView = { items: ConversationSummary[] | null; error: string | null };
 
+/** The pages of `proposals` that are on disk, which are saved before an accept or undo writes. */
+const pagesOf = (proposals: ProposalReview[]) =>
+  proposals.flatMap(({ page }) => (page === null ? [] : [page]));
+
+const appliesNow = ({ state, check }: ProposalReview) =>
+  state === "pending" && check?.state === "applies";
+
+const changes = (count: number) => `${count} ${count === 1 ? "change" : "changes"}`;
+
 /**
  * The assistant's conversations in this world: it shows the one shown last, sends a message, or
  * the last one again, with the active page's path, shows the answer as it arrives, and stops it
@@ -116,7 +153,14 @@ export function Assistant({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<StoreNotice | null>(null);
   const [list, setList] = useState<ListView | null>(null);
+  /** The proposals of the conversation shown, as the core last reviewed them. */
+  const [reviews, setReviews] = useState<AnswerReview[]>([]);
+  const [acceptFailure, setAcceptFailure] = useState<AcceptFailure | null>(null);
   const nextId = useRef(0);
+  /** The conversation shown, for reads that start after an action ends. */
+  const shownConversation = useRef<number | null>(null);
+  /** Counts the reviews asked for: only the answer to the latest is shown. */
+  const reviewsAsked = useRef(0);
   /**
    * Counts the conversations shown: what a request or a load started for an earlier one is
    * ignored once another shows.
@@ -134,8 +178,23 @@ export function Assistant({
   }
 
   function show(id: number | null) {
+    shownConversation.current = id;
     setConversation(id);
     onConversationChange(id);
+  }
+
+  /** Asks the core for the shown conversation's proposals again, and shows them once they arrive. */
+  async function readReviews() {
+    const id = shownConversation.current;
+    if (id === null) return;
+    const count = shownCount.current;
+    const asked = ++reviewsAsked.current;
+    try {
+      const read = await assistantReview(id);
+      if (shownCount.current === count && reviewsAsked.current === asked) setReviews(read);
+    } catch {
+      // Without an answer, such as with AI just switched off, the proposals stay as they are.
+    }
   }
 
   /** Reads how the world's conversations are kept again; a failure leaves the notice shown. */
@@ -152,6 +211,25 @@ export function Assistant({
     if (lastShown !== null) void load(lastShown);
   });
   useEffect(() => mounted(), []);
+
+  // The proposals, when a conversation shows and again whenever the index changes, which a write
+  // to a page does; an answer that ends reads them itself.
+  const reviewShown = useEffectEvent(() => void readReviews());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each change of either reads them again.
+  useEffect(() => reviewShown(), [conversation, indexRevision]);
+
+  // The tab dot marks the pages of the pending edits that apply, until the assistant unmounts,
+  // which it does when AI goes off.
+  const reviewPaths = JSON.stringify([
+    ...new Set(
+      reviews.flatMap(({ proposals }) =>
+        pagesOf(proposals.filter((proposal) => proposal.kind === "edit" && appliesNow(proposal))),
+      ),
+    ),
+  ]);
+  const markReviewPaths = useEffectEvent((paths: string[]) => ports.setReviewPaths(paths));
+  useEffect(() => markReviewPaths(JSON.parse(reviewPaths)), [reviewPaths]);
+  useEffect(() => () => markReviewPaths([]), []);
 
   // Each answer's links, once its text is final, and again for every answer when the index
   // changes. An answer asked while the index is built stays plain until then.
@@ -188,6 +266,8 @@ export function Assistant({
       context: null,
       failure: null,
       linked: null,
+      saved: null,
+      proposals: [],
     };
   }
 
@@ -204,6 +284,8 @@ export function Assistant({
       context: { pages, leftOut, indexing },
       failure: null,
       linked: null,
+      saved: saved.id,
+      proposals: [],
     };
   }
 
@@ -211,6 +293,8 @@ export function Assistant({
   function clear() {
     shownCount.current++;
     setMessages([]);
+    setReviews([]);
+    setAcceptFailure(null);
     setRefusal(null);
     setLoadError(null);
     setLoading(false);
@@ -224,6 +308,7 @@ export function Assistant({
     clear();
     const count = shownCount.current;
     setLoading(true);
+    shownConversation.current = null;
     setConversation(null);
     try {
       const loaded = await assistantConversation(id);
@@ -262,9 +347,15 @@ export function Assistant({
     if (shownCount.current !== count) return;
     // Text that arrives after the answer has ended is dropped: the end carries the final text.
     const onEvent = (event: AnswerEvent) => {
-      // Proposals are not shown yet.
-      if (shownCount.current !== count || event.kind === "proposal") return;
-      if (event.kind === "context") {
+      if (shownCount.current !== count) return;
+      if (event.kind === "proposal") {
+        const begun = { change: event.change, path: event.path };
+        updateAnswer(answer.id, (shown) =>
+          shown.state === "streaming"
+            ? { ...shown, proposals: [...shown.proposals, begun] }
+            : shown,
+        );
+      } else if (event.kind === "context") {
         const context = {
           pages: event.pages,
           leftOut: event.leftOut,
@@ -299,8 +390,105 @@ export function Assistant({
       end.state === "failed"
         ? { reason: end.reason, detail: end.detail, providerMessage: end.providerMessage }
         : null;
-    updateAnswer(answer.id, (shown) => ({ ...shown, text: end.text, state: end.state, failure }));
+    updateAnswer(answer.id, (shown) => ({
+      ...shown,
+      text: end.text,
+      state: end.state,
+      failure,
+      saved: end.answer,
+    }));
     setAnnouncement(announcements[end.state]);
+    void readReviews();
+  }
+
+  /**
+   * Accepts the proposals `ids` of the saved answer `answer`: saves their open pages first and
+   * writes nothing when one cannot be saved, then sends each with the page version its card
+   * showed, takes in the written pages and shows the toast. Resolves with the accepted set, or
+   * null when nothing was written.
+   */
+  async function accept(answer: number, ids: number[]): Promise<number | null> {
+    const chosen =
+      reviews
+        .find((review) => review.answer === answer)
+        ?.proposals.filter((proposal) => ids.includes(proposal.id)) ?? [];
+    setAcceptFailure(null);
+    setAnnouncement("");
+    // A page that cannot be saved shows its failed-save notice.
+    if (!(await ports.flushPages(pagesOf(chosen)))) return null;
+    const versions = chosen.map(({ id, check }) => ({
+      id,
+      version: check?.state === "applies" ? check.version : null,
+    }));
+    let accepted: Accepted;
+    try {
+      accepted = await assistantAccept(answer, versions);
+    } catch (error) {
+      const { kind, message } = error as IpcError;
+      // On a conflict, the cards read again show why.
+      if (kind !== "conflict") ports.showToast(message);
+      setAnnouncement(`Nothing was accepted: ${message}`);
+      await readReviews();
+      return null;
+    }
+    const { set, failure, written } = accepted;
+    await ports.pagesWritten(written, { flash: true });
+    if (failure) setAcceptFailure(failure);
+    await readReviews();
+    if (set === null || accepted.accepted === 0) {
+      // No toast: the failed card shows the reason.
+      if (failure) setAnnouncement(`Nothing was accepted: ${failure.message}`);
+      return null;
+    }
+    const text = failure
+      ? `Accepted ${accepted.accepted} of ${changes(accepted.of)}`
+      : `Accepted ${changes(accepted.accepted)}`;
+    const pages = written.map(({ path }) => path);
+    const undoAction = { label: "Undo", run: () => void undo(set, pages) };
+    ports.showToast(text, accepted.undo ? undoAction : undefined);
+    setAnnouncement(text);
+    return set;
+  }
+
+  /**
+   * Undoes the accepted set `set`, whose pages are `pages`: saves them first and writes nothing
+   * when one cannot be saved, then takes in what the undo restored and deleted. A refusal shows
+   * as a toast. Resolves with whether it was undone.
+   */
+  async function undo(set: number, pages: string[]): Promise<boolean> {
+    setAnnouncement("");
+    if (!(await ports.flushPages(pages))) return false;
+    let undone: Undone;
+    try {
+      undone = await assistantUndo(set);
+    } catch (error) {
+      const { message } = error as IpcError;
+      ports.showToast(message);
+      setAnnouncement(message);
+      await readReviews();
+      return false;
+    }
+    await ports.pagesWritten(undone.restored, { flash: false });
+    await ports.pagesDeleted(undone.deleted);
+    await readReviews();
+    setAnnouncement("The accepted changes were undone.");
+    return true;
+  }
+
+  /** Rejects the proposal `id` for good. Resolves with whether it was rejected. */
+  async function reject(id: number): Promise<boolean> {
+    setAnnouncement("");
+    try {
+      await assistantReject(id);
+    } catch (error) {
+      const { kind, message } = error as IpcError;
+      if (kind !== "conflict") ports.showToast(message);
+      setAnnouncement(`The change was not rejected: ${message}`);
+      await readReviews();
+      return false;
+    }
+    await readReviews();
+    return true;
   }
 
   function send() {
@@ -384,11 +572,12 @@ export function Assistant({
    */
   function shown(message: Message): ChatMessage {
     if (message.role === "user") return message;
-    const { linked, context, ...answer } = message;
+    const { linked, context, saved, ...answer } = message;
     const links = linked?.text === message.text ? linked.links : undefined;
-    if (!context) return { ...answer, context: null, links };
+    const review = saved === null ? undefined : reviews.find((read) => read.answer === saved);
+    if (!context) return { ...answer, context: null, links, review };
     const marked = context.pages.map((page) => ({ ...page, gone: !ports.hasPage(page.path) }));
-    return { ...answer, context: { ...context, pages: marked }, links };
+    return { ...answer, context: { ...context, pages: marked }, links, review };
   }
 
   /**
@@ -445,6 +634,15 @@ export function Assistant({
         announcement,
         loading,
         loadError,
+        acceptFailure,
+        onAccept: accept,
+        onReject: reject,
+        onUndo: (set) => {
+          const linked = reviews.flatMap(({ proposals }) =>
+            proposals.filter((proposal) => proposal.accept === set),
+          );
+          return undo(set, pagesOf(linked));
+        },
       }}
     />
   );

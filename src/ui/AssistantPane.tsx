@@ -1,12 +1,21 @@
 import type { EditorView } from "@codemirror/view";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { ConversationSummary, EditorLink, ProviderFailure, StoreNotice } from "@/types/api";
+import type {
+  AcceptFailure,
+  AnswerReview,
+  ConversationSummary,
+  EditorLink,
+  ProposalKind,
+  ProviderFailure,
+  StoreNotice,
+} from "@/types/api";
 import { Button, IconButton } from "./Button";
 import { Dialog } from "./Dialog";
 import { setLinks } from "./editor-links";
 import { Icon } from "./Icon";
 import { createPageState, MarkdownEditor } from "./MarkdownEditor";
 import { Notice } from "./Notice";
+import { ProposalReview } from "./ProposalReview";
 import { Tooltip } from "./Tooltip";
 
 /** How an answer stands: still arriving, or how it ended. */
@@ -43,6 +52,10 @@ export type ChatMessage =
       failure: AnswerFailure | null;
       /** The links of its text, marked once known; absent leaves the marks as they are. */
       links?: readonly EditorLink[];
+      /** The proposals begun so far while it arrives, each with its kind and path as given. */
+      proposals?: { change: ProposalKind; path: string }[];
+      /** Its proposals, notes and accepted sets as the core reviewed them, once it has any. */
+      review?: AnswerReview;
     };
 
 /** The conversation and its composer. */
@@ -67,6 +80,17 @@ export type AssistantChat = {
   loading?: boolean;
   /** Why the conversation could not be loaded, shown above an empty one. */
   loadError?: string | null;
+  /** Why the last accept stopped at a proposal, shown on that proposal's card. */
+  acceptFailure: AcceptFailure | null;
+  /**
+   * Accepts proposals of the saved answer `answer` as one change; resolves with the accepted set,
+   * or null when nothing was written.
+   */
+  onAccept: (answer: number, ids: number[]) => Promise<number | null>;
+  /** Rejects a proposal; resolves with whether it was rejected. */
+  onReject: (proposal: number) => Promise<boolean>;
+  /** Undoes an accepted set; resolves with whether it was undone. */
+  onUndo: (set: number) => Promise<boolean>;
 };
 
 /** The world's conversations, shown in place of the conversation and the composer. */
@@ -161,6 +185,14 @@ export function AssistantPane({
 
   const last = messages.at(-1);
   const running = last?.role === "answer" && last.state === "streaming";
+  // The answer holding the newest pending set: only its Accept or Accept selected is primary.
+  let newestPending: number | undefined;
+  for (const message of messages) {
+    const pending = message.role === "answer" && message.review?.proposals.some(appliesNow);
+    if (pending) newestPending = message.id;
+  }
+  const focusComposer = () =>
+    root.current?.querySelector<HTMLElement>("[data-initial-focus]")?.focus();
 
   return (
     <div ref={root} className="flex min-h-0 flex-1 flex-col">
@@ -221,7 +253,8 @@ export function AssistantPane({
             {model && !chat?.loading && messages.length === 0 && (
               <p className="ui p-4 text-text-muted">
                 For each message, the assistant reads the pages of this world that matter to it and
-                sends them, with your message, to {host}. It answers here and changes no pages.
+                sends them, with your message, to {host}. It can propose changes to pages, which are
+                written only when you accept them.
               </p>
             )}
             {chat && messages.length > 0 && (
@@ -241,7 +274,9 @@ export function AssistantPane({
                       answer={message}
                       host={host}
                       canRetry={message === last && !running}
+                      newest={message.id === newestPending}
                       chat={chat}
+                      onFocusComposer={focusComposer}
                     />
                   ),
                 )}
@@ -372,7 +407,8 @@ function ConversationsList({ list }: { list: ConversationList }) {
             </>
           }
         >
-          Deleting the conversation and its messages cannot be undone.
+          Deleting the conversation and its messages cannot be undone. Changes you already accepted
+          stay in the world.
         </Dialog>
       )}
     </section>
@@ -383,14 +419,22 @@ function Answer({
   answer,
   host,
   canRetry,
+  newest,
   chat,
+  onFocusComposer,
 }: {
   answer: Extract<ChatMessage, { role: "answer" }>;
   host: string | undefined;
   canRetry: boolean;
+  /** It holds the pane's newest pending set. */
+  newest: boolean;
   chat: AssistantChat;
+  onFocusComposer: () => void;
 }) {
-  const { text, state, context, failure, links } = answer;
+  const { text, state, context, failure, links, proposals, review } = answer;
+  // A new answer would replace its proposals, and with them the accepted set's Undo.
+  const retryable =
+    canRetry && !review?.proposals.some((proposal) => proposal.state === "accepted");
   return (
     <li className="flex flex-col gap-2">
       {context && <ContextDisclosure context={context} onOpenPage={chat.onOpenPage} />}
@@ -406,15 +450,50 @@ function Answer({
       {state === "streaming" && text === "" && (
         <p className="ui-small text-text-muted">Waiting for the answer…</p>
       )}
+      {state === "streaming" && proposals && proposals.length > 0 && (
+        <ul aria-label="Proposed changes" className="ui-small flex flex-col gap-1 text-text-muted">
+          {proposals.map((proposal, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: lines are only added at the end, and the same path can repeat.
+            <li key={index} className="break-words">
+              {proposal.change === "new_page" ? "Proposing a new page: " : "Proposing an edit: "}
+              {proposal.path}
+            </li>
+          ))}
+        </ul>
+      )}
       {state === "stopped" && <p className="ui-small text-text-muted">Stopped.</p>}
       {state === "cut_off" && (
         <p className="ui-small text-text-muted">Cut off: the answer was too long.</p>
+      )}
+      {review && review.unreadable > 0 && (
+        <p className="ui-small text-text-muted">
+          {review.unreadable === 1
+            ? "A proposed change could not be read."
+            : `${review.unreadable} proposed changes could not be read.`}
+        </p>
+      )}
+      {review?.unfinished && (
+        <p className="ui-small text-text-muted">
+          The answer ended before a proposed change was complete.
+        </p>
+      )}
+      {review && (
+        <ProposalReview
+          review={review}
+          newest={newest}
+          failure={chat.acceptFailure}
+          onAccept={(ids) => chat.onAccept(review.answer, ids)}
+          onReject={chat.onReject}
+          onUndo={chat.onUndo}
+          onOpenPage={chat.onOpenPage}
+          onFocusComposer={onFocusComposer}
+        />
       )}
       {failure && (
         <Notice
           status={failure.reason === "rate_limited" ? "warning" : "error"}
           actions={
-            canRetry && (
+            retryable && (
               <Button variant="secondary" onClick={chat.onRetry}>
                 Retry
               </Button>
@@ -584,6 +663,9 @@ function Composer({ chat, running }: { chat: AssistantChat; running: boolean }) 
     </div>
   );
 }
+
+const appliesNow = ({ state, check }: AnswerReview["proposals"][number]) =>
+  state === "pending" && check?.state === "applies";
 
 const pageName = (path: string) => path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "");
 

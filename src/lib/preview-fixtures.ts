@@ -3,8 +3,10 @@
 // check if the marker below, which every version token carries, appears in a production bundle.
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
+  Accepted,
   AnswerEnd,
   AnswerEvent,
+  AnswerReview,
   Backlink,
   Backlinks,
   Comparison,
@@ -22,6 +24,11 @@ import type {
   PageMatches,
   PageText,
   PageVersion,
+  ProposalCheck,
+  ProposalKind,
+  ProposalReview,
+  ProposalState,
+  ProposalVersion,
   ProviderFailure,
   ProviderSaved,
   RecentWorld,
@@ -34,9 +41,11 @@ import type {
   TextMatch,
   TextMatches,
   TreeEntry,
+  Undone,
   VersionKind,
   Workspace,
   WorldOpened,
+  WrittenPage,
 } from "@/types/api";
 
 const previewMarker = "0.0.0-preview.sample-data";
@@ -740,6 +749,276 @@ async function testProvider(): Promise<TestOutcome> {
   };
 }
 
+/**
+ * A proposal kept with its answer: a new page's text, or an edit's passages, with the page's text
+ * when the answer ended. An approximation for the preview: the core keeps a hash of that text.
+ */
+type PreviewProposal = {
+  id: number;
+  kind: ProposalKind;
+  /** As the model gave it, until an accept writes it. */
+  path: string;
+  text: string;
+  changes: { find: string; replace: string }[];
+  base: string | null;
+  state: ProposalState;
+  undone: boolean;
+  accept: number | null;
+  /** Its write always fails, so that a partial accept can be seen. */
+  failing: boolean;
+};
+
+/** An accepted set: what its accept wrote, each page's text before (null: no page) and after. */
+type PreviewSet = {
+  id: number;
+  answer: number;
+  writes: { path: string; before: string | null; after: string }[];
+};
+
+/** Each saved answer's proposals, by the answer's id, and the accepted sets, by their id. */
+const proposalsOf = new Map<number, PreviewProposal[]>();
+const acceptedSets = new Map<number, PreviewSet>();
+let nextProposal = 1;
+let nextSet = 1;
+
+/** The path with `.md` added once, as the core's proposal path rules add it. */
+const withMd = (path: string) => (/\.md$/i.test(path) ? path : `${path}.md`);
+
+/** The page at `path` in any letter case, as the core maps a path to its spelling on disk. */
+const pageAt = (open: PreviewWorld, path: string) =>
+  Object.keys(open.pages).find((candidate) => candidate.toLowerCase() === path.toLowerCase()) ??
+  null;
+
+/**
+ * Whether a pending proposal applies to its page as it is now, with the text it would write. An
+ * approximation of the core's checks for the preview: it knows no path rules beyond `.md`.
+ */
+function checkOf(
+  open: PreviewWorld,
+  proposal: PreviewProposal,
+): { page: string | null; check: ProposalCheck; result: string | null } {
+  const page = pageAt(open, withMd(proposal.path));
+  const refused = (reason: string) => ({
+    page,
+    check: { state: "no_longer_applies", reason } as const,
+    result: null,
+  });
+  if (proposal.kind === "new_page") {
+    if (page !== null) return refused("A page with this name already exists.");
+    const lines = linesOf(proposal.text).map((text) => ({ kind: "added", text }) as const);
+    const check = { state: "applies", lines, version: null, changed: false } as const;
+    return { page, check, result: proposal.text };
+  }
+  if (page === null) return refused("The page does not exist.");
+  const text = open.pages[page];
+  if (typeof text !== "string") return refused("The page is not UTF-8 text.");
+  let result = text;
+  for (const { find, replace } of proposal.changes) {
+    const at = result.indexOf(find);
+    if (at === -1) return refused("A passage is missing from the page.");
+    if (result.indexOf(find, at + 1) !== -1) {
+      return refused("A passage appears more than once in the page.");
+    }
+    result = result.slice(0, at) + replace + result.slice(at + find.length);
+  }
+  if (result === text) return refused("The edit makes no change.");
+  const check = {
+    state: "applies",
+    lines: compareLines(text, result),
+    version: versionOf(open, page),
+    changed: proposal.base !== text,
+  } as const;
+  return { page, check, result };
+}
+
+/** The proposals of a conversation's answers, as `assistant_review` gives them. */
+function reviewOf(open: PreviewWorld, conversation: PreviewConversation): AnswerReview[] {
+  return conversation.messages.flatMap((message) => {
+    const proposals = message.role === "answer" ? proposalsOf.get(message.id) : undefined;
+    if (message.role !== "answer" || !proposals) return [];
+    const reviewed = proposals.map((proposal): ProposalReview => {
+      const { id, kind, path, state, undone, accept } = proposal;
+      const { page, check } = checkOf(open, proposal);
+      const pending = state === "pending";
+      return { id, kind, path, page, state, undone, accept, check: pending ? check : null };
+    });
+    const accepted = [...acceptedSets.values()]
+      .filter((set) => set.answer === message.id)
+      .map((set) => ({
+        id: set.id,
+        count: proposals.filter((proposal) => proposal.accept === set.id).length,
+        undo: true,
+      }));
+    return [
+      { answer: message.id, unreadable: 0, unfinished: false, proposals: reviewed, accepted },
+    ];
+  });
+}
+
+/**
+ * Writes the chosen proposals of an answer as one change, like the core: nothing when one does not
+ * apply or its version differs, and up to the first write that fails otherwise. An approximation
+ * for the preview: each page is recorded as a change of its own in the preview's history.
+ */
+function acceptProposals(answer: number, chosen: ProposalVersion[]): Accepted {
+  requireAi();
+  const open = requireWorld();
+  if (chosen.length === 0) throw { kind: "conflict", message: "No proposal was chosen." };
+  const proposals = proposalsOf.get(answer) ?? [];
+  const checked = chosen.map(({ id, version }) => {
+    const proposal = proposals.find((candidate) => candidate.id === id);
+    if (proposal?.state !== "pending") {
+      throw { kind: "conflict", message: "The proposal is no longer pending." };
+    }
+    const { page, check, result } = checkOf(open, proposal);
+    if (check.state !== "applies" || result === null) {
+      throw { kind: "conflict", message: check.state === "applies" ? "" : check.reason };
+    }
+    if (check.version !== version) throw conflict;
+    return { proposal, path: page ?? withMd(proposal.path), result };
+  });
+  const written: WrittenPage[] = [];
+  const writes: PreviewSet["writes"] = [];
+  let failure: Accepted["failure"] = null;
+  for (const { proposal, path, result } of checked) {
+    if (proposal.failing) {
+      failure = { proposal: proposal.id, message: "The page is read-only." };
+      break;
+    }
+    const before = proposal.kind === "edit" ? (open.pages[path] as string) : null;
+    writeText(open, path, result);
+    record(open, path, before === null ? "accepted_new_page" : "accepted_edit", before, result);
+    written.push({ path, text: result, version: versionOf(open, path) });
+    writes.push({ path, before, after: result });
+  }
+  if (writes.length === 0) {
+    return { set: null, accepted: 0, of: chosen.length, written, failure, undo: false };
+  }
+  const set = nextSet++;
+  acceptedSets.set(set, { id: set, answer, writes });
+  for (const { proposal, path } of checked.slice(0, writes.length)) {
+    Object.assign(proposal, { state: "accepted", accept: set, path });
+  }
+  return { set, accepted: writes.length, of: chosen.length, written, failure, undo: true };
+}
+
+/**
+ * Undoes an accepted set all or nothing, like the core: it writes nothing when a page changed since,
+ * and deletes the pages the accept created. An approximation for the preview: a deletion is not
+ * recorded in the preview's history.
+ */
+function undoSet(id: number): Undone {
+  requireAi();
+  const open = requireWorld();
+  const set = acceptedSets.get(id);
+  if (!set) throw { kind: "not_found", message: "This change cannot be undone." };
+  const changed = set.writes.find(({ path, after }) => open.pages[path] !== after);
+  if (changed) {
+    throw {
+      kind: "conflict",
+      message: `“${nameOf(changed.path)}” changed since it was written, so nothing was undone. Its history still holds every version.`,
+    };
+  }
+  const restored: WrittenPage[] = [];
+  const deleted: string[] = [];
+  for (const { path, before, after } of set.writes) {
+    if (before === null) {
+      delete open.pages[path];
+      deleted.push(path);
+    } else {
+      writeText(open, path, before);
+      record(open, path, "undo", after, before);
+      restored.push({ path, text: before, version: versionOf(open, path) });
+    }
+  }
+  for (const proposal of proposalsOf.get(set.answer) ?? []) {
+    if (proposal.accept === id)
+      Object.assign(proposal, { state: "pending", undone: true, accept: null });
+  }
+  acceptedSets.delete(id);
+  return { restored, deleted };
+}
+
+/** Rejects a pending proposal for good. */
+function rejectProposal(id: number) {
+  requireAi();
+  requireWorld();
+  const proposal = [...proposalsOf.values()].flat().find((candidate) => candidate.id === id);
+  if (proposal?.state !== "pending") {
+    throw { kind: "conflict", message: "The proposal is no longer pending." };
+  }
+  proposal.state = "rejected";
+  return null;
+}
+
+/**
+ * The canned proposals for a message `propose:`: a new page, an edit of the active page (or of
+ * Kesh Tor without one), and another new page; `propose-fail:` adds an edit of The mirror lake
+ * whose write always fails.
+ */
+function cannedProposals(open: PreviewWorld, active: string | null, failing: boolean) {
+  const draft = (
+    kind: ProposalKind,
+    path: string,
+    content: Pick<PreviewProposal, "text" | "changes">,
+    fails = false,
+  ): Omit<PreviewProposal, "id"> => ({
+    kind,
+    path,
+    ...content,
+    base: null,
+    state: "pending",
+    undone: false,
+    accept: null,
+    failing: fails,
+  });
+  const lastLine = (path: string) => {
+    const text = open.pages[path];
+    return typeof text === "string"
+      ? linesOf(text)
+          .filter((line) => line.trim() !== "")
+          .at(-1)
+      : undefined;
+  };
+  const target =
+    active !== null && lastLine(active) !== undefined ? active : "Locations/Kesh Tor.md";
+  const line = lastLine(target) ?? "";
+  const proposals = [
+    draft("new_page", "Places/Saltmere", {
+      text: "# Saltmere\n\nA salt town at the steppe's edge, where [[The salt merchant]] buys her salt.\n",
+      changes: [],
+    }),
+    draft("edit", target, {
+      text: "",
+      changes: [
+        {
+          find: line,
+          replace: `${line}\n\nThe caravan from [[Saltmere]] stops here on its way north.`,
+        },
+      ],
+    }),
+    draft("new_page", "Characters/Mirela Dask.md", {
+      text: "# Mirela Dask\n\nCaptain of the Saltmere watch. <b>Not</b> to be trusted.\n",
+      changes: [],
+    }),
+  ];
+  if (failing) {
+    const lake = "# The mirror lake";
+    proposals.push(
+      draft(
+        "edit",
+        "Locations/The mirror lake.md",
+        {
+          text: "",
+          changes: [{ find: lake, replace: `${lake}\n\nSaltmere draws its water here.` }],
+        },
+        true,
+      ),
+    );
+  }
+  return proposals;
+}
+
 /** The answer the preview is streaming; a stop wakes it from its pause and waits for its end. */
 type Answering = { stopped: boolean; wake: () => void; ended: Promise<void>; end: () => void };
 let answering: Answering | null = null;
@@ -845,7 +1124,9 @@ function contextOf(open: PreviewWorld, active: string | null, message: string): 
  * Answers a message without a network. An approximation for the preview: the request carries
  * the pages `contextOf` chooses; the canned answer streams in chunks about 100 ms apart; a message
  * `fail:<reason>`, with a `ProviderFailure` as the reason, fails for that reason with a sample
- * detail and provider message; a retry is accepted whatever the last answer was.
+ * detail and provider message; a message starting `propose:` or `propose-fail:` streams a short
+ * answer and the canned proposals, each about 100 ms apart, which are kept with the saved answer;
+ * a retry is accepted whatever the last answer was.
  */
 async function sendAnswer(
   args: Record<string, unknown>,
@@ -895,7 +1176,15 @@ async function sendAnswer(
   }
   const id = shown.id;
   const pages = contextOf(open, active, message);
-  const saved = (end: AnswerEnd): AnswerEnd => ({ ...end, answer: saveAnswer(shown, end, pages) });
+  const failing = message.startsWith("propose-fail:");
+  const proposing = failing || message.startsWith("propose:");
+  /** The proposals streamed so far, which are kept with the saved answer. */
+  const proposed: PreviewProposal[] = [];
+  const saved = (end: AnswerEnd): AnswerEnd => {
+    const answer = saveAnswer(shown, end, pages);
+    if (answer !== null && proposed.length > 0) proposalsOf.set(answer, proposed);
+    return { ...end, answer };
+  };
 
   let end = () => {};
   const ended = new Promise<void>((resolve) => {
@@ -921,12 +1210,24 @@ async function sendAnswer(
         providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
       });
     }
-    for (const delta of cannedAnswer(active)) {
+    const deltas = proposing
+      ? ["Here is how Saltmere ", "could fit in. ", "Review each change ", "before it is written."]
+      : cannedAnswer(active);
+    for (const delta of deltas) {
       await pause(run, 100);
       if (run.stopped)
         return saved({ state: "stopped", conversation: id, text: answer, answer: null });
       answer += delta;
       onEvent({ kind: "text", delta });
+    }
+    for (const draft of proposing ? cannedProposals(open, active, failing) : []) {
+      await pause(run, 100);
+      if (run.stopped)
+        return saved({ state: "stopped", conversation: id, text: answer, answer: null });
+      const page = pageAt(open, withMd(draft.path));
+      const base = page === null ? null : (open.pages[page] as string);
+      proposed.push({ ...draft, id: nextProposal++, base });
+      onEvent({ kind: "proposal", change: draft.kind, path: draft.path });
     }
     return saved({ state: "complete", conversation: id, text: answer, answer: null });
   } finally {
@@ -1151,6 +1452,20 @@ export const previewFixtures: Record<string, unknown> = {
     );
     return { id, title, messages: [...messages] };
   },
+  assistant_review: (args?: InvokeArgs): AnswerReview[] => {
+    requireAi();
+    const open = requireWorld();
+    return reviewOf(
+      open,
+      requireConversation(open, (args as { conversation: number }).conversation),
+    );
+  },
+  assistant_accept: (args?: InvokeArgs): Accepted => {
+    const { answer, proposals } = args as { answer: number; proposals: ProposalVersion[] };
+    return acceptProposals(answer, proposals);
+  },
+  assistant_reject: (args?: InvokeArgs) => rejectProposal((args as { proposal: number }).proposal),
+  assistant_undo: (args?: InvokeArgs): Undone => undoSet((args as { set: number }).set),
   assistant_delete: async (args?: InvokeArgs) => {
     requireAi();
     const open = requireWorld();

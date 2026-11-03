@@ -1,12 +1,22 @@
 import { type ReactNode, useEffect, useState } from "react";
-import type { Backlinks as BacklinksState, PageMatch, TextMatch, TreeEntry } from "@/types/api";
+import type {
+  AnswerReview,
+  Backlinks as BacklinksState,
+  DiffLine,
+  PageMatch,
+  ProposalReview as Proposal,
+  TextMatch,
+  TreeEntry,
+} from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
 import { FileTree, type TreeNameInput } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
 import { Notice } from "@/ui/Notice";
 import { NoPageOpen, PageView } from "@/ui/PageView";
+import { ProposalReview } from "@/ui/ProposalReview";
 import { SearchDialog, type SearchResults } from "@/ui/SearchDialog";
+import { defaultAssistantWidth } from "@/ui/Shell";
 import { WelcomeScreen } from "@/ui/WelcomeScreen";
 import {
   largeSampleWorld,
@@ -581,9 +591,183 @@ function SearchSection() {
   );
 }
 
+const keshTorEdit: Proposal = {
+  id: 1,
+  kind: "edit",
+  path: "Locations/Kesh Tor.md",
+  page: "Locations/Kesh Tor.md",
+  state: "pending",
+  undone: false,
+  accept: null,
+  check: {
+    state: "applies",
+    lines: [
+      { kind: "same", text: "# Kesh Tor" },
+      { kind: "same", text: "" },
+      { kind: "removed", text: "A basalt spire, the only shade for a day's ride." },
+      { kind: "added", text: "A basalt spire, the only shade on the road to [[Saltmere]]." },
+      { kind: "added", text: "Captain Mirela is held in its cellar." },
+    ],
+    version: "sample",
+    changed: false,
+  },
+};
+
+const longDiff: DiffLine[] = [
+  { kind: "added", text: "# Saltmere" },
+  { kind: "added", text: "" },
+  ...[
+    "A salt town at the steppe's edge, built on the bones of the old war.",
+    "Caravans rest here before the crossing.",
+    "## Districts",
+    "- The Pans, where the salt is raked.",
+    "- The Docks, on the dry lake bed.",
+    "- The Lantern Ward, where the Guild keeps its lenses.",
+    "## People",
+    "- [[The salt merchant]] buys here.",
+    "- Captain Mirela Dask commands the watch.",
+    "## Rumours",
+    "- A <b>glass</b> storm is coming.",
+    "- The Guild wants the lake drained.",
+  ].map((text): DiffLine => ({ kind: "added", text })),
+];
+
+const proposal = (fields: Partial<Proposal> & Pick<Proposal, "id" | "path">): Proposal => ({
+  kind: "new_page",
+  page: null,
+  state: "pending",
+  undone: false,
+  accept: null,
+  check: { state: "applies", lines: longDiff.slice(0, 3), version: null, changed: false },
+  ...fields,
+});
+
+const answerReview = (
+  proposals: Proposal[],
+  accepted: AnswerReview["accepted"] = [],
+): AnswerReview => ({ answer: 1, unreadable: 0, unfinished: false, proposals, accepted });
+
+const sampleBatch = answerReview([
+  proposal({
+    id: 2,
+    path: "Places/Saltmere.md",
+    check: { state: "applies", lines: longDiff, version: null, changed: false },
+  }),
+  {
+    ...keshTorEdit,
+    check: keshTorEdit.check && { ...keshTorEdit.check, changed: true },
+  } as Proposal,
+  proposal({
+    id: 3,
+    kind: "edit",
+    path: "Characters/Brother Ketil.md",
+    page: "Characters/Brother Ketil.md",
+    check: { state: "no_longer_applies", reason: "A passage is missing from the page." },
+  }),
+  proposal({ id: 4, path: "Characters/Mirela Dask.md" }),
+]);
+
+const sampleSettled = answerReview(
+  [
+    proposal({
+      id: 2,
+      path: "Places/Saltmere.md",
+      page: "Places/Saltmere.md",
+      state: "accepted",
+      accept: 7,
+      check: null,
+    }),
+    { ...keshTorEdit, state: "accepted", accept: 7, check: null },
+    proposal({ id: 3, path: "Characters/Mirela Dask.md", state: "rejected", check: null }),
+    proposal({ id: 4, path: "Places/Saltmere/Docks.md", undone: true }),
+  ],
+  [{ id: 7, count: 2, undo: true }],
+);
+
+const samplePartial = answerReview(
+  [
+    proposal({
+      id: 2,
+      path: "Places/Saltmere.md",
+      page: "Places/Saltmere.md",
+      state: "accepted",
+      accept: 8,
+      check: null,
+    }),
+    keshTorEdit,
+  ],
+  [{ id: 8, count: 1, undo: false }],
+);
+
+/** A frame as wide as the assistant pane, on its message ground. */
+function ProposalFrame({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="ui-small text-text-muted">{title}</h3>
+      <div style={{ width: defaultAssistantWidth }} className="border border-divider bg-page p-4">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ProposalSection() {
+  const [event, setEvent] = useState("none yet");
+  const handlers = {
+    onAccept: async (ids: number[]) => {
+      setEvent(`Accept ${ids.join(", ")}`);
+      return null;
+    },
+    onReject: async (id: number) => {
+      setEvent(`Reject ${id}`);
+      return false;
+    },
+    onUndo: async (set: number) => {
+      setEvent(`Undo set ${set}`);
+      return false;
+    },
+    onOpenPage: (path: string, { newTab }: { newTab: boolean }) =>
+      setEvent(`Open ${path}${newTab ? " in a new tab" : ""}`),
+    onFocusComposer: () => setEvent("Focus the composer"),
+  };
+
+  return (
+    <Section
+      title="Proposal cards"
+      use="The assistant's proposed changes below its answer, each a diff against the page as it is now. One proposal is a card; several are a batch list with a checkbox per proposal that applies and Accept selected. Only the newest pending set's Accept or Accept selected is primary. A long diff shows 12 lines until Show all. Settled cards collapse to their header and state, and each accepted set has Undo while its change can be undone."
+    >
+      <div className="flex flex-wrap items-start gap-4">
+        <ProposalFrame title="A single card, the newest pending set">
+          <ProposalReview
+            review={answerReview([keshTorEdit])}
+            newest
+            failure={null}
+            {...handlers}
+          />
+        </ProposalFrame>
+        <ProposalFrame title="A batch list: a long diff, a changed page, one that no longer applies">
+          <ProposalReview review={sampleBatch} newest failure={null} {...handlers} />
+        </ProposalFrame>
+        <ProposalFrame title="Settled cards with Undo, and an undone one, in an older answer">
+          <ProposalReview review={sampleSettled} newest={false} failure={null} {...handlers} />
+        </ProposalFrame>
+        <ProposalFrame title="A write that failed partway; history did not record the accept">
+          <ProposalReview
+            review={samplePartial}
+            newest={false}
+            failure={{ proposal: 1, message: "The page is read-only." }}
+            {...handlers}
+          />
+        </ProposalFrame>
+      </div>
+      <EventLine event={event} />
+    </Section>
+  );
+}
+
 /**
- * The content surfaces: welcome screen, file tree, page view, backlinks and search. Their demos
- * keep local state.
+ * The content surfaces: welcome screen, file tree, page view, backlinks, search and proposal
+ * cards. Their demos keep local state.
  */
 export function SurfaceSections() {
   return (
@@ -593,6 +777,7 @@ export function SurfaceSections() {
       <PageViewSection />
       <BacklinksSection />
       <SearchSection />
+      <ProposalSection />
     </>
   );
 }
