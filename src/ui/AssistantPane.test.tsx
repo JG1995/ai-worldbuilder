@@ -179,15 +179,24 @@ describe("AssistantPane's answers", () => {
       chatWith({
         messages: [
           { id: 1, role: "user", text: "Hello" },
-          answer(2, "complete", "**Bold** `code` ![the map](map.png) [site](https://example.com)"),
+          answer(
+            2,
+            "complete",
+            "**Bold** `code` ![the map](map.png) [site](https://example.com) <https://tide.example> www.ford.example",
+          ),
         ],
       }),
     );
 
     const shown = screen.getByRole("textbox", { name: "Answer" });
     expect(shown).toHaveAttribute("contenteditable", "false");
-    expect(shown).toHaveTextContent(/^Bold code the map site$/);
-    expect(shown.querySelector("a, [data-link]")).toBeNull();
+    expect(shown).toHaveTextContent(
+      /^Bold code the map site https:\/\/tide\.example www\.ford\.example$/,
+    );
+    // Web links show as plain text: no link styling, icon, focus or address.
+    expect(
+      shown.querySelector("a, [data-link], [data-address], .cm-web-link, .cm-web-icon"),
+    ).toBeNull();
     // An image embed shows its name, and no image loads.
     expect(shown.querySelector(".cm-image, .cm-image-placeholder")).toBeNull();
     expect(shown.closest(".assistant")).not.toBeNull();

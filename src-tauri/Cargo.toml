@@ -29,6 +29,8 @@ yaml-rust2 = { version = "0.13", default-features = false }
 unicode-normalization = "0.1"
 url = "2"
 percent-encoding = "2"
+# `hardened` refuses every address that is not http or https, behind `web.rs`'s own check.
+webbrowser = { version = "1", features = ["hardened"] }
 keyring-core = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Only to recognise a failed secure connection in `reqwest`'s errors; `reqwest` picks its features.

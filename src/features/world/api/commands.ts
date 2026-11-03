@@ -122,6 +122,12 @@ export const imagesResolve = (path: string, embeds: ImageRequest[]) =>
   invokeCommand<ImageEmbed[]>("images_resolve", { path, embeds });
 
 /**
+ * Opens a web link's address in the default browser. Rejects with `invalid_path` for anything but
+ * an absolute http or https address, and with `io`, with the reason, when no browser starts.
+ */
+export const linkOpen = (address: string) => invokeCommand<null>("link_open", { address });
+
+/**
  * Creates an empty page for the unresolved link in the page at `from` to `target`, the link's page
  * part. Returns the page a link that resolves by now leads to as `existing`, and `not_ready` while
  * the index is being built. Rejects with `invalid_name` or `exists`, whose message names the

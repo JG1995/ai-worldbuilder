@@ -5,6 +5,7 @@ import type { SyntaxNode } from "@lezer/common";
 import { editorLinks } from "./editor-links";
 import { imageCells, imagesRedraw } from "./image-embeds";
 import { bodyStart, inlineDecorator, previewView, revealedLines } from "./live-preview";
+import { webLinksShown } from "./web-links";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 
@@ -13,11 +14,13 @@ type Alignment = "left" | "center" | "right" | null;
 /**
  * Drawn text of a cell from `at`, with its formatting's classes, or a widget a decoration draws
  * in place of the syntax at `at`; `link` is where the focusable link it belongs to starts, in the
- * reading view. Positions are offsets from the start of the table's first line.
+ * reading view, and `address` the address of the web link it belongs to. Positions are offsets
+ * from the start of the table's first line.
  */
 type Piece = ({ text: string; className: string } | { widget: Decoration }) & {
   at: number;
   link?: number;
+  address?: string;
 };
 
 /** A cell's place in the text, from its first to its last character, and what it draws. */
@@ -34,7 +37,7 @@ const cellEnds = new WeakMap<Element, number>();
 const linkStarts = new WeakMap<Element, number>();
 
 function samePiece(a: Piece, b: Piece) {
-  if (a.link !== b.link) return false;
+  if (a.link !== b.link || a.address !== b.address) return false;
   if ("widget" in a || "widget" in b) {
     return "widget" in a && "widget" in b && a.at === b.at && a.widget.eq(b.widget);
   }
@@ -142,7 +145,7 @@ class GridWidget extends WidgetType {
       for (const piece of cell.pieces) {
         if (piece.link === undefined) link = null;
         else if (!link || linkStarts.get(link) !== piece.link) {
-          link = this.link(piece.link);
+          link = this.link(piece.link, piece.address);
           element.append(link);
         }
         (link ?? element).append(this.draw(view, piece));
@@ -152,12 +155,16 @@ class GridWidget extends WidgetType {
     return row;
   }
 
-  /** A focusable link of the reading view, as the lines draw it, starting at `start`. */
-  private link(start: number) {
+  /**
+   * A focusable link of the reading view, as the lines draw it, starting at `start`, with the
+   * address of a web link.
+   */
+  private link(start: number, address: string | undefined) {
     const link = document.createElement("span");
     link.setAttribute("tabindex", "0");
     link.setAttribute("role", "link");
     link.setAttribute("data-link", "");
+    if (address !== undefined) link.setAttribute("data-address", address);
     linkStarts.set(link, start);
     return link;
   }
@@ -171,6 +178,7 @@ class GridWidget extends WidgetType {
     if (piece.className === "") return text;
     const span = document.createElement("span");
     span.className = piece.className;
+    if (piece.address !== undefined) span.setAttribute("data-address", piece.address);
     span.append(text);
     return span;
   }
@@ -235,10 +243,18 @@ function gridOf(
     }
     const { from, to } = cell.node;
     const pieces: Piece[] = [];
-    /** Where the focusable link that `active` marks starts, if it marks one. */
+    /**
+     * Where the focusable link that `active` marks starts, if it marks one, and the address of the
+     * web link it marks, if any.
+     */
     const linkOf = (active: readonly Decoration[]) => {
       const link = active.find((mark) => mark.spec.link !== undefined)?.spec.link;
-      return link === undefined ? {} : { link: link - start };
+      const address = active.find((mark) => mark.spec.attributes?.["data-address"] !== undefined)
+        ?.spec.attributes["data-address"];
+      return {
+        ...(link === undefined ? {} : { link: link - start }),
+        ...(address === undefined ? {} : { address }),
+      };
     };
     RangeSet.spans([Decoration.set(decorate(cell.node), true), links, images], from, to, {
       span: (spanFrom, spanTo, active) => {
@@ -348,9 +364,9 @@ function grids(
 }
 
 /**
- * Whether every grid may draw differently: the core reported new links or images, images were
- * switched on, or the view changed. An edit's own moving of the links changes only the grids of
- * the tables it touches.
+ * Whether every grid may draw differently: the core reported new links or images, images or web
+ * links were switched on, or the view changed. An edit's own moving of the links changes only the
+ * grids of the tables it touches.
  */
 function redrawsAll(transaction: Transaction) {
   const { startState, state } = transaction;
@@ -358,6 +374,7 @@ function redrawsAll(transaction: Transaction) {
   return (
     (linksChanged && (!transaction.docChanged || transaction.effects.length > 0)) ||
     startState.facet(previewView) !== state.facet(previewView) ||
+    startState.facet(webLinksShown) !== state.facet(webLinksShown) ||
     imagesRedraw(startState, state)
   );
 }

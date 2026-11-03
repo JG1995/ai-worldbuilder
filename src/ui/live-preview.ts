@@ -12,6 +12,7 @@ import {
 import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
 import type { EditorLink } from "@/types/api";
 import { editorLinks, frontmatterEnd } from "./editor-links";
+import { WebIconWidget, webAddress, webLinksShown } from "./web-links";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 
@@ -138,6 +139,29 @@ function focusableLink(link: EditorLink) {
     link: link.from,
   });
 }
+
+/**
+ * A web link's text, styled as a resolved link, with the icon after it inside the mark. In the
+ * reading view it takes keyboard focus as a resolved wiki link does; `data-address` is the address
+ * its tooltip shows.
+ */
+function webLinkMark(from: number, address: string, reading: boolean) {
+  if (!reading) {
+    return Decoration.mark({
+      class: "cm-web-link",
+      inclusiveEnd: true,
+      attributes: { "data-address": address },
+    });
+  }
+  return Decoration.mark({
+    class: "cm-web-link",
+    inclusiveEnd: true,
+    attributes: { tabindex: "0", role: "link", "data-link": String(from), "data-address": address },
+    link: from,
+  });
+}
+
+const webIcon = Decoration.widget({ widget: new WebIconWidget(), side: -1 });
 
 /** The formatting of inline elements, by their node's name. */
 const marks = new Map(
@@ -284,10 +308,15 @@ class RangeBuilder {
         this.replace(node.from, node.to, rule);
         return false;
       case "Link":
+        this.webLink(node);
         return this.link(node);
       case "Autolink":
+        this.webLink(node);
         this.replace(node.from, node.from + 1);
         this.replace(node.to - 1, node.to);
+        return false;
+      case "URL":
+        this.webLink(node);
         return false;
       case "Escape":
         this.replace(node.from, node.from + 1);
@@ -412,6 +441,18 @@ class RangeBuilder {
   }
 
   /**
+   * Styles `node` as a web link when web links are shown and it is one, with the icon after its
+   * text where its syntax is hidden. Its syntax hides as any link's does.
+   */
+  private webLink(node: SyntaxNodeRef) {
+    if (!this.state.facet(webLinksShown) || !this.inRange(node.from)) return;
+    const address = webAddress(this.state, node.node);
+    if (address === null) return;
+    this.mark(node.from, node.to, webLinkMark(node.from, address, this.reading));
+    if (!this.isRevealed(node.from, node.to)) this.ranges.push(webIcon.range(node.to));
+  }
+
+  /**
    * A wiki link or embed the core reported: its display text, the part after `|`, or the target
    * with ` > ` before the heading or block. A link the core did not report shows as typed, and so
    * does an image embed in the editing view; the reading view shows an image embed's name. A
@@ -525,6 +566,7 @@ export const livePreview = ViewPlugin.fromClass(
         !sameLines(revealed, this.revealed) ||
         update.startState.facet(previewView) !== update.state.facet(previewView) ||
         update.startState.facet(drawnImages) !== update.state.facet(drawnImages) ||
+        update.startState.facet(webLinksShown) !== update.state.facet(webLinksShown) ||
         update.startState.field(editorLinks, false) !== update.state.field(editorLinks, false) ||
         syntaxTree(update.startState) !== syntaxTree(update.state);
       this.revealed = revealed;

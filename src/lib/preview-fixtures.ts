@@ -1401,6 +1401,12 @@ async function sendAnswer(
   }
 }
 
+/** The addresses `link_open` was asked to open; the preview opens nothing. */
+export const openedAddresses: string[] = [];
+
+/** A host whose addresses never open, so the failure toast can be seen. */
+const unopenableHost = "unopenable.example";
+
 /** Sample command results: values, or functions of the arguments that throw like the core. */
 export const previewFixtures: Record<string, unknown> = {
   // Opens the sample world at once: the preview has no folder dialog.
@@ -1561,6 +1567,14 @@ export const previewFixtures: Record<string, unknown> = {
     const open = requireWorld();
     makeSampleImageUrls();
     return embeds.map((embed) => imageOf(open, path, embed));
+  },
+  link_open: (args?: InvokeArgs) => {
+    const { address } = args as { address: string };
+    openedAddresses.push(address);
+    if (new URL(address).hostname === unopenableHost) {
+      throw { kind: "io", message: "No browser could be started." };
+    }
+    return null;
   },
   page_properties: (args?: InvokeArgs): Properties => {
     const { text } = args as { text: string };
