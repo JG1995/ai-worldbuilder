@@ -93,6 +93,41 @@ Use \`inline code\` for dice notation such as \`3d6\`.
   "Session notes/Session 2.md":
     "# Session 2\n\nA glass storm strands the caravan at [[Kesh Tor#Shelter]].\n",
   "Session notes/Session 10.md": "# Session 10\n\nThe Guild's lens finally works.\n",
+  // Every element the live preview formats, for the specs and screenshots. Its words leave the
+  // specs' searches, link suggestions and backlinks as they are.
+  "Ward stones.md": `# Ward stones
+
+Old circles mark safe ground on *dark* nights.
+
+## Signs
+
+Riders read **three** marks: ~~smoke~~, ==ash== and \`2d4\` for luck. #lore %%Keep quiet at sessions.%%
+
+> [!warning]
+> Never sleep outside a ring.
+
+> [!tip] Placing a ring
+> Seven stones, set at dusk.
+
+> A rider's saying: stones remember.
+
+- [ ] Count every stone
+- [x] Mark a map
+- Spare chalk
+
+1. Walk around once
+2. Speak a name
+
+Guild records: [[Glasswrights' Guild]], [[Glasswrights' Guild|lens makers]] and [[Ash road]]. ^ward-1
+
+---
+
+\`\`\`
+ring = 7 stones
+\`\`\`
+
+A [plain link](https://example.com) and an escaped \\*star\\*.
+`,
 };
 
 /** The page whose saves always fail, so the failed-save notice and dialog can be seen. */

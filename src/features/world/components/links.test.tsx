@@ -106,10 +106,12 @@ describe("a page's links", () => {
   it("are asked for when the page shows, after typing pauses and when the index changes", async () => {
     const { calls, textbox } = await openOverview();
     await waitFor(() => expect(textbox.querySelector(".cm-link-unresolved")).not.toBeNull());
+    const view = editorOf(textbox);
+    // On the cursor's line the links show as typed, so the mark's text is the whole link.
+    act(() => view.dispatch({ selection: { anchor: overviewText.indexOf("Shelter") } }));
     expect(textbox.querySelector(".cm-link")).toHaveTextContent("[[Kesh Tor#Shelter]]");
     expect(callsOf(calls, "links_in")).toEqual([{ path: "Overview.md", text: overviewText }]);
 
-    const view = editorOf(textbox);
     act(() => view.dispatch({ changes: { from: 0, insert: "> " }, userEvent: "input.type" }));
     await waitFor(() => expect(callsOf(calls, "links_in")).toHaveLength(2));
     expect(callsOf(calls, "links_in")[1]).toEqual({

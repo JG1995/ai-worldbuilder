@@ -20,6 +20,7 @@ const designColours = {
   "accent-hover": { dark: "#c1edee", light: "#395f5f" },
   "on-accent": { dark: "#091016", light: "#ffffff" },
   selection: { dark: "#2e4f4f", light: "#dff6f6" },
+  highlight: { dark: "#553a10", light: "#f8dcae" },
   success: { dark: "#3fc6a0", light: "#08795e" },
   warning: { dark: "#e59b37", light: "#8f5a06" },
   error: { dark: "#fe8477", light: "#b4312b" },

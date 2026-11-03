@@ -108,22 +108,24 @@ describe("a change on disk", () => {
     const textbox = await bothPagesRead(overview, keshTor);
     // The cursor after "# Kesh To", on a first line that the new text shortens.
     editorOf(textbox).dispatch({ selection: { anchor: 9 } });
-    disk.set(overview, { text: "# Overview\nChanged elsewhere\n", version: "o2" });
+    disk.set(overview, { text: "# Overview\n**Changed** elsewhere\n", version: "o2" });
     disk.set(keshTor, { text: "# Kesh\nMore\n", version: "k2" });
 
     await changed({ tree: true, pages: [overview, keshTor, "Not open.md"] });
 
-    await waitFor(() => expect(textbox).toHaveTextContent("# KeshMore"));
     const view = editorOf(textbox);
+    await waitFor(() => expect(view.state.doc.toString()).toBe("# Kesh\nMore\n"));
     expect(view.state.selection.main.head).toBe("# Kesh".length);
     // A fresh undo history: undo cannot bring the old text back.
     expect(undo(view)).toBe(false);
     expect(await screen.findAllByText(reloadToast)).toHaveLength(1);
     expect(commandsOf(calls, "world_tree")).toHaveLength(2);
     fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
-    expect(await screen.findByRole("textbox", { name: "Overview" })).toHaveTextContent(
-      "# OverviewChanged elsewhere",
-    );
+    const shown = await screen.findByRole("textbox", { name: "Overview" });
+    expect(editorOf(shown).state.doc.toString()).toBe("# Overview\n**Changed** elsewhere\n");
+    // The state stored for the background tab keeps the live preview: away from the cursor, on
+    // the first line, the bold markers are hidden.
+    expect(shown.querySelectorAll(".cm-line")[1]).toHaveTextContent(/^Changed elsewhere$/);
     expect(commandsOf(calls, "page_write")).toEqual([]);
   });
 
@@ -150,7 +152,7 @@ describe("a change on disk", () => {
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveTextContent("This page changed on disk while it had unsaved edits.");
     expect(within(notice).getByRole("button", { name: "Compare" })).toBeInTheDocument();
-    expect(textbox).toHaveTextContent("# OverviewMine");
+    expect(editorOf(textbox).state.doc.toString()).toBe("# Overview\nMine");
     expect(screen.queryByText(reloadToast)).not.toBeInTheDocument();
   });
 
@@ -166,7 +168,7 @@ describe("a change on disk", () => {
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveTextContent("This page was deleted or moved outside Grimoire.md.");
     expect(within(notice).getByRole("button", { name: "Restore" })).toBeInTheDocument();
-    expect(textbox).toHaveTextContent("# OverviewMine");
+    expect(editorOf(textbox).state.doc.toString()).toBe("# Overview\nMine");
     expect(textbox).toHaveAttribute("aria-readonly", "true");
   });
 
@@ -180,7 +182,7 @@ describe("a change on disk", () => {
     await changed({ pages: [overview, keshTor] });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("This page is not UTF-8 text.");
-    expect(textbox).toHaveTextContent("# OverviewMine");
+    expect(editorOf(textbox).state.doc.toString()).toBe("# Overview\nMine");
     expect(textbox).toHaveAttribute("aria-readonly", "true");
     fireEvent.click(screen.getByRole("tab", { name: "Kesh Tor" }));
     expect(await screen.findByText(/This page is not UTF-8 text/)).toBeInTheDocument();

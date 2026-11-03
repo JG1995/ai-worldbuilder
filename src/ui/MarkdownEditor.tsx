@@ -2,13 +2,22 @@ import { closeCompletion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { Compartment, EditorState, RangeSetBuilder, StateField, Text } from "@codemirror/state";
+import {
+  Compartment,
+  EditorState,
+  Facet,
+  RangeSetBuilder,
+  StateField,
+  Text,
+} from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { type RefObject, useEffect, useEffectEvent, useRef, useState } from "react";
 import type { EditorLink } from "@/types/api";
 import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
 import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
+import { livePreview } from "./live-preview";
+import { pageSyntax } from "./markdown-syntax";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 const monoClass = "cm-mono";
@@ -55,16 +64,33 @@ function setReadOnly(editor: EditorView, readOnly: boolean) {
   editor.dispatch({ effects: readOnlyMode.reconfigure(EditorState.readOnly.of(readOnly)) });
 }
 
+/** Whether a state shows the live preview, so that a reload of it does too. */
+const previewOn = Facet.define<boolean, boolean>({
+  combine: (values) => values.some(Boolean),
+});
+
+type PageStateOptions = {
+  /** Shows the live preview, which hides Markdown syntax away from the cursor; off by default. */
+  preview?: boolean;
+};
+
 /**
  * The editor state for a page's text, with the cursor at `cursor` (the start by default); `label`
  * names the editor for assistive technology.
  */
-export function createPageState(text: string, label: string, cursor = 0) {
+export function createPageState(
+  text: string,
+  label: string,
+  cursor = 0,
+  { preview = false }: PageStateOptions = {},
+) {
   return EditorState.create({
     doc: text,
     selection: { anchor: cursor },
     extensions: [
-      markdown(),
+      markdown({ extensions: pageSyntax }),
+      previewOn.of(preview),
+      preview ? livePreview : [],
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
@@ -83,15 +109,18 @@ export function createPageState(text: string, label: string, cursor = 0) {
 }
 
 /**
- * A fresh state for the page's new `text`, with no undo history, and the cursor at the line and
- * column it had in `previous`, or at the nearest position the new text has.
+ * A fresh state for the page's new `text`, with no undo history, the live preview if `previous`
+ * showed it, and the cursor at the line and column it had in `previous`, or at the nearest position
+ * the new text has.
  */
 export function reloadedState(previous: EditorState, text: string, label: string) {
   const head = previous.selection.main.head;
   const { number, from } = previous.doc.lineAt(head);
   const doc = Text.of(text.split("\n"));
   const line = doc.line(Math.min(number, doc.lines));
-  return createPageState(text, label, Math.min(line.from + head - from, line.to));
+  return createPageState(text, label, Math.min(line.from + head - from, line.to), {
+    preview: previous.facet(previewOn),
+  });
 }
 
 /** What each mounted editor reports a state that `replaceState` put in it to. */
@@ -156,7 +185,10 @@ type MarkdownEditorProps = {
   suggest?: Suggest;
 };
 
-/** A plain CodeMirror editor for one page's Markdown, with the syntax visible. */
+/**
+ * A CodeMirror editor for one page's Markdown: plain, with the syntax visible, or with the live
+ * preview when its state was created with it.
+ */
 export function MarkdownEditor({
   state,
   readOnly,
