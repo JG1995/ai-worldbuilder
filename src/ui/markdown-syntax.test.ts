@@ -65,6 +65,28 @@ describe("the page syntax", () => {
     ]);
   });
 
+  it("reads a line that starts with an inline comment as a paragraph, not a comment block", () => {
+    expect(nodes("%%a%% text\n# After")).toEqual([
+      ["Paragraph", "%%a%% text"],
+      ["PageComment", "%%a%%"],
+      ["PageCommentMark", "%%"],
+      ["PageCommentMark", "%%"],
+      ["ATXHeading1", "# After"],
+      ["HeaderMark", "#"],
+    ]);
+  });
+
+  it("ends a comment block on the first later line that holds %%, with that line's rest inside it", () => {
+    expect(nodes("%%\nx\n%% after\n# After")).toEqual([
+      ["PageCommentBlock", "%%\nx\n%% after"],
+      ["PageCommentMark", "%%"],
+      ["PageCommentMark", "%%"],
+      ["ATXHeading1", "# After"],
+      ["HeaderMark", "#"],
+    ]);
+    expect(nodes("%%\nx %% y\n# After")).toContainEqual(["ATXHeading1", "# After"]);
+  });
+
   it.each(["#lore", "#lore/ruins-2", "#Ünter_1"])("reads %s as a tag", (tag) => {
     expect(nodes(`${tag} here`)).toContainEqual(["Tag", tag]);
   });
