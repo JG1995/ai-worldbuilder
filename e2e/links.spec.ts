@@ -55,14 +55,15 @@ async function openPage(page: Page, folder: string, name: string) {
 
 test("resolved and unresolved links show their styles in the editor", async ({ page }) => {
   const ketil = await openPage(page, "Characters", "Brother Ketil");
+  // Away from the cursor, on the page's first line, a link shows its display text.
   const resolved = ketil.locator(".cm-link");
-  await expect(resolved).toHaveText("[[Kesh Tor]]");
+  await expect(resolved).toHaveText("Kesh Tor");
   await expect(resolved).toHaveCSS("text-decoration-style", "solid");
 
   await row(page, "The salt merchant").click();
   const merchant = page.getByRole("textbox", { name: "The salt merchant" });
   const unresolved = merchant.locator(".cm-link-unresolved");
-  await expect(unresolved).toHaveText("[[Saltmere]]");
+  await expect(unresolved).toHaveText("Saltmere");
   await expect(unresolved).toHaveCSS("text-decoration-style", "dashed");
   await expect(merchant.locator(".cm-link")).toHaveCount(0);
 });
@@ -85,13 +86,15 @@ test("Alt+Enter in a link follows it without changing the text", async ({ page }
 
   await expect(tab(page, "Kesh Tor")).toHaveAttribute("aria-selected", "true");
   await tab(page, "Brother Ketil").click();
+  // The cursor stays in the link, so its line shows as typed and the heading's line formatted.
   const lines = page.getByRole("textbox", { name: "Brother Ketil" }).locator(".cm-line");
   await expect(lines).toHaveText([
-    "# Brother Ketil",
+    "Brother Ketil",
     "",
     "Keeper of the shrine at [[Kesh Tor]].",
     "",
   ]);
+  await expect(lines.first()).toHaveClass(/cm-heading-1/);
 });
 
 test("Ctrl+click on an unresolved link creates its page and opens it", async ({ page }) => {

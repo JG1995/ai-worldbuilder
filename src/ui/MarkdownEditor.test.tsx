@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { describe, expect, it, vi } from "vitest";
 import type { EditorLink } from "@/types/api";
 import { setLinks } from "./editor-links";
-import { createPageState, MarkdownEditor, replaceState } from "./MarkdownEditor";
+import { createPageState, MarkdownEditor, reloadedState, replaceState } from "./MarkdownEditor";
 
 const page = [
   "---",
@@ -198,5 +198,69 @@ describe("following a link", () => {
     expect(followed).toBe(false);
     expect(outside.onFollow).not.toHaveBeenCalled();
     expect(ignored).toBe(true);
+  });
+});
+
+describe("the live preview", () => {
+  const tasks = "Before the tide:\n\n- [ ] Bar the gate\n- [x] Ring the bell\n";
+
+  /** An editor showing `text`, with the cursor on its first line, reporting each change. */
+  function renderPreview(text: string, { readOnly = false, preview = true } = {}) {
+    const changes: string[] = [];
+    render(
+      <MarkdownEditor
+        state={createPageState(text, "Kesh Tor", 0, { preview })}
+        readOnly={readOnly}
+        onChange={(state) => changes.push(state.doc.toString())}
+      />,
+    );
+    const textbox = screen.getByRole("textbox", { name: "Kesh Tor" });
+    const view = EditorView.findFromDOM(textbox);
+    if (!view) throw new Error("No editor");
+    return { changes, textbox, view };
+  }
+
+  it("toggles a task as one change that Ctrl+Z undoes alone", () => {
+    const { changes, textbox, view } = renderPreview(tasks);
+    view.dispatch({ changes: { from: 6, insert: "x" }, userEvent: "input.type" });
+    const typed = view.state.doc.toString();
+    const cursor = view.state.selection.main.head;
+
+    fireEvent.mouseDown(screen.getByRole("checkbox", { name: "Bar the gate" }), { button: 0 });
+    expect(view.state.doc.toString()).toBe(typed.replace("- [ ] Bar", "- [x] Bar"));
+    expect(changes).toEqual([typed, view.state.doc.toString()]);
+    expect(view.state.selection.main.head).toBe(cursor);
+
+    fireEvent.mouseDown(screen.getByRole("checkbox", { name: "Ring the bell" }), { button: 0 });
+    expect(view.state.doc.toString()).toContain("- [ ] Ring");
+
+    fireEvent.keyDown(textbox, { key: "z", ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "z", ctrlKey: true });
+    expect(view.state.doc.toString()).toBe(typed);
+  });
+
+  it("changes nothing when a task is pressed while the editor is read-only", () => {
+    const { changes, view } = renderPreview(tasks, { readOnly: true });
+
+    fireEvent.mouseDown(screen.getByRole("checkbox", { name: "Bar the gate" }), { button: 0 });
+
+    expect(view.state.doc.toString()).toBe(tasks);
+    expect(changes).toEqual([]);
+  });
+
+  it("shows the syntax as typed in a state created without it", () => {
+    renderPreview("Intro\n\n**bone** and [[Mirela]]", { preview: false });
+
+    expect(lineWith("**bone** and [[Mirela]]")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  it("keeps showing through replaceState a state that reloadedState built from it", () => {
+    const { view } = renderPreview(tasks);
+
+    replaceState(view, reloadedState(view.state, `${tasks}- [ ] Light the lamp\n`, "Kesh Tor"));
+
+    expect(screen.getByRole("checkbox", { name: "Light the lamp" })).toBeInTheDocument();
+    expect(lineWith("•  Light the lamp")).toBeInTheDocument();
   });
 });

@@ -71,7 +71,22 @@ test("the production build renders a page in the editor under the production CSP
       },
       world_tree: [{ path: "Kesh Tor.md", name: "Kesh Tor", kind: "page" }],
       page_read: {
-        text: "---\ntitle: Kesh Tor\n---\n# Kesh Tor\n\nRoll `3d6` at dusk.\n",
+        // Elements whose live preview draws boxes, widgets and fills, which a decoration that
+        // needed a blocked style attribute would report as a violation.
+        text: [
+          "---",
+          "title: Kesh Tor",
+          "---",
+          "# Kesh Tor",
+          "",
+          "Roll `3d6` at ==dusk==.",
+          "",
+          "> [!note] Shelter",
+          "> A cave.",
+          "",
+          "- [ ] Bring water",
+          "",
+        ].join("\n"),
         version: "1",
       },
     };
@@ -105,7 +120,11 @@ test("the production build renders a page in the editor under the production CSP
   await expect(row.locator(".icon")).toHaveCSS("font-family", '"Material Symbols Sharp"');
   await row.click();
   const editor = page.getByRole("textbox", { name: "Kesh Tor" });
-  await expect(editor).toContainText("Roll `3d6` at dusk.");
+  // Away from the cursor, which starts on the frontmatter's first line, the syntax is hidden.
+  await expect(editor).toContainText("Roll 3d6 at dusk.");
+  await expect(editor.locator(".cm-highlight")).toHaveText("dusk");
+  await expect(editor.locator(".cm-callout-title")).toHaveText("Shelter");
+  await expect(editor.getByRole("checkbox", { name: "Bring water" })).toBeVisible();
   // Only CodeMirror's own base theme, in the <style> element that carries the nonce, makes the
   // editor a flex box; the theme's editor section supplies the mono family.
   await expect(page.locator(".cm-editor")).toHaveCSS("display", "flex");

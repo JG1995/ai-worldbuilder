@@ -76,7 +76,7 @@ describe("the failed-save notice", () => {
     expect(notice).toHaveTextContent(
       "This page could not be saved: Another program is using the file.",
     );
-    expect(textbox).toHaveTextContent("# OverviewMine");
+    expect(editorOf(textbox).state.doc.toString()).toBe("# Overview\nMine");
     fail = false;
     fireEvent.click(within(notice).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
@@ -126,7 +126,7 @@ describe("the conflict notice", () => {
     fireEvent.click(within(notice).getByRole("button", { name: "Load theirs" }));
 
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
-    expect(textbox).toHaveTextContent("# Overview.md changed elsewhere");
+    expect(editorOf(textbox).state.doc.toString()).toBe("# Overview.md changed elsewhere\n");
     await saveNow();
     expect(writesOf(calls)).toHaveLength(1);
     undo(editorOf(textbox));
@@ -219,7 +219,7 @@ describe("the conflict notice", () => {
     );
 
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
-    expect(textbox).toHaveTextContent("# Overview.md changed elsewhere");
+    expect(editorOf(textbox).state.doc.toString()).toBe("# Overview.md changed elsewhere\n");
   });
 });
 

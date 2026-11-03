@@ -171,6 +171,11 @@ async function openOverview(beforeWorldChange?: () => Promise<void>) {
   return screen.findByRole("textbox", { name: "Overview" });
 }
 
+/** The page text in the editor `textbox`. */
+function textOf(textbox: HTMLElement) {
+  return EditorView.findFromDOM(textbox)?.state.doc.toString();
+}
+
 function typeAtEnd(textbox: HTMLElement, text: string) {
   const view = EditorView.findFromDOM(textbox);
   if (!view) throw new Error("No editor");
@@ -357,8 +362,8 @@ describe("closing a page that cannot be saved", () => {
     const asked = await screen.findByRole("dialog", { name: '"Mirror lake" could not be saved' });
     fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("tab", { name: "Kesh Tor" })).not.toBeInTheDocument();
-    expect(await screen.findByRole("textbox", { name: "Mirror lake" })).toHaveTextContent(
-      "# Mirror lakeUnsaved",
+    expect(textOf(await screen.findByRole("textbox", { name: "Mirror lake" }))).toBe(
+      "# Mirror lake\nUnsaved",
     );
   });
 
@@ -387,7 +392,7 @@ describe("closing a page that cannot be saved", () => {
       ),
     ).toBeInTheDocument();
     expect(textbox).toHaveAttribute("aria-readonly", "true");
-    expect(textbox).toHaveTextContent("# OverviewMore");
+    expect(textOf(textbox)).toBe("# Overview\nMore");
     closeOverview();
     expect(await dialog()).toHaveTextContent("The page is not UTF-8 text.");
     expect(writesOf(calls)).toHaveLength(1);
@@ -554,7 +559,7 @@ describe("changing worlds", () => {
     await act(async () => dialog.pick());
 
     const next = await screen.findByRole("textbox", { name: "Overview" });
-    await waitFor(() => expect(next).toHaveTextContent("# World 2"));
+    await waitFor(() => expect(textOf(next)).toBe("# World 2\n"));
     expect(next).not.toHaveAttribute("aria-readonly");
     expect(isInert(next)).toBe(false);
     await act(() => new Promise((resolve) => setTimeout(resolve, autosaveDelay + 100)));

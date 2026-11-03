@@ -231,7 +231,7 @@ export function PageTab({
           notify: (notice) => setNotice(session, path, notice),
         });
         const target = useWorldStore.getState().takeCursorTarget(path);
-        let editor = createPageState(read.text, title);
+        let editor = createPageState(read.text, title, 0, { preview: true });
         // A heading or block the page does not have leaves the cursor at the top.
         const at = target === null ? null : cursorOffset(editor, target);
         if (at !== null) editor = editor.update({ selection: { anchor: at } }).state;

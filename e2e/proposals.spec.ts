@@ -10,7 +10,9 @@ const card = (page: Page, name: string) => pane(page).getByRole("article", { nam
 const editor = (page: Page) => page.getByRole("textbox", { name: "Campaign overview" });
 const toast = (page: Page) => page.getByRole("status").getByRole("listitem");
 
-const addedLine = "The caravan from [[Saltmere]] stops here on its way north.";
+// The line the edit appends, as typed or with its link formatted: the cursor stays at the page's
+// start, so the line shows formatted once the link is reported.
+const addedLine = /The caravan from (\[\[)?Saltmere(\]\])? stops here on its way north\./;
 
 /** Opens the sample world, saves a provider and opens Campaign overview, the active page. */
 async function openWithProvider(page: Page) {
