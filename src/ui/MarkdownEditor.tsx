@@ -4,6 +4,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import {
   Compartment,
+  type EditorSelection,
   EditorState,
   type Extension,
   Facet,
@@ -69,6 +70,23 @@ const suggestion = new Compartment();
 const mode = new Compartment();
 const modes = new Map<string, Extension>();
 
+/**
+ * In the reading view the text takes focus, as `EditorView.focus` gives it, only to pass it to the
+ * tab stop around the editor, the page's scrolling region, so the keys that scroll it work and Tab
+ * goes on to the links. Without one the text keeps it; it is never a tab stop itself.
+ */
+const focusPage = [
+  EditorView.contentAttributes.of({ tabindex: "-1" }),
+  EditorView.domEventHandlers({
+    focus: (event, view) => {
+      if (event.target !== view.contentDOM) return;
+      view.dom.parentElement
+        ?.closest<HTMLElement>('[tabindex="0"]')
+        ?.focus({ preventScroll: true });
+    },
+  }),
+];
+
 function modeOf(reading: boolean, readOnly: boolean) {
   const key = `${reading} ${readOnly}`;
   let extension = modes.get(key);
@@ -77,7 +95,7 @@ function modeOf(reading: boolean, readOnly: boolean) {
       EditorView.editable.of(!reading),
       EditorState.readOnly.of(reading || readOnly),
       previewView.of(reading ? "reading" : "editing"),
-      reading ? EditorView.editorAttributes.of({ class: "page-reading" }) : [],
+      reading ? [EditorView.editorAttributes.of({ class: "page-reading" }), focusPage] : [],
     ];
     modes.set(key, extension);
   }
@@ -92,6 +110,34 @@ function setMode(editor: EditorView, extension: Extension) {
 
 function isReading(state: EditorState) {
   return state.facet(previewView) === "reading";
+}
+
+/**
+ * The editing view's selection while the reading view shows, mapped through the changes made
+ * meanwhile, so that a selection made in the reading view's text, which CodeMirror reads into the
+ * state, leaves it alone; null in the editing view.
+ */
+const editingSelection = StateField.define<EditorSelection | null>({
+  create: () => null,
+  update: (saved, transaction) => {
+    if (!isReading(transaction.state)) return null;
+    if (!isReading(transaction.startState)) {
+      return transaction.startState.selection.map(transaction.changes);
+    }
+    return saved?.map(transaction.changes) ?? null;
+  },
+});
+
+/** The editing view takes back its selection as the reading view ends. */
+const restoreEditingSelection = EditorState.transactionFilter.of((transaction) => {
+  const saved = transaction.startState.field(editingSelection, false);
+  if (!saved || isReading(transaction.state)) return transaction;
+  return [transaction, { selection: saved.map(transaction.changes), sequential: true }];
+});
+
+/** The selection the editing view has, or will have again once the reading view ends. */
+function selectionOf(state: EditorState) {
+  return state.field(editingSelection, false) ?? state.selection;
 }
 
 /** Whether a state shows the live preview, so that a reload of it does too. */
@@ -119,6 +165,8 @@ export function createPageState(
     selection: { anchor: cursor },
     extensions: [
       mode.of(modeOf(false, false)),
+      editingSelection,
+      restoreEditingSelection,
       markdown({ extensions: pageSyntax }),
       previewOn.of(preview),
       preview ? [livePreview, tableGrid, propertiesBlock] : [],
@@ -140,11 +188,11 @@ export function createPageState(
 
 /**
  * A fresh state for the page's new `text`, with no undo history, the live preview if `previous`
- * showed it, and the cursor at the line and column it had in `previous`, or at the nearest position
- * the new text has.
+ * showed it, and the editing view's cursor at the line and column it had in `previous`, or at the
+ * nearest position the new text has.
  */
 export function reloadedState(previous: EditorState, text: string, label: string) {
-  const head = previous.selection.main.head;
+  const head = selectionOf(previous).main.head;
   const { number, from } = previous.doc.lineAt(head);
   const doc = Text.of(text.split("\n"));
   const line = doc.line(Math.min(number, doc.lines));
