@@ -9,7 +9,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
-import type { SyntaxNodeRef } from "@lezer/common";
+import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
 import type { EditorLink } from "@/types/api";
 import { editorLinks, frontmatterEnd } from "./editor-links";
 
@@ -409,24 +409,50 @@ class RangeBuilder {
   }
 }
 
+/** The core's links, by where they start. */
+function linksByStart(state: EditorState) {
+  return new Map((state.field(editorLinks, false)?.links ?? []).map((link) => [link.from, link]));
+}
+
+/** Where the text after any leading frontmatter starts. */
+export function bodyStart(state: EditorState) {
+  const end = frontmatterEnd(state.doc);
+  return end === 0 ? 0 : state.doc.line(end).to + 1;
+}
+
+/**
+ * Decorates the inline elements inside a node by the same rules as the lines away from the cursor,
+ * for text the editor draws outside its lines, such as a table's cells. Each call gives the
+ * decorations of one node's children.
+ */
+export function inlineDecorator(state: EditorState) {
+  const links = linksByStart(state);
+  return (node: SyntaxNode): Range<Decoration>[] => {
+    const builder = new RangeBuilder(state, new Set(), links, node.from, node.to);
+    const walk = (child: SyntaxNode) => {
+      if (!builder.enter(child)) return;
+      for (let inner = child.firstChild; inner; inner = inner.nextSibling) walk(inner);
+    };
+    for (let child = node.firstChild; child; child = child.nextSibling) walk(child);
+    return builder.ranges;
+  };
+}
+
 /** The decorations of the visible ranges, outside any leading frontmatter. */
 function previewDecorations(view: EditorView, revealed: Set<number>): DecorationSet {
   const { state } = view;
-  const end = frontmatterEnd(state.doc);
-  const bodyStart = end === 0 ? 0 : state.doc.line(end).to + 1;
-  const links = new Map(
-    (state.field(editorLinks, false)?.links ?? []).map((link) => [link.from, link]),
-  );
+  const start = bodyStart(state);
+  const links = linksByStart(state);
   const tree = syntaxTree(state);
   const ranges: Range<Decoration>[] = [];
   for (const { from, to } of view.visibleRanges) {
     const builder = new RangeBuilder(state, revealed, links, from, to);
     tree.iterate({
-      from: Math.max(from, bodyStart),
+      from: Math.max(from, start),
       to,
       enter: (node) => {
-        if (node.to <= bodyStart) return false;
-        if (node.from < bodyStart) return true;
+        if (node.to <= start) return false;
+        if (node.from < start) return true;
         return builder.enter(node);
       },
     });

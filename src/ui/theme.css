@@ -463,6 +463,43 @@
 }
 
 /*
+ * Tables as grids (src/ui/table-grid.ts): divider borders between cells and bold header cells, in
+ * a wrapper that scrolls sideways when the grid is wider than the page column.
+ */
+.page-editor.cm-editor .cm-table-wrap {
+  overflow-x: auto;
+  contain: inline-size;
+}
+
+/* Words break only between each other, not anywhere as the editor's wrapped lines allow. */
+.page-editor.cm-editor .cm-table {
+  border-collapse: collapse;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.page-editor.cm-editor .cm-table th,
+.page-editor.cm-editor .cm-table td {
+  padding: 4px 8px;
+  border: 1px solid var(--color-divider);
+  text-align: left;
+  vertical-align: top;
+}
+
+.page-editor.cm-editor .cm-table th {
+  font-weight: 700;
+}
+
+.page-editor.cm-editor .cm-table .cm-align-center {
+  text-align: center;
+}
+
+.page-editor.cm-editor .cm-table .cm-align-right {
+  text-align: right;
+}
+
+/*
  * The link suggestion list (src/ui/link-suggestions.ts), a popover on the menus layer with
  * Search's rows: the name in ui-strong, the folder and alias in ui-small text-muted, and the
  * selected row in the selected fill with the accent line, which forced colours repaint as a border.

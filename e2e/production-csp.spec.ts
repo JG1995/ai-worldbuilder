@@ -86,6 +86,10 @@ test("the production build renders a page in the editor under the production CSP
           "",
           "- [ ] Bring water",
           "",
+          "| Supply | Days |",
+          "| --- | ---: |",
+          "| Water | 3 |",
+          "",
         ].join("\n"),
         version: "1",
       },
@@ -125,6 +129,7 @@ test("the production build renders a page in the editor under the production CSP
   await expect(editor.locator(".cm-highlight")).toHaveText("dusk");
   await expect(editor.locator(".cm-callout-title")).toHaveText("Shelter");
   await expect(editor.getByRole("checkbox", { name: "Bring water" })).toBeVisible();
+  await expect(editor.getByRole("table").getByRole("cell")).toHaveText(["Water", "3"]);
   // Only CodeMirror's own base theme, in the <style> element that carries the nonce, makes the
   // editor a flex box; the theme's editor section supplies the mono family.
   await expect(page.locator(".cm-editor")).toHaveCSS("display", "flex");

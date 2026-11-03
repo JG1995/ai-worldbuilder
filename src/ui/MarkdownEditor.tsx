@@ -18,6 +18,7 @@ import { editorLinks, frontmatterEnd, linkAt } from "./editor-links";
 import { linkSuggestions, type Suggest, suggestFacet } from "./link-suggestions";
 import { livePreview } from "./live-preview";
 import { pageSyntax } from "./markdown-syntax";
+import { gridPosition, tableGrid } from "./table-grid";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 const monoClass = "cm-mono";
@@ -90,7 +91,7 @@ export function createPageState(
     extensions: [
       markdown({ extensions: pageSyntax }),
       previewOn.of(preview),
-      preview ? livePreview : [],
+      preview ? [livePreview, tableGrid] : [],
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
@@ -248,7 +249,8 @@ export function MarkdownEditor({
     // default is prevented: a click that follows a link does not also move the cursor.
     const followClick = (event: MouseEvent) => {
       if (!isFollowClick(event)) return;
-      const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
+      const position =
+        gridPosition(editor, event) ?? editor.posAtCoords({ x: event.clientX, y: event.clientY });
       if (follow(editor, position)) event.preventDefault();
     };
     const followKey = (event: KeyboardEvent) => {
