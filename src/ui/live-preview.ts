@@ -1,5 +1,5 @@
 import { isolateHistory } from "@codemirror/commands";
-import { syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { type EditorState, Facet, type Range } from "@codemirror/state";
 import {
   Decoration,
@@ -503,6 +503,42 @@ export function bodyStart(state: EditorState) {
 }
 
 /**
+ * A row's cells between its pipes, as GFM reads them: a leading or trailing pipe opens or closes
+ * the row, and nothing between two pipes is an empty cell.
+ */
+function rowCells(row: SyntaxNode) {
+  const cells: { from: number; to: number; node: SyntaxNode | null }[] = [];
+  let from = row.from;
+  let node: SyntaxNode | null = null;
+  for (let child = row.firstChild; child; child = child.nextSibling) {
+    if (child.name === "TableCell") node = child;
+    if (child.name !== "TableDelimiter") continue;
+    cells.push({ from, to: child.from, node });
+    from = child.to;
+    node = null;
+  }
+  cells.push({ from, to: row.to, node });
+  const first = row.firstChild;
+  const last = row.lastChild;
+  if (first?.name === "TableDelimiter" && first.from === row.from) cells.shift();
+  if (last?.name === "TableDelimiter" && last.to === row.to) cells.pop();
+  return cells;
+}
+
+/**
+ * The cells of a `Table` node that its grid draws: the header's, and each row's up to as many as
+ * the header has, which leaves out a row's extra cells, with where the row ends.
+ */
+export function gridRows(table: SyntaxNode) {
+  const headerRow = table.getChild("TableHeader");
+  const header = headerRow ? rowCells(headerRow) : [];
+  const rows = table
+    .getChildren("TableRow")
+    .map((row) => ({ to: row.to, cells: rowCells(row).slice(0, header.length) }));
+  return { header, rows };
+}
+
+/**
  * Decorates the inline elements inside a node by the same rules as the lines away from the cursor,
  * for text the editor draws outside its lines, such as a table's cells. Each call gives the
  * decorations of one node's children.
@@ -518,6 +554,35 @@ export function inlineDecorator(state: EditorState) {
     for (let child = node.firstChild; child; child = child.nextSibling) walk(child);
     return builder.ranges;
   };
+}
+
+/**
+ * Where each link the reading view draws as focusable starts, in a line or in a grid's cell, in the
+ * order of the text, whether CodeMirror has drawn it or not: the same rules as the drawing, over
+ * the whole text, with a table's cells decorated as its grid decorates them.
+ */
+export function focusableLinkStarts(state: EditorState): number[] {
+  const start = bodyStart(state);
+  const builder = new RangeBuilder(state, new Set(), linksByStart(state), 0, state.doc.length);
+  const decorate = inlineDecorator(state);
+  const cells: Range<Decoration>[] = [];
+  const tree = ensureSyntaxTree(state, state.doc.length, 100) ?? syntaxTree(state);
+  tree.iterate({
+    from: start,
+    enter: (node) => {
+      if (node.to <= start) return false;
+      if (node.from < start) return true;
+      if (node.name !== "Table") return builder.enter(node);
+      const { header, rows } = gridRows(node.node);
+      for (const cell of [...header, ...rows.flatMap((row) => row.cells)])
+        if (cell.node) cells.push(...decorate(cell.node));
+      return false;
+    },
+  });
+  const starts = [...builder.ranges, ...cells].flatMap(({ value }) =>
+    typeof value.spec.link === "number" ? [value.spec.link] : [],
+  );
+  return [...new Set(starts)].sort((a, b) => a - b);
 }
 
 /** The decorations of the visible ranges, outside any leading frontmatter. */

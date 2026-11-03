@@ -203,6 +203,25 @@ describe("AssistantPane's answers", () => {
     expect(shown.closest(".body-reading")).toBeNull();
   });
 
+  it("shows an answer's leading --- block as typed, not hidden as a page's properties", () => {
+    renderPane(
+      chatWith({
+        messages: [
+          { id: 1, role: "user", text: "Hello" },
+          answer(2, "complete", "---\ntitle: X\n---\nBody"),
+        ],
+      }),
+    );
+
+    const shown = screen.getByRole("textbox", { name: "Answer" });
+    expect([...shown.querySelectorAll(".cm-line")].map((line) => line.textContent)).toEqual([
+      "---",
+      "title: X",
+      "---",
+      "Body",
+    ]);
+  });
+
   it("opens no preview of a page an answer links to", async () => {
     vi.useFakeTimers();
     const text = "See [[Kesh Tor]].";

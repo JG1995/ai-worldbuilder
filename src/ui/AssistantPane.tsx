@@ -517,7 +517,8 @@ function Answer({
  * text that continues the shown text is added to its end, so a streaming answer grows without
  * rebuilding the editor. Its links are marked once they are known, and following a resolved one
  * goes to `onFollow`. It is given no image, web-link or preview callbacks, so it loads no image,
- * opens no address and previews no page.
+ * opens no address and previews no page. A leading `---` block shows as typed, with no properties
+ * block, since an answer has no properties to read.
  */
 function AnswerText({
   text,
@@ -529,7 +530,9 @@ function AnswerText({
   onFollow: (link: EditorLink) => void;
 }) {
   const view = useRef<EditorView>(null);
-  const [state] = useState(() => createPageState(text, "Answer", 0, { preview: true }));
+  const [state] = useState(() =>
+    createPageState(text, "Answer", 0, { preview: true, properties: false }),
+  );
 
   useEffect(() => {
     const editor = view.current;
