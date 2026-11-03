@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EditorLink } from "@/types/api";
 import { setLinks } from "./editor-links";
 import { createPageState, MarkdownEditor, reloadedState, replaceState } from "./MarkdownEditor";
+import { PageView } from "./PageView";
 
 const page = [
   "---",
@@ -433,6 +434,62 @@ describe("the reading view", () => {
     rerender(<MarkdownEditor state={linked} readOnly={false} reading />);
     expect(textbox).toHaveAttribute("contenteditable", "false");
     expect(focusableLinks(textbox)).toHaveLength(2);
+  });
+
+  it("gives the editing view back the selection it had, through changes while reading", () => {
+    const state = createPageState(text, "Kesh Tor", 0, { preview: true });
+    const selected = state.update({ selection: { anchor: at("Ruled"), head: at(" since") } }).state;
+    const { rerender } = render(<MarkdownEditor state={selected} readOnly={false} />);
+    const view = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Kesh Tor" }));
+    if (!view) throw new Error("No editor");
+
+    rerender(<MarkdownEditor state={selected} readOnly={false} reading />);
+    // As a click or a triple-click in the reading view's text sets it.
+    act(() => view.dispatch({ selection: { anchor: 0, head: text.length } }));
+    act(() => view.dispatch({ changes: { from: 0, insert: "Old " } }));
+    rerender(<MarkdownEditor state={selected} readOnly={false} />);
+
+    expect(view.state.selection.main).toMatchObject({
+      anchor: at("Ruled") + 4,
+      head: at(" since") + 4,
+    });
+  });
+
+  it("gives the editing view back its cursor after a reload while reading", () => {
+    const state = createPageState(text, "Kesh Tor", at("Ruled"), { preview: true });
+    const { rerender } = render(<MarkdownEditor state={state} readOnly={false} />);
+    const view = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Kesh Tor" }));
+    if (!view) throw new Error("No editor");
+
+    rerender(<MarkdownEditor state={state} readOnly={false} reading />);
+    act(() => view.dispatch({ selection: { anchor: 0, head: text.length } }));
+    act(() => replaceState(view, reloadedState(view.state, `${text}\n`, "Kesh Tor")));
+    rerender(<MarkdownEditor state={state} readOnly={false} />);
+
+    expect(view.state.selection.main).toMatchObject({ anchor: at("Ruled"), head: at("Ruled") });
+  });
+
+  it("puts the focus it takes in the page's tab stop, which stays the only one", () => {
+    const state = createPageState(text, "Kesh Tor", 0, { preview: true });
+    render(
+      <>
+        <button type="button">Elsewhere</button>
+        <PageView title="Kesh Tor" reading>
+          <MarkdownEditor state={state} readOnly={false} reading autoFocus />
+        </PageView>
+      </>,
+    );
+    const page = screen.getByRole("region", { name: "Kesh Tor" });
+    const textbox = screen.getByRole("textbox", { name: "Kesh Tor" });
+    const view = EditorView.findFromDOM(textbox);
+    if (!view) throw new Error("No editor");
+    expect(page).toHaveFocus();
+
+    act(() => screen.getByRole("button", { name: "Elsewhere" }).focus());
+    act(() => view.focus());
+
+    expect(page).toHaveFocus();
+    expect(textbox).toHaveAttribute("tabindex", "-1");
   });
 
   it("keeps the reading view, or a read-only editing view, through a reload", () => {

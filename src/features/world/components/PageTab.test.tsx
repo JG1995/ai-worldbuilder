@@ -324,6 +324,48 @@ describe("the reading view", () => {
     expect(calls.filter(({ command }) => command === "link_create")).toEqual([]);
   });
 
+  it("keeps focus in the page when Enter follows a link to its own heading, and when the store opens it", async () => {
+    const text = "# Overview\nSee [[#Tide]].\n## Tide\nHigh water.";
+    const from = text.indexOf("[[");
+    mockWorldIpc({
+      page_read: () => ({ text, version: "v1" }),
+      links_in: () => ({
+        state: "ready",
+        links: [
+          {
+            from,
+            to: from + 9,
+            state: "resolved",
+            target: "#Tide",
+            path,
+            heading: "Tide",
+            block: null,
+          },
+        ],
+      }),
+    });
+    const textbox = await renderPage({ reading: true });
+    const page = screen.getByRole("region", { name: "Overview" });
+    const link = await waitFor(() => {
+      const element = textbox.querySelector<HTMLElement>("[data-link]");
+      if (!element) throw new Error("The links are not marked yet");
+      return element;
+    });
+
+    act(() => link.focus());
+    fireEvent.keyDown(link, { key: "Enter" });
+    expect(page).toHaveFocus();
+    expect(editorOf(textbox).state.selection.main.head).toBe(text.indexOf("## Tide"));
+
+    act(() => link.blur());
+    act(() =>
+      useWorldStore
+        .getState()
+        .openPage(path, { newTab: false, at: { heading: null, block: null } }),
+    );
+    expect(page).toHaveFocus();
+  });
+
   it("says a page of only whitespace has no text yet, above the backlinks, in a page that holds focus", async () => {
     mockWorldIpc({ page_read: () => ({ text: "  \n\n", version: "v1" }) });
     const textbox = await renderPage({ reading: true });
