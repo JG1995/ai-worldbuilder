@@ -1,5 +1,15 @@
 import { invokeCommand, invokeStreaming } from "@/lib/ipc";
-import type { AnswerEnd, AnswerEvent, Conversation, Conversations, EditorLinks } from "@/types/api";
+import type {
+  Accepted,
+  AnswerEnd,
+  AnswerEvent,
+  AnswerReview,
+  Conversation,
+  Conversations,
+  EditorLinks,
+  ProposalVersion,
+  Undone,
+} from "@/types/api";
 
 type Outgoing = {
   /** The conversation to continue, or null to start one with this message. */
@@ -47,3 +57,30 @@ export const assistantConversation = (id: number) =>
  * stopped and been saved.
  */
 export const assistantDelete = (id: number) => invokeCommand<void>("assistant_delete", { id });
+
+/**
+ * The proposals of a conversation's answers, in order, each pending one checked against its page
+ * as it is now, with each answer's notes and accepted sets. Rejects with `ai_off`, `no_world`,
+ * `not_found` and `io`.
+ */
+export const assistantReview = (conversation: number) =>
+  invokeCommand<AnswerReview[]>("assistant_review", { conversation });
+
+/**
+ * Writes the chosen pending proposals of an answer as one change, each with the page version its
+ * card showed (none for a new page). Rejects with `conflict`, writing nothing, when none is chosen
+ * or one is not pending, no longer applies or its page's version differs; a write that fails
+ * partway resolves with what was written and the failure.
+ */
+export const assistantAccept = (answer: number, proposals: ProposalVersion[]) =>
+  invokeCommand<Accepted>("assistant_accept", { answer, proposals });
+
+/** Rejects a pending proposal for good. Rejects with `conflict` when it is not pending. */
+export const assistantReject = (proposal: number) =>
+  invokeCommand<void>("assistant_reject", { proposal });
+
+/**
+ * Undoes an accepted set's change as a whole, deleting the pages it created. Rejects with
+ * `conflict`, naming the page, when a page changed since, and then writes nothing.
+ */
+export const assistantUndo = (set: number) => invokeCommand<Undone>("assistant_undo", { set });

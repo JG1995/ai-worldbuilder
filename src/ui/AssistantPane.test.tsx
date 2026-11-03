@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { AnswerReview } from "@/types/api";
 import {
   type AnswerState,
   type AssistantChat,
@@ -9,14 +10,18 @@ import {
 } from "./AssistantPane";
 
 describe("AssistantPane", () => {
-  it("names the model in its header and explains what the assistant sends to the host", () => {
+  it("names the model in its header and explains what the assistant sends to the host and that it only proposes changes", () => {
     render(
       <AssistantPane model="mistral-small" host="api.example.com" onOpenSettings={() => {}} />,
     );
 
     expect(screen.getByRole("heading", { name: "Assistant" })).toBeInTheDocument();
     expect(screen.getByText("mistral-small")).toBeInTheDocument();
-    expect(screen.getByText(/sends them, with your message, to api\.example\.com\./)).toBeVisible();
+    const explanation = screen.getByText(/sends them, with your message, to api\.example\.com\./);
+    expect(explanation).toBeVisible();
+    expect(explanation).toHaveTextContent(
+      "It can propose changes to pages, which are written only when you accept them.",
+    );
     expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
   });
 
@@ -48,11 +53,17 @@ function chatWith(overrides: Partial<AssistantChat> = {}): AssistantChat {
     onCopy: vi.fn(),
     refusal: null,
     announcement: "",
+    acceptFailure: null,
+    onAccept: vi.fn(() => Promise.resolve(null)),
+    onReject: vi.fn(() => Promise.resolve(true)),
+    onUndo: vi.fn(() => Promise.resolve(true)),
     ...overrides,
   };
 }
 
-const answer = (id: number, state: AnswerState, text: string): ChatMessage => ({
+type AnswerMessage = Extract<ChatMessage, { role: "answer" }>;
+
+const answer = (id: number, state: AnswerState, text: string): AnswerMessage => ({
   id,
   role: "answer",
   text,
@@ -176,6 +187,97 @@ describe("AssistantPane's answers", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(chat.onRetry).toHaveBeenCalledOnce();
   });
+
+  const failed: AnswerMessage = {
+    ...answer(2, "failed", "Here is the page."),
+    failure: { reason: "interrupted", detail: null, providerMessage: null },
+  };
+  const reviewWith = (state: "pending" | "accepted"): AnswerReview => ({
+    answer: 11,
+    unreadable: 2,
+    unfinished: true,
+    proposals: [
+      {
+        id: 1,
+        kind: "new_page",
+        path: "Places/Kesh Tor.md",
+        page: state === "accepted" ? "Places/Kesh Tor.md" : null,
+        state,
+        undone: false,
+        accept: state === "accepted" ? 5 : null,
+        check:
+          state === "pending"
+            ? {
+                state: "applies",
+                lines: [{ kind: "added", text: "# Kesh Tor" }],
+                version: null,
+                changed: false,
+              }
+            : null,
+      },
+    ],
+    accepted: state === "accepted" ? [{ id: 5, count: 1, undo: true }] : [],
+  });
+
+  it("shows an answer's proposals and its notes below its text, and no Retry once a proposal is accepted", () => {
+    const { rerender } = renderPane(
+      chatWith({
+        messages: [
+          { id: 1, role: "user", text: "Write Kesh Tor" },
+          { ...failed, review: reviewWith("pending") },
+        ],
+      }),
+    );
+
+    expect(screen.getByRole("article", { name: "New page: Kesh Tor" })).toBeInTheDocument();
+    expect(screen.getByText("2 proposed changes could not be read.")).toBeInTheDocument();
+    expect(
+      screen.getByText("The answer ended before a proposed change was complete."),
+    ).toBeInTheDocument();
+    // The answer's proposal is the pane's newest pending set.
+    expect(screen.getByRole("button", { name: "Accept" })).toHaveClass("bg-accent");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+
+    rerender(
+      <AssistantPane
+        model="mistral-small"
+        onOpenSettings={() => {}}
+        chat={chatWith({
+          messages: [
+            { id: 1, role: "user", text: "Write Kesh Tor" },
+            { ...failed, review: reviewWith("accepted") },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("The connection ended");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("names the kind and page of each proposal begun while the answer arrives", () => {
+    renderPane(
+      chatWith({
+        messages: [
+          { id: 1, role: "user", text: "Flesh out Saltmere" },
+          {
+            ...answer(2, "streaming", "Here you are."),
+            proposals: [
+              { change: "new_page", path: "Places/Saltmere/Docks" },
+              { change: "edit", path: "Places/Saltmere.md" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const lines = within(screen.getByRole("list", { name: "Proposed changes" })).getAllByRole(
+      "listitem",
+    );
+    expect(lines.map((line) => line.textContent)).toEqual([
+      "Proposing a new page: Places/Saltmere/Docks",
+      "Proposing an edit: Places/Saltmere.md",
+    ]);
+  });
 });
 
 describe("AssistantPane's conversations", () => {
@@ -231,5 +333,27 @@ describe("AssistantPane's conversations", () => {
     expect(screen.getByText(time)).toHaveClass("ui-small", "text-text-muted");
     fireEvent.click(row);
     expect(onOpen).toHaveBeenCalledExactlyOnceWith(5);
+  });
+
+  it("says in the delete confirmation that changes already accepted stay in the world", () => {
+    render(
+      <AssistantPane
+        model="mistral-small"
+        onOpenSettings={() => {}}
+        conversations={{
+          items: [{ id: 5, title: "The glass storm", updated: 1_700_000_000 }],
+          error: null,
+          onOpen: vi.fn(),
+          onDelete: vi.fn(),
+          onBack: vi.fn(),
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete conversation" }));
+
+    expect(screen.getByRole("dialog", { name: 'Delete "The glass storm"?' })).toHaveTextContent(
+      "cannot be undone. Changes you already accepted stay in the world.",
+    );
   });
 });

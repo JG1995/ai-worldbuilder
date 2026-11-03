@@ -2,12 +2,15 @@ import { EditorView } from "@codemirror/view";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  Accepted,
   AnswerEnd,
   AnswerEvent,
+  AnswerReview,
   ContextPage,
   Conversation,
   Conversations,
   EditorLinks,
+  ProposalReview,
 } from "@/types/api";
 import { answerChannel, mockAssistantIpc } from "../api/test-ipc";
 import { Assistant, type AssistantPorts } from "./Assistant";
@@ -23,6 +26,7 @@ type Handler = (args: Record<string, unknown>) => unknown;
 /** The world's conversations as the core reads them: none, saved as usual, unless overridden. */
 const emptyStore: Record<string, Handler> = {
   assistant_conversations: () => ({ items: [], notice: null }),
+  assistant_review: () => [],
   assistant_conversation: () => {
     throw { kind: "not_found", message: "The conversation does not exist." };
   },
@@ -47,11 +51,14 @@ function mockPendingSends(
   });
   /** The calls that sent a message, in order. */
   const sent = () => calls.filter(({ command }) => command === "assistant_send");
-  /** The commands called, in order, without the reads of the conversations and of links. */
+  /** The commands called, in order, without the reads of the conversations, links and proposals. */
   const commands = () =>
     calls
       .map(({ command }) => command)
-      .filter((command) => !["assistant_conversations", "assistant_links"].includes(command));
+      .filter(
+        (command) =>
+          !["assistant_conversations", "assistant_links", "assistant_review"].includes(command),
+      );
   return { calls, sends, sent, commands };
 }
 
@@ -63,6 +70,11 @@ function renderAssistant(ports: Partial<AssistantPorts> = {}, conversation: numb
     openPage: vi.fn(),
     flushActive: vi.fn(() => Promise.resolve()),
     hasPage: () => true,
+    flushPages: vi.fn(() => Promise.resolve(true)),
+    pagesWritten: vi.fn(() => Promise.resolve()),
+    pagesDeleted: vi.fn(() => Promise.resolve()),
+    showToast: vi.fn(),
+    setReviewPaths: vi.fn(),
     ...ports,
   };
   const onConversationChange = vi.fn();
@@ -76,10 +88,10 @@ function renderAssistant(ports: Partial<AssistantPorts> = {}, conversation: numb
       onOpenSettings={() => {}}
     />
   );
-  const { rerender } = render(element(all));
+  const { rerender, unmount } = render(element(all));
   /** Renders the assistant again as after the world's index changed. */
   const indexChanged = () => rerender(element({ ...all, indexRevision: all.indexRevision + 1 }));
-  return { ...all, indexChanged, onConversationChange };
+  return { ...all, indexChanged, onConversationChange, unmount };
 }
 
 const composer = () => screen.getByRole("textbox", { name: "Message" });
@@ -91,6 +103,8 @@ function sendMessage(text: string) {
 
 const answers = () => screen.queryAllByRole("textbox", { name: "Answer" });
 const announced = (text: string) => expect(screen.getByText(text)).toHaveAttribute("aria-live");
+/** The pane's polite live region; each answer's editor has one of its own. */
+const liveRegion = () => document.querySelector(".sr-only[aria-live]");
 
 const keshTor: ContextPage = { path: "Places/Kesh Tor.md", partial: false };
 
@@ -415,9 +429,9 @@ describe("answers as references into the world", () => {
     });
     follow(answer, "[[Nowhere");
     expect(ports.openPage).toHaveBeenCalledOnce();
-    // Nothing is created: the core is asked only to send, for links and for the conversations.
+    // Nothing is created: the core is asked only to send, and for links, conversations and proposals.
     expect(new Set(calls.map(({ command }) => command))).toEqual(
-      new Set(["assistant_conversations", "assistant_send", "assistant_links"]),
+      new Set(["assistant_conversations", "assistant_send", "assistant_links", "assistant_review"]),
     );
   });
 
@@ -552,7 +566,7 @@ describe("saved conversations", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "The conversation could not be loaded: The disk is busy.",
     );
-    expect(screen.getByText(/It answers here and changes no pages\./)).toBeVisible();
+    expect(screen.getByText(/written only when you accept them\./)).toBeVisible();
     // The world keeps remembering it, for an opening that can read it.
     expect(ports.onConversationChange).not.toHaveBeenCalled();
   });
@@ -563,7 +577,7 @@ describe("saved conversations", () => {
 
     await waitFor(() => expect(ports.onConversationChange).toHaveBeenCalledWith(null));
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByText(/It answers here and changes no pages\./)).toBeVisible();
+    expect(screen.getByText(/written only when you accept them\./)).toBeVisible();
   });
 
   it("stops a running answer before starting a new conversation or opening another", async () => {
@@ -666,7 +680,7 @@ describe("saved conversations", () => {
     expect(ports.onConversationChange).toHaveBeenLastCalledWith(null);
     fireEvent.click(within(list).getByRole("button", { name: "Back" }));
     expect(answers()).toHaveLength(0);
-    expect(screen.getByText(/It answers here and changes no pages\./)).toBeVisible();
+    expect(screen.getByText(/written only when you accept them\./)).toBeVisible();
   });
 
   it("says no answer arrived for a message, with Retry only on the last one", async () => {
@@ -720,5 +734,398 @@ describe("saved conversations", () => {
       ),
     );
     expect(screen.getByRole("alert")).toHaveClass("border-warning");
+  });
+});
+
+describe("proposals", () => {
+  const conversation: Conversation = {
+    id: 3,
+    title: "Mark Mirela as captured",
+    messages: [
+      { role: "user", text: "Mark Mirela as captured", time: 100 },
+      {
+        role: "answer",
+        id: 11,
+        text: "Here are the changes.",
+        time: 101,
+        state: "complete",
+        pages: [],
+        leftOut: 0,
+        indexing: false,
+      },
+    ],
+  };
+  // The model named the page `saltmere`; the core found it on disk as `Saltmere.md`.
+  const saltmere: ProposalReview = {
+    id: 1,
+    kind: "edit",
+    path: "saltmere",
+    page: "Saltmere.md",
+    state: "pending",
+    undone: false,
+    accept: null,
+    check: {
+      state: "applies",
+      lines: [
+        { kind: "removed", text: "Mirela is free." },
+        { kind: "added", text: "Mirela is captured." },
+      ],
+      version: "v1",
+      changed: false,
+    },
+  };
+  const keshTor: ProposalReview = {
+    id: 2,
+    kind: "new_page",
+    path: "Places/Kesh Tor.md",
+    page: null,
+    state: "pending",
+    undone: false,
+    accept: null,
+    check: {
+      state: "applies",
+      lines: [{ kind: "added", text: "# Kesh Tor" }],
+      version: null,
+      changed: false,
+    },
+  };
+  const reviewOf = (
+    proposals: ProposalReview[],
+    accepted: AnswerReview["accepted"] = [],
+  ): AnswerReview[] => [{ answer: 11, unreadable: 0, unfinished: false, proposals, accepted }];
+  const acceptedAs = (proposal: ProposalReview, page: string): ProposalReview => ({
+    ...proposal,
+    page,
+    state: "accepted",
+    accept: 5,
+    check: null,
+  });
+  const written = [
+    { path: "Places/Kesh Tor.md", text: "# Kesh Tor\n", version: "k1" },
+    { path: "Saltmere.md", text: "Mirela is captured.\n", version: "v2" },
+  ];
+
+  /**
+   * Mocks the core with the conversation above, whose proposals `review` reads, and `overrides`.
+   * Returns the calls and how often the proposals were read.
+   */
+  function mockCore(review: () => AnswerReview[], overrides: Record<string, Handler> = {}) {
+    const { calls } = mockPendingSends(undefined, {
+      assistant_conversation: () => conversation,
+      assistant_review: () => review(),
+      ...overrides,
+    });
+    const reads = () => calls.filter(({ command }) => command === "assistant_review").length;
+    const argsOf = (command: string) => calls.find((call) => call.command === command)?.args;
+    return { calls, reads, argsOf };
+  }
+
+  const card = (name: string) => screen.findByRole("article", { name });
+
+  it("names each proposal begun while the answer streams, until it ends", async () => {
+    const { sends } = mockPendingSends();
+    renderAssistant();
+    const pending = await startAnswer(sends, "Flesh out Saltmere");
+
+    act(() => pending.send({ kind: "proposal", change: "new_page", path: "Places/Docks" }));
+    act(() => pending.send({ kind: "proposal", change: "edit", path: "saltmere" }));
+
+    expect(screen.getByText("Proposing a new page: Places/Docks")).toBeInTheDocument();
+    expect(screen.getByText("Proposing an edit: saltmere")).toBeInTheDocument();
+    await act(async () =>
+      pending.end({ state: "complete", conversation: 7, text: "Done.", answer: 11 }),
+    );
+    expect(screen.queryByText("Proposing an edit: saltmere")).toBeNull();
+  });
+
+  it("reads the proposals once the answer ends, and again when the index changes", async () => {
+    let reviews: AnswerReview[] = [];
+    const { sends, calls } = mockPendingSends(undefined, { assistant_review: () => reviews });
+    const ports = renderAssistant();
+    const pending = await startAnswer(sends, "Mark Mirela as captured");
+    reviews = reviewOf([saltmere]);
+
+    await act(async () =>
+      pending.end({ state: "complete", conversation: 7, text: "Done.", answer: 11 }),
+    );
+
+    expect(await card("Edit: Saltmere")).toBeInTheDocument();
+    const reads = () => calls.filter(({ command }) => command === "assistant_review");
+    expect(reads().at(-1)?.args).toEqual({ conversation: 7 });
+    const before = reads().length;
+    ports.indexChanged();
+    await waitFor(() => expect(reads()).toHaveLength(before + 1));
+  });
+
+  it("marks the tab of a pending edit's page on disk, saves that page before accepting, and clears the mark on unmount", async () => {
+    const gone: ProposalReview = {
+      ...saltmere,
+      id: 3,
+      page: "Gone.md",
+      check: { state: "no_longer_applies", reason: "A passage is missing from the page." },
+    };
+    mockCore(() => reviewOf([saltmere, keshTor, gone]));
+    const ports = renderAssistant({}, 3);
+
+    await card("Edit: Saltmere");
+    await waitFor(() => expect(ports.setReviewPaths).toHaveBeenLastCalledWith(["Saltmere.md"]));
+    fireEvent.click(within(await card("Edit: Saltmere")).getByRole("button", { name: "Accept" }));
+
+    await waitFor(() => expect(ports.flushPages).toHaveBeenCalledExactlyOnceWith(["Saltmere.md"]));
+    ports.unmount();
+    expect(ports.setReviewPaths).toHaveBeenLastCalledWith([]);
+  });
+
+  it("rejects a proposal, and a rejected edit's title still opens its page while a new page's title is plain text", async () => {
+    let reviews = reviewOf([saltmere, keshTor]);
+    const { argsOf } = mockCore(() => reviews, {
+      assistant_reject: () => {
+        reviews = reviewOf([{ ...saltmere, state: "rejected", check: null }, keshTor]);
+        return null;
+      },
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(within(await card("Edit: Saltmere")).getByRole("button", { name: "Reject" }));
+
+    await waitFor(async () => expect(await card("Edit: Saltmere")).toHaveTextContent("Rejected"));
+    expect(argsOf("assistant_reject")).toEqual({ proposal: 1 });
+    fireEvent.click(within(await card("Edit: Saltmere")).getByRole("button", { name: "Saltmere" }));
+    expect(ports.openPage).toHaveBeenCalledExactlyOnceWith("Saltmere.md", { newTab: false });
+    expect(
+      within(await card("New page: Kesh Tor")).queryByRole("button", { name: "Kesh Tor" }),
+    ).toBeNull();
+  });
+
+  it("saves the pages first, sends the versions the cards showed, takes in the written pages and shows the toast, whose Undo undoes the set", async () => {
+    const order: string[] = [];
+    let reviews = reviewOf([keshTor, saltmere]);
+    const accepted: Accepted = { set: 5, accepted: 2, of: 2, written, failure: null, undo: true };
+    const { argsOf } = mockCore(() => reviews, {
+      assistant_accept: () => {
+        order.push("accept");
+        reviews = reviewOf(
+          [acceptedAs(keshTor, "Places/Kesh Tor.md"), acceptedAs(saltmere, "Saltmere.md")],
+          [{ id: 5, count: 2, undo: true }],
+        );
+        return accepted;
+      },
+      assistant_undo: () => ({ restored: [], deleted: [] }),
+    });
+    const ports = renderAssistant(
+      {
+        flushPages: vi.fn(async () => {
+          order.push("save");
+          return true;
+        }),
+      },
+      3,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept selected" }));
+
+    await waitFor(() => expect(ports.showToast).toHaveBeenCalledOnce());
+    expect(order).toEqual(["save", "accept"]);
+    expect(ports.flushPages).toHaveBeenCalledWith(["Saltmere.md"]);
+    expect(argsOf("assistant_accept")).toEqual({
+      answer: 11,
+      proposals: [
+        { id: 2, version: null },
+        { id: 1, version: "v1" },
+      ],
+    });
+    expect(ports.pagesWritten).toHaveBeenCalledExactlyOnceWith(written, { flash: true });
+    const [message, action] = vi.mocked(ports.showToast).mock.calls[0];
+    expect(message).toBe("Accepted 2 changes");
+    expect(liveRegion()).toHaveTextContent("Accepted 2 changes");
+    expect(await card("Edit: Saltmere")).toHaveTextContent("Accepted");
+
+    act(() => action?.run());
+    await waitFor(() => expect(argsOf("assistant_undo")).toEqual({ set: 5 }));
+    expect(ports.flushPages).toHaveBeenLastCalledWith(["Places/Kesh Tor.md", "Saltmere.md"]);
+  });
+
+  it("reads the proposals again when the core refuses the accept with a conflict, without a toast", async () => {
+    let reviews = reviewOf([saltmere]);
+    const message = "The page changed since the proposal was reviewed.";
+    const { reads } = mockCore(() => reviews, {
+      assistant_accept: () => {
+        reviews = reviewOf([
+          {
+            ...saltmere,
+            check: { ...saltmere.check, version: "v2", changed: true } as ProposalReview["check"],
+          },
+        ]);
+        throw { kind: "conflict", message };
+      },
+    });
+    const ports = renderAssistant({}, 3);
+    fireEvent.click(within(await card("Edit: Saltmere")).getByRole("button", { name: "Accept" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("This page changed since the proposal was made."),
+      ).toBeInTheDocument(),
+    );
+    expect(reads()).toBeGreaterThanOrEqual(2);
+    expect(ports.showToast).not.toHaveBeenCalled();
+    expect(liveRegion()).toHaveTextContent(message);
+  });
+
+  it("shows a partial accept as N of M changes, with the reason on the failed card", async () => {
+    let reviews = reviewOf([keshTor, saltmere]);
+    mockCore(() => reviews, {
+      assistant_accept: () => {
+        reviews = reviewOf(
+          [acceptedAs(keshTor, "Places/Kesh Tor.md"), saltmere],
+          [{ id: 5, count: 1, undo: true }],
+        );
+        return {
+          set: 5,
+          accepted: 1,
+          of: 2,
+          written: written.slice(0, 1),
+          failure: { proposal: 1, message: "The page is read-only." },
+          undo: true,
+        } satisfies Accepted;
+      },
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept selected" }));
+
+    await waitFor(() =>
+      expect(ports.showToast).toHaveBeenCalledWith(
+        "Accepted 1 of 2 changes",
+        expect.objectContaining({ label: "Undo" }),
+      ),
+    );
+    expect(await card("Edit: Saltmere")).toHaveTextContent(
+      "This change could not be written: The page is read-only.",
+    );
+  });
+
+  it("shows no toast when nothing was written, and the reason on the card", async () => {
+    mockCore(() => reviewOf([saltmere]), {
+      assistant_accept: () =>
+        ({
+          set: null,
+          accepted: 0,
+          of: 1,
+          written: [],
+          failure: { proposal: 1, message: "The page is read-only." },
+          undo: false,
+        }) satisfies Accepted,
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(within(await card("Edit: Saltmere")).getByRole("button", { name: "Accept" }));
+
+    await waitFor(async () =>
+      expect(await card("Edit: Saltmere")).toHaveTextContent("The page is read-only."),
+    );
+    expect(ports.showToast).not.toHaveBeenCalled();
+    expect(liveRegion()).toHaveTextContent("The page is read-only.");
+  });
+
+  it("offers no Undo, in the toast or the pane, for an accept history did not record", async () => {
+    let reviews = reviewOf([saltmere]);
+    mockCore(() => reviews, {
+      assistant_accept: () => {
+        reviews = reviewOf(
+          [acceptedAs(saltmere, "Saltmere.md")],
+          [{ id: 5, count: 1, undo: false }],
+        );
+        return {
+          set: 5,
+          accepted: 1,
+          of: 1,
+          written: written.slice(1),
+          failure: null,
+          undo: false,
+        } satisfies Accepted;
+      },
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(within(await card("Edit: Saltmere")).getByRole("button", { name: "Accept" }));
+
+    await waitFor(() =>
+      expect(ports.showToast).toHaveBeenCalledExactlyOnceWith("Accepted 1 change", undefined),
+    );
+    await waitFor(async () => expect(await card("Edit: Saltmere")).toHaveTextContent("Accepted"));
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  });
+
+  it("shows an accept that fails as a toast, and sends nothing when a page could not be saved", async () => {
+    const { argsOf } = mockCore(() => reviewOf([saltmere]), {
+      assistant_accept: () => {
+        throw { kind: "io", message: "The conversation store cannot be written." };
+      },
+    });
+    const ports = renderAssistant({ flushPages: vi.fn(() => Promise.resolve(false)) }, 3);
+    const accept = within(await card("Edit: Saltmere")).getByRole("button", { name: "Accept" });
+
+    fireEvent.click(accept);
+    await waitFor(() => expect(ports.flushPages).toHaveBeenCalledOnce());
+    await act(() => Promise.resolve());
+    expect(argsOf("assistant_accept")).toBeUndefined();
+
+    vi.mocked(ports.flushPages).mockResolvedValue(true);
+    fireEvent.click(accept);
+    await waitFor(() =>
+      expect(liveRegion()).toHaveTextContent("The conversation store cannot be written."),
+    );
+    expect(ports.showToast).toHaveBeenCalledExactlyOnceWith(
+      "The conversation store cannot be written.",
+    );
+  });
+
+  it("undoes a set from the pane: saves its pages, then restores and deletes pages through the ports, without the flash", async () => {
+    let reviews = reviewOf(
+      [acceptedAs(keshTor, "Places/Kesh Tor.md"), acceptedAs(saltmere, "Saltmere.md")],
+      [{ id: 5, count: 2, undo: true }],
+    );
+    const restored = [{ path: "Saltmere.md", text: "Mirela is free.\n", version: "v3" }];
+    const { argsOf } = mockCore(() => reviews, {
+      assistant_undo: () => {
+        reviews = reviewOf([
+          { ...keshTor, undone: true },
+          { ...saltmere, undone: true },
+        ]);
+        return { restored, deleted: ["Places/Kesh Tor.md"] };
+      },
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+
+    await waitFor(() =>
+      expect(ports.pagesDeleted).toHaveBeenCalledExactlyOnceWith(["Places/Kesh Tor.md"]),
+    );
+    expect(ports.flushPages).toHaveBeenCalledExactlyOnceWith(["Places/Kesh Tor.md", "Saltmere.md"]);
+    expect(argsOf("assistant_undo")).toEqual({ set: 5 });
+    expect(ports.pagesWritten).toHaveBeenCalledExactlyOnceWith(restored, { flash: false });
+    expect(await card("Edit: Saltmere")).toHaveTextContent("Undone");
+  });
+
+  it("shows a refused undo as a toast and announces it", async () => {
+    const message =
+      "“Saltmere” changed since it was written, so nothing was undone. Its history still holds every version.";
+    mockCore(
+      () => reviewOf([acceptedAs(saltmere, "Saltmere.md")], [{ id: 5, count: 1, undo: true }]),
+      {
+        assistant_undo: () => {
+          throw { kind: "conflict", message };
+        },
+      },
+    );
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+
+    await waitFor(() => expect(liveRegion()).toHaveTextContent(message));
+    expect(ports.showToast).toHaveBeenCalledExactlyOnceWith(message);
+    expect(ports.pagesWritten).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import type { ConversationSummary, EditorLink, StoreNotice } from "@/types/api";
+import type { AnswerReview, ConversationSummary, EditorLink, StoreNotice } from "@/types/api";
 import { AssistantPane, type ChatMessage } from "@/ui/AssistantPane";
 import { Button } from "@/ui/Button";
 import { FileTree } from "@/ui/FileTree";
@@ -249,6 +249,84 @@ const sampleUnanswered: ChatMessage[] = [
   { id: 2, role: "user", text: "Who rules Saltmere now?" },
 ];
 
+/** An answer still arriving, with the proposals it has begun so far. */
+const sampleProposing: ChatMessage[] = [
+  { id: 1, role: "user", text: "Flesh out Saltmere for next session." },
+  {
+    id: 2,
+    role: "answer",
+    text: "Here is how Saltmere could fit in.",
+    state: "streaming",
+    context: { pages: [keshTor], leftOut: 0, indexing: false },
+    failure: null,
+    proposals: [
+      { change: "new_page", path: "Places/Saltmere" },
+      { change: "edit", path: "Locations/Kesh Tor.md" },
+    ],
+  },
+];
+
+const sampleReview: AnswerReview = {
+  answer: 2,
+  unreadable: 1,
+  unfinished: false,
+  proposals: [
+    {
+      id: 1,
+      kind: "new_page",
+      path: "Places/Saltmere.md",
+      page: null,
+      state: "pending",
+      undone: false,
+      accept: null,
+      check: {
+        state: "applies",
+        lines: [
+          { kind: "added", text: "# Saltmere" },
+          { kind: "added", text: "" },
+          { kind: "added", text: "A salt town at the steppe's edge." },
+        ],
+        version: null,
+        changed: false,
+      },
+    },
+    {
+      id: 2,
+      kind: "edit",
+      path: "Locations/Kesh Tor.md",
+      page: "Locations/Kesh Tor.md",
+      state: "pending",
+      undone: false,
+      accept: null,
+      check: {
+        state: "applies",
+        lines: [
+          { kind: "same", text: "# Kesh Tor" },
+          { kind: "removed", text: "A basalt spire, the only shade for a day's ride." },
+          { kind: "added", text: "A basalt spire, the only shade on the road to [[Saltmere]]." },
+        ],
+        version: "sample",
+        changed: false,
+      },
+    },
+  ],
+  accepted: [],
+};
+
+/** An answer with a batch of proposals below it, and the note that one could not be read. */
+const sampleProposed: ChatMessage[] = [
+  { id: 1, role: "user", text: "Flesh out Saltmere for next session." },
+  {
+    id: 2,
+    role: "answer",
+    text: "Here is how Saltmere could fit in. Review each change before it is written.",
+    state: "complete",
+    context: { pages: [keshTor], leftOut: 0, indexing: false },
+    failure: null,
+    review: sampleReview,
+  },
+];
+
 const sampleConversations: ConversationSummary[] = [
   { id: 3, title: "Who keeps the shrine at Kesh Tor?", updated: 1_798_800_000 },
   { id: 2, title: "Describe the glass storm.", updated: 1_798_700_000 },
@@ -290,6 +368,19 @@ function AssistantChatDemo({
         onCopy: () => onEvent("Copy the answer"),
         refusal: null,
         announcement: "",
+        acceptFailure: null,
+        onAccept: async (_answer, ids) => {
+          onEvent(`Accept ${ids.join(", ")}`);
+          return null;
+        },
+        onReject: async (id) => {
+          onEvent(`Reject ${id}`);
+          return false;
+        },
+        onUndo: async (set) => {
+          onEvent(`Undo set ${set}`);
+          return false;
+        },
       }}
     />
   );
@@ -373,7 +464,7 @@ export function ShellSections() {
       </Section>
       <Section
         title="Assistant pane"
-        use="The pane's content: its header with New conversation and Conversations, then the notice that asks for a provider and the storage notices, or the explanation of an empty conversation, which names where messages go; the conversation, with each answer's Read N pages disclosure, its marks and failures, and the line under a message whose answer never arrived; and the composer, where Enter sends and Send becomes Stop while an answer arrives. The conversations list replaces the conversation and the composer; Delete asks first."
+        use="The pane's content: its header with New conversation and Conversations, then the notice that asks for a provider and the storage notices, or the explanation of an empty conversation, which names where messages go; the conversation, with each answer's Read N pages disclosure, its marks and failures, the lines naming proposals while they arrive, the proposals below their answer with its notes, and the line under a message whose answer never arrived; and the composer, where Enter sends and Send becomes Stop while an answer arrives. The conversations list replaces the conversation and the composer; Delete asks first."
       >
         <div className="flex flex-wrap gap-4">
           <AssistantPaneFrame title="No provider saved">
@@ -388,6 +479,12 @@ export function ShellSections() {
           </AssistantPaneFrame>
           <AssistantPaneFrame title="An answer arriving" tall>
             <AssistantChatDemo messages={sampleConversation} onEvent={setEvent} />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="Proposals arriving" tall>
+            <AssistantChatDemo messages={sampleProposing} onEvent={setEvent} />
+          </AssistantPaneFrame>
+          <AssistantPaneFrame title="Proposals below their answer" tall>
+            <AssistantChatDemo messages={sampleProposed} onEvent={setEvent} />
           </AssistantPaneFrame>
           <AssistantPaneFrame title="A stopped answer and a failure" tall>
             <AssistantChatDemo messages={sampleEndings} onEvent={setEvent} />

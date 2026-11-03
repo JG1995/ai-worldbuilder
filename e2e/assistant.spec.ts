@@ -289,7 +289,7 @@ test("conversations are kept: a new one starts, the list opens one, the world re
   await expect(list.getByRole("listitem")).toHaveCount(1);
   await expect(list.getByRole("listitem")).toContainText("Who keeps the shrine?");
   await list.getByRole("button", { name: "Back" }).click();
-  await expect(pane(page).getByText(/It answers here and changes no pages\./)).toBeVisible();
+  await expect(pane(page).getByText(/written only when you accept them\./)).toBeVisible();
 });
 
 test("a message `store:not_saved` shows that the world's conversations are not being saved", async ({
