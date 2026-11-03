@@ -177,33 +177,29 @@ describe("opening the History view", () => {
 
 describe("the version list", () => {
   it.each([
-    ["on", true, ["Links updated", "Accepted from the assistant", "Accepted from the assistant"]],
-    ["off", false, ["Links updated", "Edit", "New page"]],
-    ["not known yet", undefined, ["Links updated", "Edit", "New page"]],
-  ])(
-    "labels the versions an accept wrote by what they are, and a links update, with AI %s",
-    async (_, ai, labels) => {
-      await openOverview(
-        {
-          history_list: (): HistoryVersion[] => [
-            { id: "3-after", kind: "links_updated", at: 1_700_001_200 },
-            { id: "2-after", kind: "accepted_edit", at: 1_700_000_600 },
-            { id: "1-after", kind: "accepted_new_page", at: 1_700_000_000 },
-          ],
-        },
-        ai,
-      );
+    ["on", true, ["Accepted from the assistant", "Accepted from the assistant"]],
+    ["off", false, ["Edit", "New page"]],
+    ["not known yet", undefined, ["Edit", "New page"]],
+  ])("labels the versions an accept wrote by what they are with AI %s", async (_, ai, labels) => {
+    await openOverview(
+      {
+        history_list: (): HistoryVersion[] => [
+          { id: "2-after", kind: "accepted_edit", at: 1_700_000_600 },
+          { id: "1-after", kind: "accepted_new_page", at: 1_700_000_000 },
+        ],
+      },
+      ai,
+    );
 
-      const view = await historyFromMenu();
+    const view = await historyFromMenu();
 
-      expect(
-        within(view)
-          .getAllByRole("option")
-          .slice(1)
-          .map((option) => option.lastChild?.textContent),
-      ).toEqual(labels);
-    },
-  );
+    expect(
+      within(view)
+        .getAllByRole("option")
+        .slice(1)
+        .map((option) => option.lastChild?.textContent),
+    ).toEqual(labels);
+  });
 
   it("shows the changes since the selected version, and moves with Up, Down, Home and End", async () => {
     const { calls } = await openOverview();

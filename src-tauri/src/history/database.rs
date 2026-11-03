@@ -5,21 +5,17 @@
 //! stores, in 16 lowercase hex digits. The database records that path too, so two paths with the
 //! same hash never share a history.
 //!
-//! Format 2, named by `PRAGMA user_version`:
+//! Format 1, named by `PRAGMA user_version`:
 //!
 //! - `meta`: one row, the world folder's path.
 //! - `changes`: one row per change: its `kind` (`edit`, `new_page`, `new_folder`,
-//!   `restored_missing`, `keep_mine`, `restore`, `undo`, `accepted`, `rename`, `move` or `delete`),
-//!   `started` and `latest`, the times of its first and latest write in seconds since the Unix
-//!   epoch, and `pending`, 1 while a write of the change is in flight.
+//!   `restored_missing`, `keep_mine`, `restore` or `undo`), `started` and `latest`, the times of its
+//!   first and latest write in seconds since the Unix epoch, and `pending`, 1 while a write of the
+//!   change is in flight.
 //! - `entries`: one row per path a change touched, keyed by (`change_id`, `path`), with the state
 //!   before and after (`absent`, `folder` or `page`, a page with its exact bytes), and
-//!   `pending_after`, the bytes of a save in flight that extends the change.
-//! - `moves`: for a change that moved a page or folder, such as a rename, a move or the undo of
-//!   one, the one root it moved, `from_path` to `to_path`.
-//!
-//! Deleting a change deletes its entries and its move. Format 1 had no `moves`; opening a format 1
-//! database of the world adds the table in one transaction, so a failed update leaves format 1.
+//!   `pending_after`, the bytes of a save in flight that extends the change. Deleting a change
+//!   deletes its entries.
 //!
 //! The database keeps SQLite's default rollback journal and syncs fully, so a committed record
 //! survives a crash or a power loss.
@@ -36,7 +32,7 @@ use crate::data_file;
 use crate::data_file::with_suffix;
 
 /// The format this version writes. A database in a newer format is never written.
-const FORMAT: i64 = 2;
+const FORMAT: i64 = 1;
 
 const SCHEMA: &str = "
     CREATE TABLE meta (world TEXT NOT NULL);
@@ -59,15 +55,6 @@ const SCHEMA: &str = "
         PRIMARY KEY (change_id, path)
     );
     CREATE INDEX entries_by_path ON entries (path, change_id);
-";
-
-/// What format 2 adds to format 1.
-const MOVES: &str = "
-    CREATE TABLE moves (
-        change_id INTEGER PRIMARY KEY REFERENCES changes (id) ON DELETE CASCADE,
-        from_path TEXT NOT NULL,
-        to_path TEXT NOT NULL
-    );
 ";
 
 /// A world's open history database.
@@ -150,8 +137,8 @@ pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     })
 }
 
-/// Opens the database at `file` for the world at `world`, creating the format in an empty one and
-/// updating a format 1 one. On any refusal the connection is closed before this returns.
+/// Opens the database at `file` for the world at `world`, creating format 1 in an empty one. On
+/// any refusal the connection is closed before this returns.
 fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     let mut connection = Connection::open(file)?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -160,10 +147,6 @@ fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     let format: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match format {
         0 => create(&mut connection, world)?,
-        1 => {
-            check_world(&connection, world)?;
-            update_from_format_1(&mut connection)?;
-        }
         FORMAT => check_world(&connection, world)?,
         _ => {
             return Err(Refusal::Failed(Failure::new(
@@ -174,7 +157,7 @@ fn connect(file: &Path, world: &str) -> Result<Connection, Refusal> {
     Ok(connection)
 }
 
-/// Creates the format in one transaction, in a database that holds nothing yet.
+/// Creates format 1 in one transaction, in a database that holds nothing yet.
 fn create(connection: &mut Connection, world: &str) -> Result<(), Refusal> {
     let transaction = connection.transaction()?;
     let objects: i64 =
@@ -185,27 +168,10 @@ fn create(connection: &mut Connection, world: &str) -> Result<(), Refusal> {
         )));
     }
     transaction.execute_batch(SCHEMA)?;
-    transaction.execute_batch(MOVES)?;
     transaction.execute("INSERT INTO meta (world) VALUES (?1)", [world])?;
     transaction.pragma_update(None, "user_version", FORMAT)?;
     transaction.commit()?;
     Ok(())
-}
-
-/// Updates a format 1 database to the format in one transaction, so a failure leaves it format 1.
-fn update_from_format_1(connection: &mut Connection) -> Result<(), Refusal> {
-    let update = |connection: &mut Connection| -> rusqlite::Result<()> {
-        let transaction = connection.transaction()?;
-        transaction.execute_batch(MOVES)?;
-        transaction.pragma_update(None, "user_version", FORMAT)?;
-        transaction.commit()
-    };
-    update(connection).map_err(|error| {
-        Refusal::Failed(Failure::new(format!(
-            "The history database could not be updated to this version's format. {}",
-            Failure::from(error).reason()
-        )))
-    })
 }
 
 fn check_world(connection: &Connection, world: &str) -> Result<(), Refusal> {
@@ -277,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_world_creates_its_database_in_format_2_and_a_second_open_reuses_it() {
+    fn a_new_world_creates_its_database_in_format_1_and_a_second_open_reuses_it() {
         let app_data = tempfile::tempdir().unwrap();
 
         let first = opened(&app_data).unwrap();
@@ -293,7 +259,7 @@ mod tests {
         let second = opened(&app_data).unwrap();
 
         let file = file(app_data.path(), WORLD);
-        assert_eq!(format_and_world(&file), (2, WORLD.to_owned()));
+        assert_eq!(format_and_world(&file), (1, WORLD.to_owned()));
         let changes: i64 = second
             .connection
             .query_row("SELECT count(*) FROM changes", [], |row| row.get(0))
@@ -320,97 +286,7 @@ mod tests {
             fs::read(with_suffix(&file, ".damaged-1000")).unwrap(),
             damaged
         );
-        assert_eq!(format_and_world(&file), (2, WORLD.to_owned()));
-    }
-
-    /// Writes a format 1 database of `WORLD` holding one change with one entry, then runs `extra`.
-    fn write_format_1(app_data: &TempDir, extra: &str) -> PathBuf {
-        let file = file(app_data.path(), WORLD);
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        let connection = Connection::open(&file).unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
-        connection
-            .execute_batch(&format!(
-                "INSERT INTO meta (world) VALUES ('{WORLD}');
-                 INSERT INTO changes (kind, started, latest, pending) VALUES ('edit', 1, 2, 0);
-                 INSERT INTO entries
-                     (change_id, path, before_kind, after_kind, before_bytes, after_bytes)
-                     VALUES (1, 'Page.md', 'page', 'page', x'6f6e65', x'74776f');
-                 {extra}
-                 PRAGMA user_version = 1;"
-            ))
-            .unwrap();
-        file
-    }
-
-    /// Every row of `table`, as text.
-    fn rows(file: &Path, table: &str) -> Vec<String> {
-        let connection = Connection::open(file).unwrap();
-        let mut statement = connection
-            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
-            .unwrap();
-        let columns = statement.column_count();
-        statement
-            .query_map([], |row| {
-                (0..columns)
-                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|values| format!("{values:?}"))
-            })
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-
-    /// The tables and indexes of the database at `file`, with the SQL that made them.
-    fn schema(file: &Path) -> Vec<(String, Option<String>)> {
-        let connection = Connection::open(file).unwrap();
-        connection
-            .prepare("SELECT name, sql FROM sqlite_schema ORDER BY name")
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-
-    #[test]
-    fn a_format_1_database_is_updated_in_place_keeping_every_change_and_entry() {
-        let app_data = tempfile::tempdir().unwrap();
-        let file = write_format_1(&app_data, "");
-        let before = ["meta", "changes", "entries"].map(|table| rows(&file, table));
-
-        let database = opened(&app_data).unwrap();
-        drop(database);
-
-        assert_eq!(format_and_world(&file), (2, WORLD.to_owned()));
-        assert_eq!(
-            ["meta", "changes", "entries"].map(|table| rows(&file, table)),
-            before
-        );
-        let new = tempfile::tempdir().unwrap();
-        drop(opened(&new).unwrap());
-        assert_eq!(schema(&file), schema(&super::file(new.path(), WORLD)));
-    }
-
-    #[test]
-    fn a_format_1_database_whose_update_fails_is_refused_and_left_as_it_was() {
-        let app_data = tempfile::tempdir().unwrap();
-        // A table in the way of the update.
-        let file = write_format_1(&app_data, "CREATE TABLE moves (id INTEGER);");
-        let before = snapshot(&file);
-
-        let refused = opened(&app_data).err().unwrap();
-
-        assert!(
-            refused
-                .reason()
-                .starts_with("The history database could not be updated to this version's format."),
-            "{}",
-            refused.reason()
-        );
-        assert_eq!(snapshot(&file), before);
-        assert_eq!(fs::read_dir(file.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(format_and_world(&file), (1, WORLD.to_owned()));
     }
 
     #[test]
@@ -420,7 +296,7 @@ mod tests {
         drop(opened(&app_data).unwrap());
 
         let connection = Connection::open(&file).unwrap();
-        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
         drop(connection);
         let newer = snapshot(&file);
         let refused = opened(&app_data).err().unwrap();
