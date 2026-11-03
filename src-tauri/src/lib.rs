@@ -9,6 +9,7 @@ mod secrets;
 mod settings;
 #[cfg(target_os = "linux")]
 mod theme;
+mod web;
 mod world;
 
 use std::sync::Arc;
@@ -76,6 +77,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_close,
+            web::link_open,
             world::world_open,
             world::world_close,
             world::world_tree,

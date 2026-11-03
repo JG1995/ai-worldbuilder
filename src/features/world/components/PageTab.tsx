@@ -23,6 +23,7 @@ import {
   backlinksList,
   historyRestore,
   historyUndo,
+  linkOpen,
   linkSuggest,
   pageProperties,
   pageRead,
@@ -492,6 +493,11 @@ export function PageTab({
                 open: (target, at) => onOpenPage(target, { newTab: true, at }),
                 create: (unresolved) => onCreateLink(path, unresolved),
               });
+            }}
+            onOpenWeb={(address) => {
+              linkOpen(address).catch((error: IpcError) =>
+                showToast(session, `The link could not be opened: ${error.message}`),
+              );
             }}
           />
         </div>

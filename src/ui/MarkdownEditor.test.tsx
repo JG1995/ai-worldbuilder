@@ -203,6 +203,166 @@ describe("following a link", () => {
   });
 });
 
+describe("web links", () => {
+  const text = [
+    "Charts: [the docks](https://docks.example/map) and <https://tide.example>.",
+    "",
+    "| Where | Chart |",
+    "| --- | --- |",
+    "| Ford | www.ford.example |",
+    "",
+    "Mail [the guild](mailto:guild@kesh.example).",
+    "",
+  ].join("\n");
+  const at = (written: string) => text.indexOf(written);
+
+  /** `text` with the cursor on its last line, in the editing or reading view, opening web links. */
+  function renderWeb({ reading = false, opens = true } = {}) {
+    const onOpenWeb = vi.fn();
+    const state = createPageState(text, "Kesh Tor", text.length, { preview: true });
+    render(
+      <MarkdownEditor
+        state={state}
+        readOnly={false}
+        reading={reading}
+        onOpenWeb={opens ? onOpenWeb : undefined}
+      />,
+    );
+    const textbox = screen.getByRole("textbox", { name: "Kesh Tor" });
+    const view = EditorView.findFromDOM(textbox);
+    if (!view) throw new Error("No editor");
+    return { onOpenWeb, textbox, view };
+  }
+
+  const webLinks = (textbox: HTMLElement) =>
+    [...textbox.querySelectorAll<HTMLElement>(".cm-web-link")].map((link) => ({
+      text: link.textContent,
+      icon: link.querySelector(".cm-web-icon") !== null,
+    }));
+
+  /** jsdom lays out no text, so the editor's position under the pointer is given. */
+  function pointAt(position: number) {
+    vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue(position);
+  }
+
+  // CodeMirror measures the selection it draws for a click or a focus; jsdom lays out nothing.
+  const range = Range.prototype as Partial<Range>;
+  beforeEach(() => {
+    range.getClientRects = () => [] as unknown as DOMRectList;
+    range.getBoundingClientRect = () => new DOMRect();
+  });
+  afterEach(() => {
+    delete range.getClientRects;
+    delete range.getBoundingClientRect;
+    vi.useRealTimers();
+  });
+
+  it("styles each web link with the icon after its text, in a line or a grid", () => {
+    const { textbox } = renderWeb();
+
+    expect(webLinks(textbox)).toEqual([
+      { text: "the docks", icon: true },
+      { text: "https://tide.example", icon: true },
+      { text: "www.ford.example", icon: false },
+    ]);
+    expect(lineWith("Charts: the docks and https://tide.example.")).toBeInTheDocument();
+    expect(lineWith("Mail the guild.").querySelector(".cm-web-link")).toBeNull();
+    expect(textbox.querySelectorAll(".cm-table .cm-web-icon")).toHaveLength(1);
+  });
+
+  it("opens on Ctrl+click and Cmd+click, and leaves a plain click and other links alone", () => {
+    const { onOpenWeb, textbox, view } = renderWeb();
+
+    pointAt(at("the docks") + 2);
+    const ctrl = fireEvent.mouseDown(textbox, { button: 0, ctrlKey: true });
+    pointAt(at("<https"));
+    fireEvent.mouseDown(textbox, { button: 0, metaKey: true });
+    pointAt(at("the docks") + 2);
+    fireEvent.mouseDown(textbox, { button: 0 });
+    pointAt(at("the guild"));
+    fireEvent.mouseDown(textbox, { button: 0, ctrlKey: true });
+
+    expect(onOpenWeb.mock.calls).toEqual([["https://docks.example/map"], ["https://tide.example"]]);
+    expect(ctrl).toBe(false);
+    expect(view.state.doc.toString()).toBe(text);
+  });
+
+  it("opens on Alt+Enter with the cursor in a web link", () => {
+    const { onOpenWeb, textbox, view } = renderWeb();
+    act(() => view.dispatch({ selection: { anchor: at("tide") } }));
+
+    const opened = fireEvent.keyDown(textbox, { key: "Enter", altKey: true });
+
+    expect(onOpenWeb).toHaveBeenCalledWith("https://tide.example");
+    expect(opened).toBe(false);
+    expect(view.state.doc.toString()).toBe(text);
+  });
+
+  it("opens on a click and on Enter in the reading view, in a line or a grid", () => {
+    const { onOpenWeb, textbox } = renderWeb({ reading: true });
+    const [docks, , ford] = [...textbox.querySelectorAll<HTMLElement>('[role="link"]')];
+
+    fireEvent.mouseDown(docks, { button: 0 });
+    act(() => ford.focus());
+    fireEvent.keyDown(ford, { key: "Enter" });
+
+    expect(onOpenWeb.mock.calls).toEqual([
+      ["https://docks.example/map"],
+      ["http://www.ford.example"],
+    ]);
+  });
+
+  it("shows the address in a tooltip on keyboard focus in the reading view and on hover", () => {
+    vi.useFakeTimers();
+    const { textbox } = renderWeb({ reading: true });
+    const [docks, tide] = [...textbox.querySelectorAll<HTMLElement>('[role="link"]')];
+    const tooltip = () => screen.queryByRole("tooltip");
+
+    act(() => docks.focus());
+    expect(tooltip()).toBeNull();
+    act(() => vi.advanceTimersByTime(500));
+    expect(tooltip()).toHaveTextContent(/^https:\/\/docks\.example\/map$/);
+
+    act(() => docks.blur());
+    expect(tooltip()).toBeNull();
+
+    fireEvent.mouseOver(tide);
+    act(() => vi.advanceTimersByTime(500));
+    expect(tooltip()).toHaveTextContent(/^https:\/\/tide\.example$/);
+    fireEvent.mouseOut(tide);
+    expect(tooltip()).toBeNull();
+  });
+
+  it("shows web links as plain text that nothing opens without onOpenWeb", () => {
+    vi.useFakeTimers();
+    const { textbox, view } = renderWeb({ reading: true, opens: false });
+
+    expect(
+      textbox.querySelector(".cm-web-link, .cm-web-icon, [data-address], [role='link']"),
+    ).toBeNull();
+    expect(lineWith("Charts: the docks and https://tide.example.")).toBeInTheDocument();
+    fireEvent.mouseOver(textbox.querySelector(".cm-line") as Element);
+    act(() => vi.advanceTimersByTime(500));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(view.state.doc.toString()).toBe(text);
+  });
+
+  it("keeps its web links styled and opening after replaceState with a reloaded state", () => {
+    const { onOpenWeb, textbox, view } = renderWeb();
+
+    act(() => replaceState(view, reloadedState(view.state, `${text}More.\n`, "Kesh Tor")));
+    pointAt(at("the docks") + 2);
+    fireEvent.mouseDown(textbox, { button: 0, ctrlKey: true });
+
+    expect(webLinks(textbox).map((link) => link.text)).toEqual([
+      "the docks",
+      "https://tide.example",
+      "www.ford.example",
+    ]);
+    expect(onOpenWeb).toHaveBeenCalledWith("https://docks.example/map");
+  });
+});
+
 describe("the live preview", () => {
   const tasks = "Before the tide:\n\n- [ ] Bar the gate\n- [x] Ring the bell\n";
 

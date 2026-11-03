@@ -23,6 +23,7 @@ import { livePreview, previewView } from "./live-preview";
 import { pageSyntax } from "./markdown-syntax";
 import { propertiesBlock } from "./properties-block";
 import { gridPosition, linkStart, tableGrid } from "./table-grid";
+import { type WebLink, webLinkAt, webLinks, webLinksShown } from "./web-links";
 
 // The class names below are styled in the editor section of src/ui/theme.css.
 const monoClass = "cm-mono";
@@ -65,6 +66,9 @@ const suggestion = new Compartment();
 
 /** The image embeds' extension, which `MarkdownEditor` sets from its `imageUrl`. */
 const images = new Compartment();
+
+/** The web links' extension, which `MarkdownEditor` sets from its `onOpenWeb`. */
+const web = new Compartment();
 
 /**
  * Whether the editor is editable and read-only, and which view the live preview shows, together:
@@ -175,6 +179,7 @@ export function createPageState(
       previewOn.of(preview),
       preview ? [livePreview, tableGrid, propertiesBlock] : [],
       images.of([]),
+      web.of([]),
       syntaxHighlighting(codeHighlight),
       frontmatter,
       editorLinks,
@@ -211,17 +216,19 @@ const replaceListeners = new WeakMap<EditorView, (state: EditorState) => void>()
 
 /**
  * Puts `state` in the running editor in place of its own, keeping its view, whether it is
- * read-only, the function its link suggestions ask and its image embeds, and reports it through
- * the editor's `onReplace`.
+ * read-only, the function its link suggestions ask, its image embeds and its web links, and
+ * reports it through the editor's `onReplace`.
  */
 export function replaceState(editor: EditorView, state: EditorState) {
   const shown = mode.get(editor.state);
   const suggest = suggestion.get(editor.state);
   const imagesShown = images.get(editor.state);
+  const webShown = web.get(editor.state);
   editor.setState(state);
   if (shown) setMode(editor, shown);
   if (suggest) editor.dispatch({ effects: suggestion.reconfigure(suggest) });
   if (imagesShown) editor.dispatch({ effects: images.reconfigure(imagesShown) });
+  if (webShown) editor.dispatch({ effects: web.reconfigure(webShown) });
   replaceListeners.get(editor)?.(editor.state);
 }
 
@@ -290,6 +297,13 @@ type MarkdownEditorProps = {
    */
   onFollow?: (link: EditorLink) => void;
   /**
+   * Receives the address of a web link to open, an http or https address from the text, on the
+   * gestures that follow a link, where no wiki link is. Whether there is one at mount turns web
+   * links on, in a state created with the live preview: styled, with the icon and their address in
+   * a tooltip, and focusable in the reading view. Without it, they show as plain text.
+   */
+  onOpenWeb?: (address: string) => void;
+  /**
    * Answers the suggestion list that typing a link opens. Whether there is one at mount turns the
    * list on; each question goes to the current one.
    */
@@ -317,6 +331,7 @@ export function MarkdownEditor({
   onUnmount,
   onReplace,
   onFollow,
+  onOpenWeb,
   suggest,
   imageUrl,
 }: MarkdownEditorProps) {
@@ -328,6 +343,7 @@ export function MarkdownEditor({
   const [focusAtMount] = useState(autoFocus);
   const [suggestsAtMount] = useState(suggest !== undefined);
   const [imagesAtMount] = useState(imageUrl !== undefined);
+  const [webAtMount] = useState(onOpenWeb !== undefined);
   const reportChange = useEffectEvent((next: EditorState) => onChange?.(next));
   const reportUnmount = useEffectEvent((last: EditorState) => onUnmount?.(last));
   const reportReplace = useEffectEvent((next: EditorState) => onReplace?.(next));
@@ -335,6 +351,12 @@ export function MarkdownEditor({
   const follow = useEffectEvent((link: EditorLink | null) => {
     if (!link || !onFollow) return false;
     onFollow(link);
+    return true;
+  });
+  /** Opens `link`, if there is one, and says whether it did. */
+  const open = useEffectEvent((link: WebLink | null) => {
+    if (!link || !onOpenWeb) return false;
+    onOpenWeb(link.address);
     return true;
   });
   const askSuggest = useEffectEvent((query: string) => {
@@ -370,36 +392,47 @@ export function MarkdownEditor({
       const url: ImageUrl = (path, stamp) => urlOf(path, stamp);
       editor.dispatch({ effects: images.reconfigure(imageEmbeds(url)) });
     }
+    if (webAtMount && editor.state.facet(previewOn)) {
+      editor.dispatch({ effects: web.reconfigure(webLinks) });
+    }
     replaceListeners.set(editor, reportReplace);
-    // The reading view follows only the resolved links it draws as focusable, by where they start.
-    const readingLink = (target: EventTarget | null) => {
+    /** The web link at `position`, while web links are shown. */
+    const webAt = (position: number | null) =>
+      position !== null && editor.state.facet(webLinksShown)
+        ? webLinkAt(editor.state, position)
+        : null;
+    /** Follows the wiki link at `position`, or opens the web link there, and says whether it did. */
+    const followAt = (position: number | null) =>
+      follow(position === null ? null : linkAt(editor.state, position)) || open(webAt(position));
+    // The reading view follows only the resolved wiki links and the web links it draws as
+    // focusable, by where they start.
+    const followReading = (target: EventTarget | null) => {
       const element = linkElement(editor, target);
       const start = element && linkStart(editor, element);
       const links = editor.state.field(editorLinks, false)?.links ?? [];
       const link = links.find((link) => link.from === start);
-      return link?.state === "resolved" ? link : null;
+      return follow(link?.state === "resolved" ? link : null) || open(webAt(start));
     };
     // In the capture phase, before CodeMirror's own handlers, which leave alone an event whose
     // default is prevented: a click that follows a link does not also move the cursor.
     const followClick = (event: MouseEvent) => {
       const reading = isReading(editor.state);
       if (!isFollowClick(event, reading)) return;
-      let link: EditorLink | null;
-      if (reading) link = readingLink(event.target);
-      else {
-        const position =
-          gridPosition(editor, event) ?? editor.posAtCoords({ x: event.clientX, y: event.clientY });
-        link = position === null ? null : linkAt(editor.state, position);
-      }
-      if (follow(link)) event.preventDefault();
+      const followed = reading
+        ? followReading(event.target)
+        : followAt(
+            gridPosition(editor, event) ??
+              editor.posAtCoords({ x: event.clientX, y: event.clientY }),
+          );
+      if (followed) event.preventDefault();
     };
     const followKey = (event: KeyboardEvent) => {
       const reading = isReading(editor.state);
       if (!isFollowKey(event, reading)) return;
-      const link = reading
-        ? readingLink(event.target)
-        : linkAt(editor.state, editor.state.selection.main.head);
-      if (follow(link)) event.preventDefault();
+      const followed = reading
+        ? followReading(event.target)
+        : followAt(editor.state.selection.main.head);
+      if (followed) event.preventDefault();
     };
     const container = parent.current;
     container?.addEventListener("mousedown", followClick, true);
@@ -417,7 +450,7 @@ export function MarkdownEditor({
       editor.destroy();
       view.current = null;
     };
-  }, [initialState, focusAtMount, suggestsAtMount, imagesAtMount]);
+  }, [initialState, focusAtMount, suggestsAtMount, imagesAtMount, webAtMount]);
 
   useEffect(() => {
     if (view.current) setMode(view.current, modeOf(reading, readOnly));

@@ -475,6 +475,49 @@
 }
 
 /*
+ * Web links (src/ui/web-links.ts), as resolved links: accent with a 1px solid underline, then the
+ * open_in_new icon, so colour does not tell them apart alone. The icon is an inline block, which
+ * the underline leaves out; its glyph comes from its data-icon attribute, so it adds no text.
+ */
+.page-editor.cm-editor .cm-web-link {
+  color: var(--color-accent);
+  text-decoration-line: underline;
+  text-decoration-style: solid;
+  text-decoration-thickness: 1px;
+}
+
+.page-editor.cm-editor .cm-web-icon {
+  @apply icon;
+  margin-inline-start: 2px;
+  color: var(--color-accent);
+  vertical-align: -2px;
+}
+
+.page-editor.cm-editor .cm-web-icon::before {
+  content: attr(data-icon);
+}
+
+/* A web link's address, in a tooltip as src/ui/Tooltip.tsx draws them. */
+.page-editor.cm-editor .cm-web-tooltip {
+  @apply ui-small;
+  position: fixed;
+  z-index: var(--z-menu);
+  max-width: 320px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background-color: var(--color-raised);
+  color: var(--color-text);
+  box-shadow: var(--level-2-shadow);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.page-editor.cm-editor .cm-web-tooltip[hidden] {
+  display: none;
+}
+
+/*
  * The reading view's properties block (src/ui/properties-block.ts): a label-caps heading that
  * expands and collapses it, then keys in ui-small text-muted beside values in ui text, nested
  * values and unreadable frontmatter in mono.
