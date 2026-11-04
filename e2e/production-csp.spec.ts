@@ -47,153 +47,193 @@ test.beforeAll(() => {
   if (!existsSync(distDir)) throw new Error("dist/ is missing. Run `pnpm build` first.");
 });
 
-test("the production build renders a page in the editor under the production CSP", async ({
-  page,
-}) => {
-  const html = readFileSync(join(distDir, "index.html"), "utf8");
-  // The element that carries Tauri's style nonce, which the editor passes to CodeMirror.
-  expect(html).toContain("<style></style>");
-  const served = withStyleNonce(html);
+/** Each theme's own faces, as `document.fonts` names them, which its page title and text use. */
+const themeFaces = {
+  "saturn-seal": ["Darker Grotesque", "Hanken Grotesk"],
+  bound: ["Grenze Gotisch", "Grenze"],
+  lamplight: ["Newsreader Variable"],
+} as const;
 
-  const requests: string[] = [];
-  page.on("request", (request) => requests.push(request.url()));
-  await page.addInitScript(() => {
-    const violations: string[] = [];
-    Object.assign(window, { violations });
-    document.addEventListener("securitypolicyviolation", (event) =>
-      violations.push(`${event.violatedDirective} ${event.blockedURI}`),
-    );
-    // A stand-in for the Tauri runtime, so the production bundle reaches a canned core. Event
-    // subscriptions are answered by command name, with the callback plumbing `listen` uses, but no
-    // event is ever sent.
-    let callbacks = 0;
-    const responses: Record<string, unknown> = {
-      world_restore: null,
-      recent_list: [],
-      "plugin:event|listen": 1,
-      "plugin:event|unlisten": null,
-      world_open: {
-        name: "Kesh",
-        session: 1,
-        workspace: { tabs: [], active: null, expanded: [], treeWidth: 264, reading: [] },
-      },
-      world_tree: [{ path: "Kesh Tor.md", name: "Kesh Tor", kind: "page" }],
-      page_read: {
-        // Elements whose live preview draws boxes, widgets and fills, which a decoration that
-        // needed a blocked style attribute would report as a violation.
-        text: [
-          "---",
-          "title: Kesh Tor",
-          "---",
-          "# Kesh Tor",
-          "",
-          "Roll `3d6` at ==dusk==.",
-          "",
-          "> [!note] Shelter",
-          "> A cave.",
-          "",
-          "- [ ] Bring water",
-          "",
-          "| Supply | Days |",
-          "| --- | ---: |",
-          "| Water | 3 |",
-          "",
-          "![[Kesh map.png]] beside ![a web image](https://example.com/a.png)",
-          "",
-        ].join("\n"),
-        version: "1",
-      },
-      images_resolve: [
-        { state: "found", path: "Maps/Kesh map.png", stamp: "7-1700000000" },
-        { state: "web" },
-      ],
-    };
-    Object.assign(window, {
-      isTauri: true,
-      __TAURI_INTERNALS__: {
-        invoke: async (command: string) => responses[command],
-        transformCallback: () => ++callbacks,
-        // As Tauri builds a custom scheme's URL on Windows.
-        convertFileSrc: (path: string, protocol: string) =>
-          `http://${protocol}.localhost/${encodeURIComponent(path)}`,
-      },
-      // `@tauri-apps/api` calls it before it asks the core to unlisten.
-      __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
+for (const [theme, faces] of Object.entries(themeFaces)) {
+  test(`the production build starts in the saved theme, ${theme}, and renders a page in the editor under the production CSP`, async ({
+    page,
+  }) => {
+    const html = readFileSync(join(distDir, "index.html"), "utf8");
+    // The element that carries Tauri's style nonce, which the editor passes to CodeMirror.
+    expect(html).toContain("<style></style>");
+    const served = withStyleNonce(html);
+
+    const requests: string[] = [];
+    page.on("request", (request) => requests.push(request.url()));
+    await page.addInitScript((theme) => {
+      const violations: string[] = [];
+      Object.assign(window, { violations });
+      document.addEventListener("securitypolicyviolation", (event) =>
+        violations.push(`${event.violatedDirective} ${event.blockedURI}`),
+      );
+      // The theme on the root element when the application first draws anything.
+      const firstDraw = new MutationObserver(() => {
+        if (!document.getElementById("root")?.hasChildNodes()) return;
+        firstDraw.disconnect();
+        Object.assign(window, {
+          themeAtFirstDraw: document.documentElement.dataset.theme ?? "saturn-seal",
+        });
+      });
+      firstDraw.observe(document, { childList: true, subtree: true });
+      // A stand-in for the Tauri runtime, so the production bundle reaches a canned core. Event
+      // subscriptions are answered by command name, with the callback plumbing `listen` uses, but no
+      // event is ever sent.
+      let callbacks = 0;
+      const responses: Record<string, unknown> = {
+        // `main.tsx` reads the saved theme before it renders anything.
+        settings_get: { ai: true, textProvider: null, imageProvider: null, theme },
+        world_restore: null,
+        recent_list: [],
+        "plugin:event|listen": 1,
+        "plugin:event|unlisten": null,
+        world_open: {
+          name: "Kesh",
+          session: 1,
+          workspace: { tabs: [], active: null, expanded: [], treeWidth: 264, reading: [] },
+        },
+        world_tree: [{ path: "Kesh Tor.md", name: "Kesh Tor", kind: "page" }],
+        page_read: {
+          // Elements whose live preview draws boxes, widgets and fills, which a decoration that
+          // needed a blocked style attribute would report as a violation.
+          text: [
+            "---",
+            "title: Kesh Tor",
+            "---",
+            "# Kesh Tor",
+            "",
+            "Roll `3d6` at ==dusk==.",
+            "",
+            "> [!note] Shelter",
+            "> A cave.",
+            "",
+            "- [ ] Bring water",
+            "",
+            "| Supply | Days |",
+            "| --- | ---: |",
+            "| Water | 3 |",
+            "",
+            "![[Kesh map.png]] beside ![a web image](https://example.com/a.png)",
+            "",
+          ].join("\n"),
+          version: "1",
+        },
+        images_resolve: [
+          { state: "found", path: "Maps/Kesh map.png", stamp: "7-1700000000" },
+          { state: "web" },
+        ],
+      };
+      Object.assign(window, {
+        isTauri: true,
+        __TAURI_INTERNALS__: {
+          invoke: async (command: string) => {
+            // A slow answer, so an interface that rendered before it would be caught.
+            if (command === "settings_get") await new Promise((done) => setTimeout(done, 200));
+            return responses[command];
+          },
+          transformCallback: () => ++callbacks,
+          // As Tauri builds a custom scheme's URL on Windows.
+          convertFileSrc: (path: string, protocol: string) =>
+            `http://${protocol}.localhost/${encodeURIComponent(path)}`,
+        },
+        // `@tauri-apps/api` calls it before it asks the core to unlisten.
+        __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
+      });
+    }, theme);
+    await page.route(`${origin}/**`, (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const file = join(distDir, path === "/" ? "index.html" : path);
+      if (!existsSync(file)) return route.fulfill({ status: 404 });
+      return route.fulfill({
+        body: path === "/" ? served.html : readFileSync(file),
+        headers: {
+          "Content-Type": contentTypes[extname(file)] ?? "application/octet-stream",
+          "Content-Security-Policy": served.csp,
+        },
+      });
     });
-  });
-  await page.route(`${origin}/**`, (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const file = join(distDir, path === "/" ? "index.html" : path);
-    if (!existsSync(file)) return route.fulfill({ status: 404 });
-    return route.fulfill({
-      body: path === "/" ? served.html : readFileSync(file),
-      headers: {
-        "Content-Type": contentTypes[extname(file)] ?? "application/octet-stream",
-        "Content-Security-Policy": served.csp,
-      },
-    });
-  });
 
-  await page.route("http://grimoire-image.localhost/**", (route) =>
-    route.fulfill({ body: worldImage, headers: { "Content-Type": "image/png" } }),
-  );
-
-  await page.goto(`${origin}/`);
-
-  await page.getByRole("button", { name: "Open world…" }).click();
-  const row = page.getByRole("treeitem", { name: "Kesh Tor" });
-  await expect(row.locator(".icon")).toHaveCSS("font-family", '"Material Symbols Sharp"');
-  await row.click();
-  const editor = page.getByRole("textbox", { name: "Kesh Tor" });
-  // Away from the cursor, which starts on the frontmatter's first line, the syntax is hidden.
-  await expect(editor).toContainText("Roll 3d6 at dusk.");
-  await expect(editor.locator(".cm-highlight")).toHaveText("dusk");
-  await expect(editor.locator(".cm-callout-title")).toHaveText("Shelter");
-  await expect(editor.getByRole("checkbox", { name: "Bring water" })).toBeVisible();
-  await expect(editor.getByRole("table").getByRole("cell")).toHaveText(["Water", "3"]);
-  // The world's image loads through the core's scheme; the web image is never asked for.
-  const image = editor.locator(".cm-image img");
-  await expect(image).toHaveAttribute("alt", "Kesh map");
-  await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(120);
-  await expect(editor.locator(".cm-image-placeholder")).toContainText(
-    "Web images are not loaded: https://example.com/a.png",
-  );
-  // Only CodeMirror's own base theme, in the <style> element that carries the nonce, makes the
-  // editor a flex box; the theme's editor section supplies the mono family.
-  await expect(page.locator(".cm-editor")).toHaveCSS("display", "flex");
-  await expect(editor.locator(".cm-mono", { hasText: "3d6" })).toHaveCSS(
-    "font-family",
-    /^ui-monospace/,
-  );
-
-  for (const [font, text] of [
-    ['500 40px "Darker Grotesque"', "G"],
-    ['400 14px "Hanken Grotesk"', "T"],
-    ['16px "Material Symbols Sharp"', "\u{e000}"],
-  ]) {
-    const loaded = await page.evaluate(
-      async ([font, text]) => {
-        const faces = await document.fonts.load(font, text);
-        return faces.length > 0 && faces.every((face) => face.status === "loaded");
-      },
-      [font, text],
+    await page.route("http://grimoire-image.localhost/**", (route) =>
+      route.fulfill({ body: worldImage, headers: { "Content-Type": "image/png" } }),
     );
-    expect(loaded, font).toBe(true);
-  }
 
-  const violations = () =>
-    page.evaluate(() => (window as unknown as { violations: string[] }).violations);
-  expect(await violations()).toEqual([]);
-  const offOrigin = requests.filter((url) => new URL(url).origin !== origin);
-  expect([...new Set(offOrigin)]).toEqual([worldImageUrl]);
+    await page.goto(`${origin}/`);
 
-  // A <style> element without the nonce, as injected HTML would add, is still blocked.
-  const injectedApplies = await page.evaluate(() => {
-    const style = document.createElement("style");
-    style.textContent = "#root { visibility: hidden; }";
-    document.head.append(style);
-    return getComputedStyle(document.getElementById("root") as HTMLElement).visibility === "hidden";
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as { themeAtFirstDraw?: string }).themeAtFirstDraw),
+      )
+      .toBe(theme);
+    const root = page.locator("html");
+    if (theme === "saturn-seal") await expect(root).not.toHaveAttribute("data-theme");
+    else await expect(root).toHaveAttribute("data-theme", theme);
+    await page.getByRole("button", { name: "Open world…" }).click();
+    const row = page.getByRole("treeitem", { name: "Kesh Tor" });
+    await expect(row.locator(".icon")).toHaveCSS("font-family", '"Material Symbols Sharp"');
+    await row.click();
+    const editor = page.getByRole("textbox", { name: "Kesh Tor" });
+    // Away from the cursor, which starts on the frontmatter's first line, the syntax is hidden.
+    await expect(editor).toContainText("Roll 3d6 at dusk.");
+    await expect(editor.locator(".cm-highlight")).toHaveText("dusk");
+    await expect(editor.locator(".cm-callout-title")).toHaveText("Shelter");
+    await expect(editor.getByRole("checkbox", { name: "Bring water" })).toBeVisible();
+    await expect(editor.getByRole("table").getByRole("cell")).toHaveText(["Water", "3"]);
+    // The world's image loads through the core's scheme; the web image is never asked for.
+    const image = editor.locator(".cm-image img");
+    await expect(image).toHaveAttribute("alt", "Kesh map");
+    await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(120);
+    await expect(editor.locator(".cm-image-placeholder")).toContainText(
+      "Web images are not loaded: https://example.com/a.png",
+    );
+    // Only CodeMirror's own base theme, in the <style> element that carries the nonce, makes the
+    // editor a flex box; the theme's editor section supplies the mono family.
+    await expect(page.locator(".cm-editor")).toHaveCSS("display", "flex");
+    await expect(editor.locator(".cm-mono", { hasText: "3d6" })).toHaveCSS(
+      "font-family",
+      /^ui-monospace/,
+    );
+
+    // The page's title and text ask for the theme's faces themselves, so a theme that never applied
+    // would leave them unloaded.
+    for (const face of faces) {
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (face) =>
+              [...document.fonts].some(
+                (font) => font.family.replaceAll('"', "") === face && font.status === "loaded",
+              ),
+            face,
+          ),
+        )
+        .toBe(true);
+    }
+    const iconsLoaded = await page.evaluate(async () => {
+      const faces = await document.fonts.load('16px "Material Symbols Sharp"', "\u{e000}");
+      return faces.length > 0 && faces.every((face) => face.status === "loaded");
+    });
+    expect(iconsLoaded).toBe(true);
+
+    const violations = () =>
+      page.evaluate(() => (window as unknown as { violations: string[] }).violations);
+    expect(await violations()).toEqual([]);
+    const offOrigin = requests.filter((url) => new URL(url).origin !== origin);
+    expect([...new Set(offOrigin)]).toEqual([worldImageUrl]);
+
+    // A <style> element without the nonce, as injected HTML would add, is still blocked.
+    const injectedApplies = await page.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent = "#root { visibility: hidden; }";
+      document.head.append(style);
+      return (
+        getComputedStyle(document.getElementById("root") as HTMLElement).visibility === "hidden"
+      );
+    });
+    expect(injectedApplies).toBe(false);
+    await expect.poll(violations).toEqual([expect.stringMatching(/^style-src/)]);
   });
-  expect(injectedApplies).toBe(false);
-  await expect.poll(violations).toEqual([expect.stringMatching(/^style-src/)]);
-});
+}
