@@ -45,6 +45,8 @@
     ],
     "resources": {
       "../src/assets/licenses/darker-grotesque-OFL.txt": "licenses/darker-grotesque-OFL.txt",
+      "../src/assets/licenses/grenze-OFL.txt": "licenses/grenze-OFL.txt",
+      "../src/assets/licenses/grenze-gotisch-OFL.txt": "licenses/grenze-gotisch-OFL.txt",
       "../src/assets/licenses/hanken-grotesk-OFL.txt": "licenses/hanken-grotesk-OFL.txt",
       "../src/assets/licenses/material-symbols-LICENSE.txt": "licenses/material-symbols-LICENSE.txt",
       "../src/assets/licenses/newsreader-OFL.txt": "licenses/newsreader-OFL.txt"

@@ -28,6 +28,14 @@ describe("PageView", () => {
       vi.useRealTimers();
     }
   });
+
+  it("follows the title with a strap that assistive technology does not meet", () => {
+    render(<PageView title="Saltmere">Body</PageView>);
+
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading).toHaveAccessibleName("Saltmere");
+    expect(heading.nextElementSibling).toHaveAttribute("aria-hidden", "true");
+  });
 });
 
 describe("NoPageOpen", () => {

@@ -10,6 +10,11 @@
 @import "@fontsource/hanken-grotesk/700.css";
 /* Weight 200 to 800 and the optical size axis, which Lamplight's page title needs. */
 @import "@fontsource-variable/newsreader/opsz.css";
+/* Bound's faces. Grenze Gotisch 800 is not used. */
+@import "@fontsource/grenze/400.css";
+@import "@fontsource/grenze/500.css";
+@import "@fontsource/grenze/700.css";
+@import "@fontsource/grenze-gotisch/600.css";
 
 @font-face {
   font-family: "Material Symbols Sharp";
@@ -233,10 +238,119 @@
 }
 
 /*
+ * Bound, from .wiki/DESIGN-BOUND.md. This rule outweighs Saturn Seal's light block, so every value
+ * it sets that the light block also overrides is set again in the nested light block. Grenze
+ * Gotisch is the display face, and sets only the page title and the world name; Grenze does
+ * everything else, label-caps included. Its icon grade and colour scheme are Saturn Seal's.
+ */
+:root[data-theme="bound"] {
+  --color-window: #160d0b;
+  --color-page: #241816;
+  --color-raised: #342826;
+  --color-hover: #342826;
+  --color-selected: #3a3630;
+  --color-divider: #4b3d3b;
+  --color-outline: #a29885;
+  --color-text: #f5f2f2;
+  --color-text-muted: #a99f9d;
+  --color-text-disabled: #7c706e;
+  --color-accent: #e6dccb;
+  --color-accent-hover: #f3eee4;
+  --color-on-accent: #160d0b;
+  --color-selection: #59544a;
+  --color-highlight: #553a10;
+  --color-success: #3fc6a0;
+  --color-warning: #e59b37;
+  --color-error: #fe818c;
+  --color-info: #66b2fd;
+  --color-on-status: #160d0b;
+  --color-diff-added: #073025;
+  --color-diff-removed: #47151c;
+  /* Bound's own role: the title strap, and nothing else. */
+  --color-seal: #e57163;
+  --color-backdrop: rgba(0, 0, 0, 0.5);
+  --color-input: var(--color-raised);
+
+  --level-2-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Soot, the identity's own ground. */
+  --welcome-ground: #1a1311;
+
+  --font-display: "Grenze Gotisch", Georgia, serif;
+  --font-text: "Grenze", Georgia, serif;
+
+  --page-title-size: 36px;
+  --page-title-weight: 600;
+  --page-title-line-height: 1.25;
+  --page-title-letter-spacing: 0;
+
+  --world-name-size: 18px;
+  --world-name-weight: 600;
+  --world-name-letter-spacing: 0;
+  --world-name-text-transform: none;
+
+  --label-caps-family: var(--font-text);
+  --label-caps-size: 13px;
+  --label-caps-letter-spacing: 0.08em;
+
+  --heading-1-size: 28px;
+
+  --heading-2-size: 23px;
+
+  --heading-3-size: 20px;
+
+  --heading-4-size: 18px;
+
+  --body-size: 18px;
+  --body-line-height: 1.6;
+
+  --body-reading-size: 20px;
+  --body-reading-line-height: 1.55;
+
+  --assistant-size: 16px;
+
+  --ui-size: 16px;
+
+  --ui-strong-size: 16px;
+
+  --ui-small-size: 15px;
+
+  @variant light {
+    --color-window: #f3eee4;
+    --color-page: #fcfaf9;
+    --color-raised: #ffffff;
+    --color-hover: #e9e5e4;
+    --color-selected: #e6dccb;
+    --color-divider: #e9e5e4;
+    --color-outline: #7c706e;
+    --color-text: #241816;
+    --color-text-muted: #5f5250;
+    --color-text-disabled: #a99f9d;
+    --color-accent: #59544a;
+    --color-accent-hover: #4a463e;
+    --color-on-accent: #ffffff;
+    --color-selection: #d8d3d2;
+    --color-highlight: #f8dcae;
+    --color-success: #08795e;
+    --color-warning: #8f5a06;
+    --color-error: #b23046;
+    --color-info: #196aaf;
+    --color-on-status: #ffffff;
+    --color-diff-added: #d6f8eb;
+    --color-diff-removed: #ffe9e9;
+    --color-seal: #7d1a14;
+    --color-backdrop: rgba(36, 24, 22, 0.3);
+    --color-input: var(--color-page);
+
+    --level-2-shadow: 0 8px 24px rgba(36, 24, 22, 0.12);
+    --welcome-ground: var(--color-page);
+  }
+}
+
+/*
  * Lamplight, from .wiki/DESIGN-LAMPLIGHT.md. This rule outweighs Saturn Seal's light block, so
- * every value that block overrides is set again in the nested light block. Newsreader is both the
- * display and the text face; only the page title fixes its optical size, and every other role
- * lets the browser follow the font size.
+ * every value it sets that the light block also overrides is set again in the nested light block.
+ * Newsreader is both the display and the text face; only the page title fixes its optical size,
+ * and every other role lets the browser follow the font size.
  */
 :root[data-theme="lamplight"] {
   --color-window: #03130f;
@@ -355,6 +469,7 @@
 }
 
 :root:not([data-theme]) [data-welcome-logo="saturn-seal-dark"],
+:root[data-theme="bound"] [data-welcome-logo="bound-dark"],
 :root[data-theme="lamplight"] [data-welcome-logo="lamplight-dark"] {
   display: block;
 
@@ -364,10 +479,28 @@
 }
 
 :root:not([data-theme]) [data-welcome-logo="saturn-seal-light"],
+:root[data-theme="bound"] [data-welcome-logo="bound-light"],
 :root[data-theme="lamplight"] [data-welcome-logo="lamplight-light"] {
   @variant light {
     display: block;
   }
+}
+
+/*
+ * Bound's title strap (src/ui/PageView.tsx): 2px × 48px in seal, flush with the title's left edge
+ * and 8px below it. The page view's article spaces its children 24px apart (gap-6), so the strap
+ * pulls itself 16px up and keeps the gap below it. Every other theme leaves it out of the layout.
+ */
+.title-strap {
+  display: none;
+}
+
+:root[data-theme="bound"] .title-strap {
+  display: block;
+  width: 48px;
+  height: 2px;
+  margin-top: -16px;
+  background-color: var(--color-seal);
 }
 
 /* Type roles. Darker Grotesque appears only in page-title, world-name and label-caps. */

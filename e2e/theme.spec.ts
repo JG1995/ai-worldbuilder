@@ -41,6 +41,10 @@ test("the showcase loads every bundled face from the dev server only", async ({
     ['700 16px "Hanken Grotesk"', "A"],
     ['400 16px "Newsreader Variable"', "A"],
     ['600 16px "Newsreader Variable"', "A"],
+    ['400 16px "Grenze"', "A"],
+    ['500 16px "Grenze"', "A"],
+    ['700 16px "Grenze"', "A"],
+    ['600 16px "Grenze Gotisch"', "A"],
     ['16px "Material Symbols Sharp"', "\u{e2c7}"],
   ];
   for (const [font, text] of fonts) {
@@ -201,8 +205,51 @@ const lamplightType = {
   },
 } satisfies Record<string, TypeRole>;
 
+// .wiki/DESIGN-BOUND.md.
+const boundType = {
+  "page-title": {
+    fontFamily: "Grenze Gotisch",
+    fontSize: 36,
+    fontWeight: "600",
+    lineHeight: 1.25,
+    letterSpacing: 0,
+  },
+  "world-name": {
+    fontFamily: "Grenze Gotisch",
+    fontSize: 18,
+    fontWeight: "600",
+    lineHeight: 1.2,
+    letterSpacing: 0,
+  },
+  "label-caps": {
+    fontFamily: "Grenze",
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 1.2,
+    letterSpacing: 0.08,
+    textTransform: "uppercase",
+  },
+  "heading-1": { fontFamily: "Grenze", fontSize: 28, fontWeight: "700", lineHeight: 1.25 },
+  "heading-2": { fontFamily: "Grenze", fontSize: 23, fontWeight: "700", lineHeight: 1.3 },
+  "heading-3": { fontFamily: "Grenze", fontSize: 20, fontWeight: "700", lineHeight: 1.35 },
+  "heading-4": { fontFamily: "Grenze", fontSize: 18, fontWeight: "700", lineHeight: 1.4 },
+  body: { fontFamily: "Grenze", fontSize: 18, fontWeight: "400", lineHeight: 1.6 },
+  "body-reading": { fontFamily: "Grenze", fontSize: 20, fontWeight: "400", lineHeight: 1.55 },
+  assistant: { fontFamily: "Grenze", fontSize: 16, fontWeight: "400", lineHeight: 1.55 },
+  ui: { fontFamily: "Grenze", fontSize: 16, fontWeight: "400", lineHeight: 1.4 },
+  "ui-strong": { fontFamily: "Grenze", fontSize: 16, fontWeight: "500", lineHeight: 1.4 },
+  "ui-small": { fontFamily: "Grenze", fontSize: 15, fontWeight: "400", lineHeight: 1.4 },
+  mono: {
+    fontFamily: "ui-monospace, Cascadia Mono, SF Mono, DejaVu Sans Mono, monospace",
+    fontSize: 13,
+    fontWeight: "400",
+    lineHeight: 1.5,
+  },
+} satisfies Record<string, TypeRole>;
+
 const themeTypes: [string, Record<string, TypeRole>][] = [
   ["Saturn Seal", saturnSealType],
+  ["Bound", boundType],
   ["Lamplight", lamplightType],
 ];
 
@@ -310,4 +357,65 @@ test("the showcase's theme switch applies Lamplight and its wordmark in both mod
   await page.getByRole("radio", { name: "Saturn Seal" }).check();
   expect(await bodyBackground(page)).toBe(windowLight);
   await expect(logo).toHaveAttribute("src", /lockup-stacked-light\.svg$/);
+});
+
+test("the showcase's theme switch applies Bound and its wordmark on the welcome ground in both modes", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/showcase.html");
+  const logo = page
+    .locator("section", { has: page.getByRole("heading", { name: "Logo", exact: true }) })
+    .getByRole("img", { name: "Grimoire.md" });
+  const welcomeGround = () =>
+    logo.evaluate((element) => getComputedStyle(element.parentElement as Element).backgroundColor);
+
+  await page.getByRole("radio", { name: "Bound" }).check();
+  expect(await bodyBackground(page)).toBe("rgb(22, 13, 11)");
+  await expect(logo).toHaveAttribute("src", /bound-wordmark-dark\.svg$/);
+  expect(await welcomeGround()).toBe("rgb(26, 19, 17)");
+
+  await page.getByRole("radio", { name: "Light", exact: true }).check();
+  expect(await bodyBackground(page)).toBe("rgb(243, 238, 228)");
+  await expect(logo).toHaveAttribute("src", /bound-wordmark-light\.svg$/);
+  expect(await welcomeGround()).toBe("rgb(252, 250, 249)");
+});
+
+test("only Bound draws the title strap, 8px below the page title in both modes", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/showcase.html");
+  const straps = page.locator(".page-title + .title-strap");
+  await expect(straps).not.toHaveCount(0);
+
+  await page.getByRole("radio", { name: "Bound" }).check();
+  for (const [mode, seal] of [
+    ["Dark", "rgb(229, 113, 99)"],
+    ["Light", "rgb(125, 26, 20)"],
+  ] as const) {
+    await page.getByRole("radio", { name: mode, exact: true }).check();
+    const strap = straps.first();
+    await expect(strap).toBeVisible();
+    await expect(strap).toHaveCSS("background-color", seal);
+    const geometry = await strap.evaluate((element) => {
+      const title = (element.previousElementSibling as Element).getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      return {
+        left: box.left - title.left,
+        below: box.top - title.bottom,
+        width: box.width,
+        height: box.height,
+      };
+    });
+    expect(geometry, mode).toEqual({ left: 0, below: 8, width: 48, height: 2 });
+  }
+
+  for (const theme of ["Saturn Seal", "Lamplight"]) {
+    await page.getByRole("radio", { name: theme }).check();
+    const displays = await straps.evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).display),
+    );
+    expect(new Set(displays), theme).toEqual(new Set(["none"]));
+  }
 });

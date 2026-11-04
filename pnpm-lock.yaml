@@ -32,6 +32,12 @@ importers:
       '@fontsource/darker-grotesque':
         specifier: 5.3.0
         version: 5.3.0
+      '@fontsource/grenze':
+        specifier: 5.3.0
+        version: 5.3.0
+      '@fontsource/grenze-gotisch':
+        specifier: 5.3.0
+        version: 5.3.0
       '@fontsource/hanken-grotesk':
         specifier: 5.3.0
         version: 5.3.0
@@ -305,6 +311,12 @@ packages:
 
   '@fontsource/darker-grotesque@5.3.0':
     resolution: {integrity: sha512-wbFQQ/PQZ+SCi2iHNoh7pgyt2HCfTgSlt+heRxrKbz3QXFSkHGNHyYC7fJFc1fUe1CXgqzshu6s51f+mM9ZwWQ==}
+
+  '@fontsource/grenze-gotisch@5.3.0':
+    resolution: {integrity: sha512-hIgb3TJWnwjiaf8FWMYfPe5PvHHnSv+VYUJI40Fj0KhjWhBhBl4LTsGrkr4MSjo6mG+znR2tBz5L++4wkEgI1A==}
+
+  '@fontsource/grenze@5.3.0':
+    resolution: {integrity: sha512-fq8Xyrvs/wQrtIhTjJbWHbz0Ed9TzWKYEmN7E4Qd0ie3OhMreRCMHYS0P1tP+lQ7Dbql3eL84IojdCcy+Wm+oA==}
 
   '@fontsource/hanken-grotesk@5.3.0':
     resolution: {integrity: sha512-eiqAvcMT88tCMCBzn6qKgMHGLJKq3NEXO3+0y9JXqzyty2U6KZnaGtbfiQgzRAXfwFp559hJQ0zBgJ6d89AuTA==}
@@ -1754,6 +1766,10 @@ snapshots:
   '@fontsource-variable/newsreader@5.3.0': {}
 
   '@fontsource/darker-grotesque@5.3.0': {}
+
+  '@fontsource/grenze-gotisch@5.3.0': {}
+
+  '@fontsource/grenze@5.3.0': {}
 
   '@fontsource/hanken-grotesk@5.3.0': {}
 
