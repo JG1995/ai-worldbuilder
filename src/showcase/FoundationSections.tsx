@@ -50,8 +50,33 @@ const typeRoles = [
     className: "label-caps",
     sample: sampleLabel,
   },
+  {
+    name: "heading-1",
+    use: "Page headings, level 1",
+    className: "heading-1",
+    sample: sampleHeading,
+  },
+  {
+    name: "heading-2",
+    use: "Page headings, level 2",
+    className: "heading-2",
+    sample: sampleHeading,
+  },
+  {
+    name: "heading-3",
+    use: "Page headings, level 3",
+    className: "heading-3",
+    sample: sampleHeading,
+  },
   { name: "heading-4", use: "Dialog titles", className: "heading-4", sample: sampleHeading },
   { name: "body", use: "Page body", className: "body", sample: sampleBody },
+  {
+    name: "body-reading",
+    use: "Page body in the reading view",
+    className: "body-reading",
+    sample: sampleBody,
+  },
+  { name: "assistant", use: "Assistant messages", className: "assistant", sample: sampleBody },
   { name: "ui", use: "Interface text", className: "ui", sample: sampleBody },
   {
     name: "ui-strong",

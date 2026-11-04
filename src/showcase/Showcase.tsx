@@ -15,13 +15,13 @@ const modes: { value: Mode; label: string }[] = [
 /** The OS, dark and light switch. It starts from the mode the other showcase view set. */
 export function ModeSwitch() {
   const [mode, setMode] = useState<Mode>(
-    () => (document.documentElement.dataset.theme as Mode | undefined) ?? "os",
+    () => (document.documentElement.dataset.mode as Mode | undefined) ?? "os",
   );
 
   function chooseMode(next: Mode) {
     // Set before rendering, so the sections read the new mode's token values.
-    if (next === "os") delete document.documentElement.dataset.theme;
-    else document.documentElement.dataset.theme = next;
+    if (next === "os") delete document.documentElement.dataset.mode;
+    else document.documentElement.dataset.mode = next;
     setMode(next);
   }
 
