@@ -51,6 +51,12 @@
 //! image bytes. Each message is written in one transaction, and the file syncs fully, so after a
 //! crash a message is there whole or not at all.
 //!
+//! The store numbers each new image itself, past the highest image id it has held since it opened,
+//! rather than leaving it to SQLite, which gives a new row the id of a deleted highest row. A
+//! stored image's URL names it by its session and id alone, and the webview keeps an image it has
+//! loaded for a URL, so an image deleted with its conversation or a retried answer must never hand
+//! its id to another image in the same opening, including after the store moves to memory.
+//!
 //! A damaged file is set aside, as a damaged history database is, and a new one replaces it. A file
 //! in a newer format, holding unknown data, or recording another world is left untouched; so is
 //! everything when the world's path cannot name a file or there is no app data folder; so is an
@@ -722,6 +728,8 @@ pub struct Store {
     unfinished: Vec<UnfinishedSet>,
     /// The images an earlier process or opening left marked, until they are taken to be resolved.
     marks: Vec<ImageMark>,
+    /// The id the next new image gets: past every image id this opening has held.
+    next_image: i64,
 }
 
 /// Why a message could not be written.
@@ -757,6 +765,11 @@ impl Store {
                 let mut store = Self {
                     unfinished: unfinished_sets(&connection).map_err(store_error)?,
                     marks: image_marks(&connection).map_err(store_error)?,
+                    next_image: connection
+                        .query_row("SELECT coalesce(max(id), 0) + 1 FROM images", [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(store_error)?,
                     connection,
                     saving: true,
                     notice: set_aside.then_some(StoreNotice::SetAside),
@@ -772,6 +785,7 @@ impl Store {
                     notice: Some(StoreNotice::NotSaved { reason }),
                     unfinished: Vec::new(),
                     marks: Vec::new(),
+                    next_image: 1,
                 })
             }
         }
@@ -842,7 +856,7 @@ impl Store {
     }
 
     /// Keeps the conversations in memory from now on, starting from what the file still holds, or
-    /// from nothing when it cannot be read. The file is left as it is.
+    /// from nothing when it cannot be read. The file is left as it is, and so is `next_image`.
     fn move_to_memory(&mut self, reason: String) {
         if let Ok(memory) = copied(&self.connection).or_else(|_| memory_database()) {
             self.connection = memory;
@@ -964,14 +978,15 @@ impl Store {
 
     /// Saves the answer to `conversation`'s last message, with the pages its request carried and
     /// its proposals and its image requests, and returns the answer's id and its images' ids in
-    /// order.
+    /// order. The images are numbered from `next_image`, which moves past them once they are saved.
     pub fn add_answer(
         &mut self,
         conversation: i64,
         answer: &Answer,
         now: i64,
     ) -> Result<(i64, Vec<i64>), AppError> {
-        self.write(|transaction| {
+        let first_image = self.next_image;
+        let saved = self.write(|transaction| {
             transaction.execute(
                 "INSERT INTO messages (conversation, role, text, time, state, left_out, indexing,
                                        unreadable, unfinished, image_unreadable, image_unfinished)
@@ -1003,10 +1018,12 @@ impl Store {
             }
             let mut images = Vec::new();
             for (ordinal, image) in answer.images.iter().enumerate() {
+                let id = first_image + ordinal as i64;
                 transaction.execute(
-                    "INSERT INTO images (message, ordinal, name, frame, prompt, revises, state,
+                    "INSERT INTO images (id, message, ordinal, name, frame, prompt, revises, state,
                                          reason, undone)
-                     VALUES (?1, ?2, ?3, ?4, ?5, (SELECT id FROM images WHERE id = ?6), ?7, ?8, 0)",
+                     VALUES (?9, ?1, ?2, ?3, ?4, ?5, (SELECT id FROM images WHERE id = ?6), ?7, ?8,
+                             0)",
                     params![
                         message,
                         ordinal as i64,
@@ -1015,17 +1032,20 @@ impl Store {
                         image.prompt,
                         image.revises,
                         ImageState::NotGenerated.as_str(),
-                        image.reason.as_str()
+                        image.reason.as_str(),
+                        id
                     ],
                 )?;
-                images.push(transaction.last_insert_rowid());
+                images.push(id);
             }
             transaction.execute(
                 "UPDATE conversations SET updated = ?2 WHERE id = ?1",
                 params![conversation, now],
             )?;
             Ok((message, images))
-        })
+        })?;
+        self.next_image = first_image + answer.images.len() as i64;
+        Ok(saved)
     }
 
     /// Starts generating an image that is not generated.
@@ -3894,5 +3914,53 @@ mod tests {
             ]
         );
         assert_eq!(messages[0].images, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_image_deleted_with_its_conversation_or_a_retried_answer_never_gives_its_id_to_a_new_one()
+    {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (kept, _, _) = with_images(&mut store, None, ["Gate"]);
+        let (deleted, _, [highest]) = with_images(&mut store, None, ["Tower"]);
+        store.delete(deleted).unwrap();
+
+        let (retried, _, [after_delete]) = with_images(&mut store, Some(kept), ["Quay"]);
+        assert!(after_delete > highest, "{after_delete} after {highest}");
+
+        store.prepare_retry(retried).unwrap();
+        let (_, _, [after_retry]) = with_images(&mut store, None, ["Moor"]);
+        assert!(
+            after_retry > after_delete,
+            "{after_retry} after {after_delete}"
+        );
+    }
+
+    #[test]
+    fn a_store_that_moves_to_memory_keeps_counting_past_a_deleted_image() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        with_images(&mut store, None, ["Gate"]);
+        let (deleted, _, [highest]) = with_images(&mut store, None, ["Tower"]);
+        store.delete(deleted).unwrap();
+
+        store.move_to_memory("Gone".to_owned());
+        let (_, _, [next]) = with_images(&mut store, None, ["Quay"]);
+
+        assert!(!store.saving);
+        assert!(next > highest, "{next} after {highest}");
+    }
+
+    #[test]
+    fn reopening_numbers_new_images_past_the_highest_one_stored() {
+        let app_data = tempfile::tempdir().unwrap();
+        let mut store = opened(&app_data);
+        let (_, _, [_, highest]) = with_images(&mut store, None, ["Gate", "Tower"]);
+        drop(store);
+
+        let mut store = opened(&app_data);
+        let (_, _, [next]) = with_images(&mut store, None, ["Quay"]);
+
+        assert_eq!(next, highest + 1);
     }
 }
