@@ -1,7 +1,7 @@
 import { emit } from "@tauri-apps/api/event";
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockConvertFileSrc, mockIPC } from "@tauri-apps/api/mocks";
 import { describe, expect, it, vi } from "vitest";
-import { invokeCommand, invokeStreaming, listenEvent } from "./ipc";
+import { invokeCommand, invokeStreaming, listenEvent, storedImageUrl } from "./ipc";
 
 vi.mock("./preview-fixtures", () => ({
   previewFixtures: {
@@ -129,6 +129,18 @@ describe("invokeStreaming", () => {
       invokeStreaming("sample_stream", { text: "Hello" }, (event) => events.push(event)),
     ).resolves.toEqual({ received: { text: "Hello" } });
     expect(events).toEqual(["first", "second"]);
+  });
+});
+
+describe("storedImageUrl", () => {
+  it.each([
+    ["linux", "grimoire-image://localhost/stored%2F3%2F42"],
+    ["windows", "http://grimoire-image.localhost/stored%2F3%2F42"],
+  ] as const)("is the image scheme's stored path as one segment on %s", (os, url) => {
+    mockTauri(() => null);
+    mockConvertFileSrc(os);
+
+    expect(storedImageUrl(3, 42)).toBe(url);
   });
 });
 

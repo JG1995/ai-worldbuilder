@@ -12,17 +12,26 @@ import type {
   Comparison,
   ContextPage,
   Conversation,
+  ConversationImages,
   Conversations,
   DiffLine,
   EditorLink,
   EditorLinks,
+  GenerationFailure,
   HistoryVersion,
+  ImageApproved,
   ImageEmbed,
+  ImageFailure,
+  ImageFrame,
+  ImageReference,
   ImageRequest,
+  ImageReview,
+  ImageState,
   ImageTestOutcome,
   KeyStorage,
   LinkedPage,
   LinkSuggestions,
+  NotGenerated,
   PageMatch,
   PageMatches,
   PageText,
@@ -1350,14 +1359,17 @@ async function sendAnswer(
   const open = requireWorld();
   if (!previewSettings.textProvider) throw { kind: "not_found", message: "No provider is saved." };
   if (answering) throw { kind: "conflict", message: "An answer is already running." };
-  const { conversation, text, active, retry } = args as {
+  const { conversation, text, active, retry, regenerates } = args as {
     conversation: number | null;
     text: string;
     active: string | null;
     retry: boolean;
+    regenerates?: number;
   };
   let shown: PreviewConversation;
   let message: string;
+  /** The image the message regenerates, if it is a regeneration message. */
+  let regenerated: PreviewImage | undefined;
   if (retry) {
     if (conversation === null) {
       throw { kind: "not_found", message: "There is no message to answer again." };
@@ -1369,6 +1381,7 @@ async function sendAnswer(
       throw { kind: "not_found", message: "There is no message to answer again." };
     }
     message = asked.text;
+    regenerated = previewImages.find((image) => image.id === regenerationsOf.get(asked));
   } else {
     if (text.trim() === "") throw { kind: "invalid_name", message: "The message is empty." };
     const time = nowInSeconds();
@@ -1379,7 +1392,18 @@ async function sendAnswer(
     } else {
       shown = requireConversation(open, conversation);
     }
-    shown.messages.push({ role: "user", text, time });
+    if (regenerates !== undefined) {
+      const answers = shown.messages.flatMap((saved) =>
+        saved.role === "answer" ? [saved.id] : [],
+      );
+      regenerated = previewImages.find(
+        (image) => image.id === regenerates && answers.includes(image.answer),
+      );
+      if (!regenerated) throw { kind: "not_found", message: "The image does not exist." };
+    }
+    const user: SavedMessage = { role: "user", text, time };
+    if (regenerated) regenerationsOf.set(user, regenerated.id);
+    shown.messages.push(user);
     shown.updated = time;
     message = text;
     if (message === "store:set_aside") storeNotices.set(open, { kind: "set_aside" });
@@ -1394,9 +1418,29 @@ async function sendAnswer(
   const proposing = failing || message.startsWith("propose:");
   /** The proposals streamed so far, which are kept with the saved answer. */
   const proposed: PreviewProposal[] = [];
+  const requested = imageRequestOf(message, regenerated);
+  /** The image request has been streamed whole, so it is kept with the saved answer. */
+  let imageStreamed = false;
   const saved = (end: AnswerEnd): AnswerEnd => {
     const answer = saveAnswer(shown, end, pages);
     if (answer !== null && proposed.length > 0) proposalsOf.set(answer, proposed);
+    if (answer !== null && requested && imageStreamed) {
+      const image: PreviewImage = {
+        ...requested,
+        id: nextImage++,
+        answer,
+        state: "not_generated",
+        notGenerated: end.state === "stopped" ? "stopped" : "no_provider",
+        failure: null,
+        undone: false,
+        path: null,
+        revises: regenerated?.id ?? null,
+        reference: null,
+        createdFolder: false,
+      };
+      previewImages.push(image);
+      if (end.state !== "stopped" && imageProviderSaved()) generateImage(image);
+    }
     return { ...end, answer };
   };
 
@@ -1426,7 +1470,14 @@ async function sendAnswer(
     }
     const deltas = proposing
       ? ["Here is how Saltmere ", "could fit in. ", "Review each change ", "before it is written."]
-      : cannedAnswer(active);
+      : requested
+        ? [
+            "I wrote the prompt ",
+            "from the pages I read. ",
+            "Review the image ",
+            "before it is saved.",
+          ]
+        : cannedAnswer(active);
     for (const delta of deltas) {
       await pause(run, 100);
       if (run.stopped)
@@ -1443,11 +1494,220 @@ async function sendAnswer(
       proposed.push({ ...draft, id: nextProposal++, base });
       onEvent({ kind: "proposal", change: draft.kind, path: draft.path });
     }
+    if (requested) {
+      onEvent({ kind: "image", name: requested.name });
+      await pause(run, 100);
+      if (run.stopped)
+        return saved({ state: "stopped", conversation: id, text: answer, answer: null });
+      imageStreamed = true;
+    }
     return saved({ state: "complete", conversation: id, text: answer, answer: null });
   } finally {
     answering = null;
     run.end();
   }
+}
+
+/**
+ * An image request kept with its saved answer. An approximation for the preview: a generation
+ * reaches no network and ends within the command that starts it, with a sample image, because no
+ * `assistant:image-changed` event reaches the preview.
+ */
+type PreviewImage = {
+  id: number;
+  answer: number;
+  name: string;
+  frame: ImageFrame;
+  prompt: string;
+  state: ImageState;
+  notGenerated: NotGenerated | null;
+  failure: GenerationFailure | null;
+  undone: boolean;
+  path: string | null;
+  revises: number | null;
+  reference: ImageReference | null;
+  /** The sample image whose bytes it has once generated. */
+  sample: string;
+  /** What each generation does: end with the sample image, keep running until Cancel, or fail. */
+  outcome: "ready" | "hold" | ImageFailure;
+  /** Its approval created the world's `images` folder. */
+  createdFolder: boolean;
+};
+
+const previewImages: PreviewImage[] = [];
+/** The image each regeneration message regenerates. */
+const regenerationsOf = new WeakMap<SavedMessage, number>();
+let nextImage = 1;
+
+const imageFailures: ImageFailure[] = [
+  "unreachable",
+  "insecure",
+  "timeout",
+  "key_refused",
+  "no_credit",
+  "unknown_model",
+  "rate_limited",
+  "refused",
+  "provider_error",
+  "redirected",
+  "invalid_reply",
+  "no_image",
+  "key_unreadable",
+  "interrupted",
+];
+
+/** The URL of the sample image a stored image shows, once it has been generated. */
+export function previewStoredImageUrl(id: number) {
+  const image = previewImages.find((candidate) => candidate.id === id);
+  if (!image) return "";
+  makeSampleImageUrls();
+  return sampleImageUrls.get(image.sample) ?? "";
+}
+
+function requireImage(id: unknown) {
+  const image = previewImages.find((candidate) => candidate.id === id);
+  if (!image) throw { kind: "not_found", message: "The image does not exist." };
+  return image;
+}
+
+/** Whether an image provider is saved with a key, as generating needs. */
+const imageProviderSaved = () =>
+  previewSettings.imageProvider !== null && previewSettings.imageProvider.key !== "none";
+
+/** Runs an image's generation, which ends at once unless it holds. */
+function generateImage(image: PreviewImage) {
+  if (image.revises !== null) {
+    const earlier = previewImages.find((candidate) => candidate.id === image.revises);
+    image.reference = earlier && earlier.state !== "rejected" ? "sent" : "gone";
+  }
+  if (image.outcome === "hold") {
+    Object.assign(image, { state: "generating", notGenerated: null, failure: null });
+  } else if (image.outcome === "ready") {
+    Object.assign(image, { state: "pending", notGenerated: null, failure: null });
+  } else {
+    const failure: GenerationFailure = {
+      reason: image.outcome,
+      detail: "Sample detail from the preview",
+      providerMessage: "Sample message from the provider, with <b>markup</b> shown as text.",
+    };
+    Object.assign(image, { state: "not_generated", notGenerated: "failed", failure });
+  }
+}
+
+/**
+ * The image request of an answer to `message`: one for a message asking for an image, portrait,
+ * picture or scene, or regenerating `regenerates`; none otherwise. A portrait is of Brother Ketil
+ * with his sample image, anything else of the Glass Steppe with its map. A message holding
+ * `image-hold` keeps the generation running until Cancel, and one holding `image-fail:<reason>`,
+ * with an `ImageFailure` as the reason, fails it for that reason.
+ */
+function imageRequestOf(message: string, regenerates: PreviewImage | undefined) {
+  if (!regenerates && !/\b(images?|portraits?|pictures?|scenes?)\b/i.test(message)) return null;
+  const outcome: PreviewImage["outcome"] =
+    imageFailures.find((reason) => message.includes(`image-fail:${reason}`)) ??
+    (message.includes("image-hold") ? "hold" : "ready");
+  if (regenerates) {
+    const { name, frame, prompt, sample } = regenerates;
+    return { name, frame, prompt: `${prompt} ${message.trim()}`, sample, outcome };
+  }
+  if (/portrait/i.test(message)) {
+    return {
+      name: "Brother Ketil",
+      frame: "portrait" as const,
+      prompt:
+        "Ink and watercolour portrait. A gaunt monk in his fifties with a shaved head and a sun-dark face, in a dusty grey robe, at the shrine of Kesh Tor. Head and shoulders, three-quarter view. Low evening light; ochre and slate.",
+      sample: "Characters/Brother Ketil.png",
+      outcome,
+    };
+  }
+  return {
+    name: "The Glass Steppe",
+    frame: "landscape" as const,
+    prompt:
+      "Ink and watercolour landscape. A plain of fused, glittering sand under a night sky, a caravan of camels crossing it in single file. Wide view from a low ridge. Moonlight; deep blues and pale silver.",
+    sample: "Maps/The Glass Steppe.png",
+    outcome,
+  };
+}
+
+/** An image as `assistant_images` reviews it. */
+function imageReviewOf(image: PreviewImage): ImageReview {
+  const { id, name, frame, prompt, state, notGenerated, failure, undone, path, reference } = image;
+  const earlier = previewImages.find((candidate) => candidate.id === image.revises);
+  return {
+    id,
+    name,
+    frame,
+    prompt,
+    state,
+    notGenerated,
+    failure,
+    undone,
+    path,
+    undo: state === "approved",
+    revises: earlier?.id ?? null,
+    revisesName: earlier?.name ?? null,
+    reference,
+  };
+}
+
+/** A conversation's images by answer, and its regeneration messages, as the core gives them. */
+function imagesOfConversation(conversation: PreviewConversation): ConversationImages {
+  const answers = conversation.messages.flatMap((message) => {
+    if (message.role !== "answer") return [];
+    const images = previewImages.filter((image) => image.answer === message.id);
+    if (images.length === 0) return [];
+    return [
+      { answer: message.id, unreadable: 0, unfinished: false, images: images.map(imageReviewOf) },
+    ];
+  });
+  const regenerations = conversation.messages.flatMap((message, index) => {
+    const image = regenerationsOf.get(message);
+    const earlier = previewImages.find((candidate) => candidate.id === image);
+    return earlier ? [{ message: index, image: earlier.id, name: earlier.name }] : [];
+  });
+  return { answers, regenerations };
+}
+
+/**
+ * Writes a pending image to `images/` at the world's top level, like the core: an `images` folder
+ * in any letter case is used, and a taken name gains " 2", " 3" and so on. An approximation for
+ * the preview: the image file stays out of the world's pages, as the tree shows no images, and the
+ * name is cleaned of the characters page names forbid only.
+ */
+function approveImage(id: unknown): ImageApproved {
+  requireAi();
+  const open = requireWorld();
+  const image = requireImage(id);
+  if (image.state !== "pending") {
+    throw { kind: "conflict", message: "The image is no longer pending." };
+  }
+  const existing = [...open.folders].find((folder) => folder.toLowerCase() === "images");
+  const folder = existing ?? "images";
+  const stem = image.name.replace(/[\\/:*?"<>|#^[\]]/g, "").trim() || "Image";
+  const taken = (path: string) =>
+    previewImages.some((other) => other.path?.toLowerCase() === path.toLowerCase());
+  let path = `${folder}/${stem}.png`;
+  for (let number = 2; taken(path); number++) path = `${folder}/${stem} ${number}.png`;
+  open.folders.add(folder);
+  Object.assign(image, { state: "approved", path, createdFolder: existing === undefined });
+  return { path, undo: true };
+}
+
+/** Undoes an image's approval, removing the `images` folder it created once nothing is in it. */
+function undoImage(id: unknown) {
+  requireAi();
+  const open = requireWorld();
+  const image = requireImage(id);
+  if (image.state !== "approved" || image.path === null) {
+    throw { kind: "conflict", message: "The image is no longer approved." };
+  }
+  const folder = image.path.slice(0, image.path.lastIndexOf("/"));
+  Object.assign(image, { state: "pending", undone: true, path: null });
+  const holds = previewImages.some((other) => other.path?.startsWith(`${folder}/`));
+  if (image.createdFolder && !holds) open.folders.delete(folder);
+  image.createdFolder = false;
+  return null;
 }
 
 /** The addresses `link_open` was asked to open; the preview opens nothing. */
@@ -1718,6 +1978,44 @@ export const previewFixtures: Record<string, unknown> = {
   },
   assistant_reject: (args?: InvokeArgs) => rejectProposal((args as { proposal: number }).proposal),
   assistant_undo: (args?: InvokeArgs): Undone => undoSet((args as { set: number }).set),
+  assistant_images: (args?: InvokeArgs): ConversationImages => {
+    requireAi();
+    const open = requireWorld();
+    const { conversation } = args as { conversation: number };
+    return imagesOfConversation(requireConversation(open, conversation));
+  },
+  assistant_image_generate: (args?: InvokeArgs) => {
+    requireAi();
+    requireWorld();
+    const image = requireImage((args as { image: number }).image);
+    if (!imageProviderSaved()) throw { kind: "not_found", message: "No image provider is saved." };
+    if (image.state !== "not_generated") {
+      throw { kind: "conflict", message: "The image is not waiting to be generated." };
+    }
+    generateImage(image);
+    return null;
+  },
+  assistant_image_cancel: (args?: InvokeArgs) => {
+    requireAi();
+    requireWorld();
+    const image = requireImage((args as { image: number }).image);
+    if (image.state === "generating") {
+      Object.assign(image, { state: "not_generated", notGenerated: "cancelled" });
+    }
+    return null;
+  },
+  assistant_image_reject: (args?: InvokeArgs) => {
+    requireAi();
+    requireWorld();
+    const image = requireImage((args as { image: number }).image);
+    if (image.state !== "pending") {
+      throw { kind: "conflict", message: "The image is no longer pending." };
+    }
+    image.state = "rejected";
+    return null;
+  },
+  assistant_image_approve: (args?: InvokeArgs) => approveImage((args as { image: number }).image),
+  assistant_image_undo: (args?: InvokeArgs) => undoImage((args as { image: number }).image),
   assistant_delete: async (args?: InvokeArgs) => {
     requireAi();
     const open = requireWorld();

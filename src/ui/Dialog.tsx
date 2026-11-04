@@ -23,6 +23,8 @@ type DialogProps = {
   initialFocus?: RefObject<HTMLElement | null>;
   /** 560px wide instead of a confirmation's 440px, for a dialog that holds a form. */
   wide?: boolean;
+  /** Fills the window less the gutter, with its body taking the height the rest leaves. */
+  full?: boolean;
   /** Shows a Close button in the title row, which calls `onCancel`. */
   closeButton?: boolean;
 };
@@ -40,6 +42,7 @@ export function Dialog({
   onCancel,
   initialFocus,
   wide = false,
+  full = false,
   closeButton = false,
 }: DialogProps) {
   const titleId = useId();
@@ -83,7 +86,7 @@ export function Dialog({
         aria-labelledby={titleId}
         tabIndex={-1}
         onKeyDown={trapFocus}
-        className={`flex max-h-full max-w-full flex-col gap-4 rounded-md border border-divider bg-raised p-6 text-text shadow-(--level-2-shadow) ${wide ? "w-[560px]" : "w-[440px]"}`}
+        className={`flex max-h-full max-w-full flex-col gap-4 rounded-md border border-divider bg-raised p-6 text-text shadow-(--level-2-shadow) ${full ? "h-full w-full" : wide ? "w-[560px]" : "w-[440px]"}`}
       >
         <div className="flex items-center justify-between gap-4">
           <h2 id={titleId} className="heading-4">
@@ -92,7 +95,11 @@ export function Dialog({
           {closeButton && <IconButton icon="close" label="Close" onClick={onCancel} />}
         </div>
         {/* The negative margin and the padding keep the focus ring of a control at the edge visible. */}
-        <div className="ui -m-1 flex min-h-0 flex-col gap-4 overflow-y-auto p-1">{children}</div>
+        <div
+          className={`ui -m-1 flex min-h-0 flex-col gap-4 overflow-y-auto p-1 ${full ? "flex-1" : ""}`}
+        >
+          {children}
+        </div>
         {actions && <div className="flex flex-wrap justify-end gap-2">{actions}</div>}
       </div>
     </div>,

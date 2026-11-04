@@ -5,8 +5,10 @@ import type {
   AnswerEvent,
   AnswerReview,
   Conversation,
+  ConversationImages,
   Conversations,
   EditorLinks,
+  ImageApproved,
   ProposalVersion,
   Undone,
 } from "@/types/api";
@@ -19,6 +21,8 @@ type Outgoing = {
   /** The active page's path, which the request carries as context. */
   active: string | null;
   retry: boolean;
+  /** The image of the conversation that the new message regenerates, when it is a regeneration. */
+  regenerates?: number;
 };
 
 /**
@@ -26,8 +30,9 @@ type Outgoing = {
  * the pages the request carries, then the answer's text, through `onEvent`. Once the message is
  * saved, it resolves with how the answer ended, even when no request left. Rejects before that
  * with `ai_off`, `no_world`, `invalid_path` for a refused active path, `not_found` without a
- * provider or with nothing to retry, `conflict` while an answer runs or for a retry after a
- * complete answer, and `invalid_name` for an empty message.
+ * provider, with nothing to retry or with a `regenerates` image not of the conversation,
+ * `conflict` while an answer runs or for a retry after a complete answer, and `invalid_name` for
+ * an empty message.
  */
 export const assistantSend = (outgoing: Outgoing, onEvent: (event: AnswerEvent) => void) =>
   invokeStreaming<AnswerEnd, AnswerEvent>("assistant_send", outgoing, onEvent);
@@ -89,3 +94,40 @@ export const assistantReject = (proposal: number) =>
  * `conflict`, naming the page, when a page changed since, and then writes nothing.
  */
 export const assistantUndo = (set: number) => invokeCommand<Undone>("assistant_undo", { set });
+
+/**
+ * A conversation's images by answer, with each answer's notes about image requests, and its
+ * regeneration messages. Rejects with `ai_off`, `no_world` and `not_found`.
+ */
+export const assistantImages = (conversation: number) =>
+  invokeCommand<ConversationImages>("assistant_images", { conversation });
+
+/**
+ * Starts generating an image that is not generated, and resolves once it has started. Rejects
+ * with `not_found` without a saved image provider, and `conflict` unless it is not generated.
+ */
+export const assistantImageGenerate = (image: number) =>
+  invokeCommand<void>("assistant_image_generate", { image });
+
+/** Stops generating an image; nothing happens when it is not being generated. */
+export const assistantImageCancel = (image: number) =>
+  invokeCommand<void>("assistant_image_cancel", { image });
+
+/** Rejects a pending image for good. Rejects with `conflict` unless it is pending. */
+export const assistantImageReject = (image: number) =>
+  invokeCommand<void>("assistant_image_reject", { image });
+
+/**
+ * Writes a pending image to the world's `images` folder as one change, and resolves with its path
+ * and whether it can be undone. Rejects with `conflict`, writing nothing, unless it is pending, and
+ * with the write's error, such as `invalid_path` when `images` is not a folder.
+ */
+export const assistantImageApprove = (image: number) =>
+  invokeCommand<ImageApproved>("assistant_image_approve", { image });
+
+/**
+ * Undoes an image's approval. Rejects with `not_found` when history no longer holds it, and with
+ * `conflict`, naming the image and writing nothing, when its file changed or is gone.
+ */
+export const assistantImageUndo = (image: number) =>
+  invokeCommand<void>("assistant_image_undo", { image });
