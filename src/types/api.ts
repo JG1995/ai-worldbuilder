@@ -24,6 +24,7 @@ export type { EntryKind } from "./generated/EntryKind";
 export type { ErrorKind } from "./generated/ErrorKind";
 export type { GenerationFailure } from "./generated/GenerationFailure";
 export type { HistoryVersion } from "./generated/HistoryVersion";
+export type { ImageApproved } from "./generated/ImageApproved";
 export type { ImageEmbed } from "./generated/ImageEmbed";
 export type { ImageFailure } from "./generated/ImageFailure";
 export type { ImageForm } from "./generated/ImageForm";

@@ -3,7 +3,7 @@
 
 use super::ContextPage;
 use super::context::{Context, EARLIER_LIMIT};
-use super::store::Message;
+use super::store::{Message, Regenerated};
 use crate::providers::{ChatMessage, Role};
 
 const INSTRUCTIONS: &str = "You help the user build the fictional world named below. \
@@ -46,8 +46,15 @@ pub struct Request {
 }
 
 /// The request for `new`, sent in the world `world_name` with the pages of `context`, after
-/// `earlier` messages.
-pub fn build(world_name: &str, context: &Context, earlier: &[Message], new: &str) -> Request {
+/// `earlier` messages. A `new` message that regenerates an image asks for it as `regenerated`
+/// describes.
+pub fn build(
+    world_name: &str,
+    context: &Context,
+    earlier: &[Message],
+    new: &str,
+    regenerated: Option<&Regenerated>,
+) -> Request {
     let pages = &context.pages;
     let mut system = format!("{INSTRUCTIONS}\n\nThe world: {world_name}");
     for page in pages {
@@ -81,7 +88,10 @@ pub fn build(world_name: &str, context: &Context, earlier: &[Message], new: &str
     messages.extend_from_slice(kept);
     messages.push(ChatMessage {
         role: Role::User,
-        content: new.to_owned(),
+        content: match regenerated {
+            Some(regenerated) => regeneration(regenerated, new),
+            None => new.to_owned(),
+        },
     });
     Request {
         messages,
@@ -97,13 +107,31 @@ pub fn build(world_name: &str, context: &Context, earlier: &[Message], new: &str
     }
 }
 
-/// What an earlier message sends: its text, followed for an answer by one line per proposal.
+/// What a regeneration message sends: the earlier image's name and prompt, how to revise it, and
+/// the user's `change`.
+fn regeneration(regenerated: &Regenerated, change: &str) -> String {
+    let Regenerated { name, prompt, .. } = regenerated;
+    format!(
+        "Regenerate the image \"{name}\", whose prompt was:\n\n{prompt}\n\nRevise that prompt, \
+         changing only what I ask for below, and request exactly one image with the revised \
+         prompt.\n\nWhat to change: {change}"
+    )
+}
+
+/// What an earlier message sends: its text, followed for an answer by one line per proposal and
+/// then one line per image.
 fn content(message: &Message) -> String {
+    let lines: Vec<&str> = message
+        .proposals
+        .iter()
+        .chain(&message.images)
+        .map(String::as_str)
+        .collect();
     let mut content = message.text.clone();
-    if !content.is_empty() && !message.proposals.is_empty() {
+    if !content.is_empty() && !lines.is_empty() {
         content.push_str("\n\n");
     }
-    content.push_str(&message.proposals.join("\n"));
+    content.push_str(&lines.join("\n"));
     content
 }
 
@@ -147,7 +175,7 @@ mod tests {
             message("🜁".repeat(2_000), None),
         ];
 
-        let request = build("Kesh", &Context::default(), &earlier, "Now?");
+        let request = build("Kesh", &Context::default(), &earlier, "Now?", None);
 
         let roles: Vec<(Role, char)> = request
             .messages
@@ -181,7 +209,7 @@ mod tests {
             message(String::new(), Some(AnswerState::Stopped)),
         ];
 
-        let request = build("Kesh", &Context::default(), &earlier, "Now?");
+        let request = build("Kesh", &Context::default(), &earlier, "Now?", None);
 
         let sent: Vec<(Role, &str)> = request.messages[1..]
             .iter()
@@ -199,33 +227,41 @@ mod tests {
     }
 
     #[test]
-    fn earlier_answers_send_their_proposals_as_lines_after_their_text() {
+    fn earlier_answers_send_their_proposals_and_then_their_images_as_lines_after_their_text() {
         let line = "[Proposed new page \"Places/Kesh Tor.md\": accepted]";
-        let with = |text: &str, proposals: &[&str]| Message {
+        let image = "[Image \"Gull\": saved as images/Gull.png]";
+        let with = |text: &str, proposals: &[&str], images: &[&str]| Message {
             text: text.to_owned(),
             answer: Some(AnswerState::Complete),
             proposals: proposals.iter().map(|line| (*line).to_owned()).collect(),
-            images: Vec::new(),
+            images: images.iter().map(|line| (*line).to_owned()).collect(),
         };
         let earlier = [
             with(
                 "Here it is.",
                 &[line, "[Proposed edit of \"A.md\": undone]"],
+                &[image, "[Image \"Tern\": pending]"],
             ),
-            with("", &[line]),
+            with("", &[line], &[]),
+            with("", &[], &[image]),
         ];
 
-        let request = build("Kesh", &Context::default(), &earlier, "Now?");
+        let request = build("Kesh", &Context::default(), &earlier, "Now?", None);
 
-        let sent: Vec<&str> = request.messages[1..3]
+        let sent: Vec<&str> = request.messages[1..4]
             .iter()
             .map(|message| message.content.as_str())
             .collect();
         assert_eq!(
             sent,
             [
-                format!("Here it is.\n\n{line}\n[Proposed edit of \"A.md\": undone]").as_str(),
+                format!(
+                    "Here it is.\n\n{line}\n[Proposed edit of \"A.md\": undone]\n{image}\n\
+                     [Image \"Tern\": pending]"
+                )
+                .as_str(),
                 line,
+                image,
             ]
         );
         assert!(request.messages[0].content.contains("<edit path="));

@@ -632,10 +632,6 @@ pub struct SavedImages {
 }
 
 /// The image a regeneration message revises, with what a request tells the model of it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "regenerations arrive in package image-approval")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Regenerated {
     pub image: i64,
@@ -725,10 +721,6 @@ pub struct Store {
     /// The sets an earlier process or opening left unfinished, until they are taken to be resolved.
     unfinished: Vec<UnfinishedSet>,
     /// The images an earlier process or opening left marked, until they are taken to be resolved.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     marks: Vec<ImageMark>,
 }
 
@@ -820,10 +812,6 @@ impl Store {
 
     /// Takes the images that were marked when the store opened, so they are resolved once. Marks
     /// made since are never among them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     pub fn take_image_marks(&mut self) -> Vec<ImageMark> {
         std::mem::take(&mut self.marks)
     }
@@ -1111,10 +1099,6 @@ impl Store {
 
     /// Marks a pending image as being approved, before its approval writes anything, with the path
     /// the approval writes and the change it recorded, or none when history was not recording.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     pub fn begin_approving(
         &mut self,
         image: i64,
@@ -1138,10 +1122,6 @@ impl Store {
     }
 
     /// Marks an approved image as being undone, before the undo writes anything.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     pub fn begin_undoing(&mut self, image: i64) -> Result<(), AppError> {
         self.write(|transaction| {
             require(
@@ -1163,10 +1143,6 @@ impl Store {
     /// undone stays approved when it does and becomes pending and undone otherwise. This finishes
     /// an approval or an undo, and resolves a mark a stop left. An image that is no longer marked,
     /// or no longer exists, is left as it is.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     pub fn settle_image(&mut self, image: i64, written: bool) -> Result<Settling, AppError> {
         self.write(|transaction| {
             let state = transaction
@@ -1539,10 +1515,6 @@ impl Store {
 
     /// The image that `conversation`'s last message regenerates, when it is a regeneration message
     /// and the image still exists.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "regenerations arrive in package image-approval")
-    )]
     pub fn last_regeneration(&self, conversation: i64) -> Result<Option<Regenerated>, AppError> {
         self.connection
             .query_row(
