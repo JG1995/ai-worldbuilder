@@ -227,16 +227,27 @@ export function switchKeepingTopLine(
     else page?.focus({ preventScroll: true });
   }
   if (!region || !line) return;
+  // A key, the wheel or a pointer in the region ends the alignment, so the user's own scrolling is
+  // never scrolled back, nor a scroll that a key such as End has started cut short.
+  const ended = new AbortController();
+  for (const type of ["keydown", "wheel", "pointerdown", "touchstart"]) {
+    region.addEventListener(type, () => ended.abort(), {
+      capture: true,
+      passive: true,
+      signal: ended.signal,
+    });
+  }
   // Each step runs in the frame after an editor measure, which may itself have scrolled the region
   // to keep its top line in place while the editor has focus.
   const align = (attempts: number) =>
     requestAnimationFrame(() => {
-      if (!region.isConnected) return;
+      if (!region.isConnected || ended.signal.aborted) return;
       const top = view.lineBlockAt(line.from).top + view.documentTop;
       const offset = top - region.getBoundingClientRect().top;
-      if (Math.abs(offset) < 1) return;
+      if (Math.abs(offset) < 1) return ended.abort();
       region.scrollTop += offset;
       if (attempts > 1) align(attempts - 1);
+      else ended.abort();
     });
   view.requestMeasure({ read: () => null, write: () => align(5) });
 }
