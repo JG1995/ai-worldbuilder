@@ -472,6 +472,15 @@ impl WorldState {
         .unwrap_or_else(|| Err(no_world()))
     }
 
+    /// The bytes of the image file at `path`, through the confinement rules for images, but only
+    /// while the opening `session` is still the open world, and `no_world` otherwise.
+    pub(crate) fn image_in(&self, session: u64, path: &str) -> Result<Vec<u8>, AppError> {
+        self.while_open(session, |root| {
+            Ok(fs::read(paths::existing_image(root, path)?)?)
+        })
+        .unwrap_or_else(|| Err(no_world()))
+    }
+
     /// The path, with the names on disk, at which a new page `path` can be created in the opening
     /// `session`, or why it cannot be; nothing is created.
     pub(crate) fn new_page_free(&self, session: u64, path: &str) -> Result<String, AppError> {
@@ -530,10 +539,6 @@ impl WorldState {
     /// Writes `bytes`, the approved image `name` of type `extension`, to the world's `images`
     /// folder as one change while the opening `session` is the open world, under the world lock
     /// like a save. Images are not indexed, so the index is left alone.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     pub(crate) fn approve_image(
         &self,
         session: u64,
@@ -551,10 +556,6 @@ impl WorldState {
 
     /// Undoes the approval `change` while the opening `session` is the open world, under the world
     /// lock like a save, leaving the index alone.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "approvals arrive in package image-approval")
-    )]
     pub(crate) fn undo_image(
         &self,
         session: u64,

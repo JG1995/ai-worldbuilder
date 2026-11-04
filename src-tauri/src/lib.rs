@@ -141,6 +141,8 @@ pub fn run() {
             assistant::assistant_image_generate,
             assistant::assistant_image_cancel,
             assistant::assistant_image_reject,
+            assistant::assistant_image_approve,
+            assistant::assistant_image_undo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

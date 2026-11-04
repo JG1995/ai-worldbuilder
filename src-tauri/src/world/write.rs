@@ -1211,10 +1211,6 @@ const LAST_IMAGE_NUMBER: u32 = 999;
 /// An approved image once written: its path as it is on disk, relative to the world, and the change
 /// that records it, once that is complete.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "approvals arrive in package image-approval")
-)]
 pub struct ImageWritten {
     pub path: String,
     pub change: Option<ChangeId>,
@@ -1232,10 +1228,6 @@ pub struct ImageWritten {
 /// the record is abandoned and nothing is written. A failed write removes what it created, the file
 /// and then the folder, and records nothing. It never replaces anything. The caller holds the world
 /// lock, so writes do not overlap.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "approvals arrive in package image-approval")
-)]
 pub fn write_image(
     root: &Path,
     own: &mut OwnWrites,

@@ -53,10 +53,6 @@ const MAX_IMAGE_STEM_BYTES: usize = 100;
 /// `[ ] # ^` are removed, the rest is cut to at most 100 bytes at a character boundary, and spaces
 /// and dots are trimmed at both ends; nothing left gives `Image`. A name Windows reserves gains
 /// ` image` before its first dot, so the stem always passes the naming rules.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "approvals arrive in package image-approval")
-)]
 pub fn image_file_stem(name: &str) -> String {
     let mut kept = String::new();
     for c in name

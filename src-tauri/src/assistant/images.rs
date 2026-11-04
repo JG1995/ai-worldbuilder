@@ -20,12 +20,19 @@
 //! and when the store of a newer session opens; its row is then gone, or left generating in the
 //! older session's file, which makes it interrupted when it opens again. A failure's reason and the
 //! provider's message are kept in memory for the opening only.
+//!
+//! Only `assistant_image_approve` and `assistant_image_undo` write to the world, through the
+//! world's write path. Each marks its image in the store (`approving` with the path and change, or
+//! `undoing`) inside the world lock, before the first file is touched, and settles the mark on
+//! every exit through a drop guard. Marks an earlier process or opening left are resolved once, by
+//! the first image command or review that runs, from what the file at the stored path holds, read
+//! with no assistant or store lock held.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use percent_encoding::percent_decode_str;
 use serde::Serialize;
@@ -33,16 +40,20 @@ use tauri::http::{Response, Uri};
 
 use super::proposals::RequestedImage;
 use super::store::{
-    self, ImageBytes, ImageFrame, ImageReference, NewImage, NotGenerated, SavedImage, Store,
+    self, HistoryChange, ImageBytes, ImageFrame, ImageMark, ImageReference, NewImage, NotGenerated,
+    SavedImage, Settling, Store,
 };
-use super::{AssistantState, Inner, Services, SharedStore, blocking, lock_store, store_of};
-use crate::error::AppError;
+use super::{
+    AssistantState, Inner, Services, SharedStore, blocking, change_id, conflict, internal,
+    lock_store, store_of,
+};
+use crate::error::{AppError, ErrorKind};
 use crate::history::Kind;
 use crate::providers::images::{
     self as provider, Failed, GENERATION_TIMEOUT, Generated, ImageFailure, Reference,
 };
 use crate::settings::{self, Abort, PreparedImageRequest};
-use crate::world::{self, ChangeId};
+use crate::world::{self, BatchUndone};
 
 /// The most images generated for one answer; its further requests are not generated.
 const PER_ANSWER: usize = 4;
@@ -146,6 +157,15 @@ pub struct ConversationImages {
     regenerations: Vec<Regeneration>,
 }
 
+/// What an approval wrote: the image's path as it is on disk, and whether history recorded the
+/// approval, so it can be undone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct ImageApproved {
+    path: String,
+    undo: bool,
+}
+
 /// What `assistant:image-changed` carries: an image of `conversation`, in the world opening
 /// `session`, changed its state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -241,12 +261,14 @@ impl AssistantState {
 /// An answer's image requests as it saves them, by how it ended: the first `PER_ANSWER` of an
 /// answer that `generates` (one that is complete or cut off) interrupted until they start, or not
 /// generated for lack of an image `provider`, and the rest over the limit; every request of any
-/// other answer not generated for `otherwise`.
+/// other answer not generated for `otherwise`. The first request of an answer to a regeneration
+/// message `revises` the image that message regenerates.
 pub(super) fn new_images(
     requested: &[RequestedImage],
     generates: bool,
     provider: bool,
     otherwise: NotGenerated,
+    revises: Option<i64>,
 ) -> Vec<NewImage> {
     requested
         .iter()
@@ -255,7 +277,7 @@ pub(super) fn new_images(
             name: image.name.clone(),
             frame: image.frame,
             prompt: image.prompt.clone(),
-            revises: None,
+            revises: revises.filter(|_| index == 0),
             reason: match (generates, index < PER_ANSWER, provider) {
                 (false, _, _) => otherwise,
                 (true, false, _) => NotGenerated::OverLimit,
@@ -283,14 +305,224 @@ fn current_store(inner: &Inner, session: u64) -> Option<SharedStore> {
         .map(|(_, store)| Arc::clone(store))
 }
 
-/// Refuses while AI is off; otherwise the open world's session and its store.
+/// Refuses while AI is off; otherwise the open world's session and its store, once the marks the
+/// store found when it opened are resolved.
 fn open_store<S: Services>(services: &S) -> Result<(u64, SharedStore), AppError> {
     if !services.settings().ai_on() {
         return Err(settings::ai_off());
     }
     let world = services.world().current()?;
     let store = store_of(&mut services.assistant().lock(), &world)?;
+    let marks = lock_store(&store).take_image_marks();
+    for mark in &marks {
+        resolve_mark(services, world.session, &store, mark);
+    }
     Ok((world.session, store))
+}
+
+/// Settles `mark` from what the file at its path holds in the opening `session`, read with no
+/// assistant or store lock held: an image being approved becomes approved when the file holds its
+/// bytes and pending otherwise, and one being undone stays approved when it does and becomes
+/// pending and undone otherwise. Only a file that is not found counts as absent; when the file
+/// cannot be read for another reason, the mark stays for the next opening.
+fn resolve_mark<S: Services>(services: &S, session: u64, store: &Mutex<Store>, mark: &ImageMark) {
+    let stored = lock_store(store).image(mark.image);
+    let Ok(stored) = stored else {
+        return;
+    };
+    let holds = match services.world().image_in(session, &mark.path) {
+        Ok(file) => stored.bytes.is_some_and(|bytes| bytes.bytes == file),
+        Err(error) if error.kind == ErrorKind::NotFound => false,
+        Err(_) => return,
+    };
+    settle(services, session, store, mark.image, holds);
+}
+
+/// Settles the marked `image` by whether its file holds its bytes (`written`), and sends the
+/// change when the mark was still there.
+fn settle<S: Services>(
+    services: &S,
+    session: u64,
+    store: &Mutex<Store>,
+    image: i64,
+    written: bool,
+) {
+    let conversation = {
+        let mut store = lock_store(store);
+        match store.settle_image(image, written) {
+            Ok(Settling::Settled) => store.image(image).ok().map(|stored| stored.conversation),
+            _ => None,
+        }
+    };
+    if let Some(conversation) = conversation {
+        services.assistant().image_changed(ImageChanged {
+            session,
+            conversation,
+        });
+    }
+}
+
+/// An image this command marked as being approved or undone, settled when dropped, with no lock
+/// held: as `written` says once the command knows whether the file holds the image, and otherwise,
+/// after a panic, from what the file holds.
+struct Marked<'a, S: Services> {
+    services: &'a S,
+    session: u64,
+    store: &'a Mutex<Store>,
+    /// The image with its approval's path, once the mark is made.
+    mark: Option<ImageMark>,
+    written: Option<bool>,
+}
+
+impl<S: Services> Drop for Marked<'_, S> {
+    fn drop(&mut self) {
+        let Some(mark) = self.mark.take() else {
+            return;
+        };
+        match self.written {
+            Some(written) => settle(self.services, self.session, self.store, mark.image, written),
+            None => resolve_mark(self.services, self.session, self.store, &mark),
+        }
+    }
+}
+
+const NOT_PENDING: &str = "The image is no longer pending.";
+const NOT_APPROVED: &str = "The image is no longer approved.";
+
+/// Writes the pending `image` of the open world's store, exactly its stored bytes, to the world's
+/// `images` folder as one change. The image is marked as being approved inside the world lock,
+/// before anything is written; an image that is no longer pending by then is `conflict`, and
+/// nothing is written.
+fn approve_image<S: Services>(services: &S, image: i64) -> Result<ImageApproved, AppError> {
+    let (session, store) = open_store(services)?;
+    let stored = lock_store(&store).image(image)?;
+    let (store::ImageState::Pending, Some(bytes)) = (stored.image.state, stored.bytes) else {
+        return Err(conflict(NOT_PENDING));
+    };
+    // Only a type a generation proved is stored, so the extension is one of three.
+    let (_, extension) = stored_type(&bytes.media_type).ok_or_else(internal)?;
+    #[cfg(test)]
+    services.assistant().pause(super::Step::ImageRead);
+
+    let mut marked = Marked {
+        services,
+        session,
+        store: &store,
+        mark: None,
+        written: None,
+    };
+    let mut refused = false;
+    let written = services.world().approve_image(
+        session,
+        &stored.image.name,
+        &bytes.bytes,
+        extension,
+        |change, path| {
+            let change = change.map(|change| HistoryChange {
+                id: change.id,
+                started: change.started,
+            });
+            // A reject or a deleted conversation since the read stops the approval here.
+            match lock_store(&store).begin_approving(image, path, change) {
+                Ok(()) => {
+                    marked.mark = Some(ImageMark {
+                        image,
+                        path: path.to_owned(),
+                    });
+                    true
+                }
+                Err(_) => {
+                    refused = true;
+                    false
+                }
+            }
+        },
+    );
+    match written {
+        Ok(written) => {
+            marked.written = Some(true);
+            Ok(ImageApproved {
+                path: written.path,
+                undo: written.change.is_some(),
+            })
+        }
+        Err(_) if refused => Err(conflict(NOT_PENDING)),
+        // The write removed what it created, so the image is pending again.
+        Err(error) => {
+            marked.written = Some(false);
+            Err(error)
+        }
+    }
+}
+
+/// Undoes the approval of the approved `image` of the open world's store, while history holds its
+/// change (`not_found` otherwise). The image is marked as being undone inside the world lock,
+/// before anything is written. When its file changed or is gone, nothing is written, the image
+/// stays approved, and the refusal is `conflict` naming the file.
+fn undo_image<S: Services>(services: &S, image: i64) -> Result<(), AppError> {
+    let (session, store) = open_store(services)?;
+    let world = services.world();
+    let stored = lock_store(&store).image(image)?;
+    let (store::ImageState::Approved, Some(path)) = (stored.image.state, stored.image.path) else {
+        return Err(conflict(NOT_APPROVED));
+    };
+    let change = match stored.image.change.map(change_id) {
+        Some(change) if world.holds_change(session, change, Kind::ApprovedImage)? => change,
+        _ => {
+            return Err(AppError::new(
+                ErrorKind::NotFound,
+                "This approval can no longer be undone.",
+            ));
+        }
+    };
+
+    let mut marked = Marked {
+        services,
+        session,
+        store: &store,
+        mark: None,
+        written: None,
+    };
+    let mut refused = false;
+    let undone = world.undo_image(session, change, |_, _| {
+        match lock_store(&store).begin_undoing(image) {
+            Ok(()) => {
+                marked.mark = Some(ImageMark {
+                    image,
+                    path: path.clone(),
+                });
+                true
+            }
+            Err(_) => {
+                refused = true;
+                false
+            }
+        }
+    });
+    match undone {
+        Ok(BatchUndone { failure: None, .. }) => {
+            marked.written = Some(false);
+            Ok(())
+        }
+        // Partly undone: the mark is settled from what the file holds.
+        Ok(BatchUndone {
+            failure: Some(error),
+            ..
+        }) => Err(error),
+        Err(_) if refused => Err(conflict(NOT_APPROVED)),
+        // Nothing was written, so the image stays approved.
+        Err(error) => {
+            marked.written = Some(true);
+            Err(match error.kind {
+                // The file or its folder changed, went, or now lies behind a link or another
+                // letter case: whichever entry the check stopped at, it is the image that changed.
+                ErrorKind::Conflict | ErrorKind::InvalidPath => conflict(format!(
+                    "The image “{path}” changed or is gone, so nothing was undone."
+                )),
+                _ => error,
+            })
+        }
+    }
 }
 
 /// Starts each of `images`, saved in the opening `session`, with the image provider `prepared`
@@ -661,14 +893,9 @@ fn review_image(
         store::ImageState::Rejected => ImageState::Rejected,
     };
     let undo = match (state, image.change) {
-        (ImageState::Approved, Some(change)) => world.holds_change(
-            session,
-            ChangeId {
-                id: change.id,
-                started: change.started,
-            },
-            Kind::ApprovedImage,
-        )?,
+        (ImageState::Approved, Some(change)) => {
+            world.holds_change(session, change_id(change), Kind::ApprovedImage)?
+        }
         _ => false,
     };
     let not_generated = image.reason.filter(|_| state == ImageState::NotGenerated);
@@ -719,6 +946,19 @@ pub(crate) async fn reject<S: Services>(services: S, image: i64) -> Result<(), A
     blocking(&services, move |services| reject_image(services, image)).await
 }
 
+/// Writes a pending image to the world's `images` folder as one change.
+pub(crate) async fn approve<S: Services>(
+    services: S,
+    image: i64,
+) -> Result<ImageApproved, AppError> {
+    blocking(&services, move |services| approve_image(services, image)).await
+}
+
+/// Undoes an image's approval.
+pub(crate) async fn undo<S: Services>(services: S, image: i64) -> Result<(), AppError> {
+    blocking(&services, move |services| undo_image(services, image)).await
+}
+
 /// The image scheme's path of `uri`, decoded exactly once, as the world's handler decodes it.
 fn decoded_path(uri: &Uri) -> Option<Cow<'_, str>> {
     percent_decode_str(uri.path().strip_prefix('/')?)
@@ -762,13 +1002,19 @@ fn stored_bytes<S: Services>(services: &S, uri: &Uri) -> Option<(Vec<u8>, &'stat
     let store = current_store(&services.assistant().lock(), session)?;
     let bytes = lock_store(&store).image(image).ok()?.bytes?;
     // Only a type the generation proved is ever stored; anything else is refused all the same.
-    let content_type = match bytes.media_type.as_str() {
-        "image/png" => "image/png",
-        "image/jpeg" => "image/jpeg",
-        "image/webp" => "image/webp",
-        _ => return None,
-    };
+    let (content_type, _) = stored_type(&bytes.media_type)?;
     Some((bytes.bytes, content_type))
+}
+
+/// The content type and file extension of a stored image's `media_type`: one of the three types a
+/// generation can prove, and none for anything else.
+fn stored_type(media_type: &str) -> Option<(&'static str, &'static str)> {
+    match media_type {
+        "image/png" => Some(("image/png", "png")),
+        "image/jpeg" => Some(("image/jpeg", "jpg")),
+        "image/webp" => Some(("image/webp", "webp")),
+        _ => None,
+    }
 }
 
 /// `text` as a number, when it is only decimal digits.

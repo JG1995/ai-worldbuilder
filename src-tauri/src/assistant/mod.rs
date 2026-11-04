@@ -50,7 +50,8 @@ use proposals::{Parsed, Piece, ProposalKind, Splitter};
 use request::Request;
 use store::{
     Answer, AnswerProposals, AnswerState, Conversation, Conversations, HistoryChange, NotGenerated,
-    ProposalContent, ProposalState, SavedProposal, SetPage, SetState, Store, UnfinishedSet,
+    ProposalContent, ProposalState, Regenerated, SavedProposal, SetPage, SetState, Store,
+    UnfinishedSet,
 };
 
 /// A page that an answer's request carried.
@@ -319,6 +320,8 @@ pub(crate) struct Outgoing {
     active: Option<String>,
     /// Answer the conversation's last message again, instead of adding `text`.
     retry: bool,
+    /// The image of the conversation that the new message regenerates, if it is a regeneration.
+    regenerates: Option<i64>,
 }
 
 /// Ends the running answer when dropped, however `send` ends: it clears the entry and wakes
@@ -344,6 +347,8 @@ struct Begun<S: Services> {
     active: Option<String>,
     /// The message to answer: the new one, or the one retried.
     text: String,
+    /// The image that message regenerates, when it is a regeneration message.
+    regenerated: Option<Regenerated>,
     earlier: Vec<store::Message>,
 }
 
@@ -354,6 +359,10 @@ struct Started {
     guard: RequestGuard,
     carried: Carried,
 }
+
+/// What recording a message settled: the conversation, the message's text, the image it
+/// regenerates, and the conversation's earlier messages.
+type RecordedMessage = (i64, String, Option<Regenerated>, Vec<store::Message>);
 
 /// What a request carried, which its answer is saved with.
 struct Carried {
@@ -411,14 +420,15 @@ impl AssistantState {
     }
 
     /// Takes the store of `world`'s session into the running entry and records the message to
-    /// answer, before any request leaves. Returns the conversation, the message's text and the
+    /// answer, before any request leaves. Returns the conversation, the message's text, the image
+    /// it regenerates, read from the stored message so a retry regenerates it too, and the
     /// conversation's earlier messages.
     fn record(
         &self,
         run: u64,
         world: &CurrentWorld,
         outgoing: Outgoing,
-    ) -> Result<(i64, String, Vec<store::Message>), AppError> {
+    ) -> Result<RecordedMessage, AppError> {
         let mut inner = self.lock();
         let shared = store_of(&mut inner, world)?;
         if let Some(running) = running(&mut inner, run) {
@@ -445,18 +455,23 @@ impl AssistantState {
                 ));
             }
             (false, conversation) => {
-                let conversation =
-                    store.add_user_message(conversation, &outgoing.text, None, now())?;
+                let conversation = store.add_user_message(
+                    conversation,
+                    &outgoing.text,
+                    outgoing.regenerates,
+                    now(),
+                )?;
                 (conversation, outgoing.text)
             }
         };
         if let Some(running) = running(&mut inner, run) {
             running.conversation = Some(conversation);
         }
+        let regenerated = store.last_regeneration(conversation)?;
         let mut earlier = store.messages(conversation)?;
         // The last one is the message being answered.
         earlier.pop();
-        Ok((conversation, text, earlier))
+        Ok((conversation, text, regenerated, earlier))
     }
 
     /// Adds `delta` to the running answer's text, and returns the events it gives: its prose, and
@@ -488,7 +503,8 @@ impl AssistantState {
 
     /// Saves how the request of the running answer `run` ended, with `parsed`, read from its text
     /// `raw`, in its session's store, and returns its end and the images to generate now, which
-    /// it has only when an image `provider` is saved.
+    /// it has only when an image `provider` is saved. Its first image `revises` the image its
+    /// message regenerates.
     #[expect(clippy::too_many_arguments, reason = "the steps of one answer's end")]
     fn finish(
         &self,
@@ -499,6 +515,7 @@ impl AssistantState {
         raw: &str,
         parsed: Parsed,
         provider: bool,
+        revises: Option<i64>,
     ) -> Result<(AnswerEnd, Vec<i64>), AppError> {
         let mut inner = self.lock();
         let running = running(&mut inner, run).ok_or_else(internal)?;
@@ -516,7 +533,8 @@ impl AssistantState {
             Ok(StreamEnd::Failed { .. }) => NotGenerated::AnswerFailed,
             _ => NotGenerated::Stopped,
         };
-        let new_images = images::new_images(&parsed.images, generates, provider, otherwise);
+        let new_images =
+            images::new_images(&parsed.images, generates, provider, otherwise, revises);
         let mut answer = None;
         let mut started = Vec::new();
         if let (Some(state), Some(store)) = (state, &running.store) {
@@ -656,6 +674,8 @@ enum Step {
     AcceptWritten,
     /// An undo's change was written back, and its set is not finished yet.
     UndoWritten,
+    /// An approval read its image's bytes and has marked and written nothing.
+    ImageRead,
 }
 
 /// Answers `outgoing`, streaming its text to `on_event`. Every way the answer ends after the user
@@ -674,11 +694,19 @@ pub(crate) async fn send<S: Services>(
         request: prepared,
         active,
         text,
+        regenerated,
         earlier,
     } = blocking(&services, move |services| begin(services, outgoing)).await?;
+    let revises = regenerated.as_ref().map(|regenerated| regenerated.image);
     let request = blocking(&services, move |services| {
         let context = context::choose(services.world(), session, active.as_deref(), &text);
-        Ok(request::build(&world_name, &context, &earlier, &text))
+        Ok(request::build(
+            &world_name,
+            &context,
+            &earlier,
+            &text,
+            regenerated.as_ref(),
+        ))
     })
     .await?;
     let read = prepared.clone();
@@ -746,6 +774,7 @@ pub(crate) async fn send<S: Services>(
             &raw,
             parsed,
             provider,
+            revises,
         )?;
         // Before the answer's entry ends, so a stop that waits for it sees these generations.
         if let Some(prepared) = image_request.filter(|_| !started.is_empty()) {
@@ -777,7 +806,8 @@ fn begin<S: Services>(services: &S, outgoing: Outgoing) -> Result<Begun<S>, AppE
     }
     let request = services.settings().prepare_request()?;
     let active = outgoing.active.clone();
-    let (conversation, text, earlier) = services.assistant().record(run.id, &world, outgoing)?;
+    let (conversation, text, regenerated, earlier) =
+        services.assistant().record(run.id, &world, outgoing)?;
     Ok(Begun {
         run,
         session: world.session,
@@ -786,6 +816,7 @@ fn begin<S: Services>(services: &S, outgoing: Outgoing) -> Result<Begun<S>, AppE
         request,
         active,
         text,
+        regenerated,
         earlier,
     })
 }
@@ -1467,7 +1498,8 @@ fn now() -> i64 {
 }
 
 /// Answers a message about the open world with the pages of the world that matter to it as
-/// context, streaming the answer's events to `on_event`.
+/// context, streaming the answer's events to `on_event`. A message that `regenerates` an image of
+/// the conversation is sent with that image's name and prompt, and asks for one revised image.
 #[tauri::command]
 pub async fn assistant_send(
     app: AppHandle,
@@ -1475,6 +1507,7 @@ pub async fn assistant_send(
     text: String,
     active: Option<String>,
     retry: bool,
+    regenerates: Option<i64>,
     on_event: Channel<AnswerEvent>,
 ) -> Result<AnswerEnd, AppError> {
     let outgoing = Outgoing {
@@ -1482,6 +1515,7 @@ pub async fn assistant_send(
         text,
         active,
         retry,
+        regenerates,
     };
     send(app, outgoing, on_event, providers::READ_TIMEOUT).await
 }
@@ -1576,6 +1610,22 @@ pub async fn assistant_image_cancel(app: AppHandle, image: i64) -> Result<(), Ap
 #[tauri::command]
 pub async fn assistant_image_reject(app: AppHandle, image: i64) -> Result<(), AppError> {
     images::reject(app, image).await
+}
+
+/// Writes a pending image's bytes to the world's `images` folder as one change, and returns its
+/// path and whether the approval can be undone.
+#[tauri::command]
+pub async fn assistant_image_approve(
+    app: AppHandle,
+    image: i64,
+) -> Result<images::ImageApproved, AppError> {
+    images::approve(app, image).await
+}
+
+/// Undoes an image's approval while its file holds exactly what the approval wrote.
+#[tauri::command]
+pub async fn assistant_image_undo(app: AppHandle, image: i64) -> Result<(), AppError> {
+    images::undo(app, image).await
 }
 
 #[cfg(test)]
@@ -1776,6 +1826,7 @@ mod tests {
                 text: text.to_owned(),
                 active: active.map(str::to_owned),
                 retry,
+                regenerates: None,
             };
             let services = self.services.clone();
             let handle = thread::spawn(move || block_on(send(services, outgoing, channel, WAIT)));
@@ -3771,7 +3822,7 @@ mod tests {
         }
 
         /// Adds a regeneration message of `earlier` and an answer whose one image revises it, as
-        /// package image-approval will, and returns that image.
+        /// sending a regeneration does, and returns that image.
         fn add_regeneration(&self, conversation: i64, earlier: i64) -> i64 {
             let store = self.current_store();
             let mut store = lock_store(&store);
@@ -4193,15 +4244,333 @@ mod tests {
                 fixture.generate(image),
                 fixture.cancel(image),
                 fixture.reject_image(image),
+                fixture.approve(image).map(drop),
+                fixture.undo_image(image),
             ]
             .map(|result| result.unwrap_err().kind)
         };
 
         fixture.settings().set_ai(false).unwrap();
-        assert_eq!(refusals(&fixture), [ErrorKind::AiOff; 4]);
+        assert_eq!(refusals(&fixture), [ErrorKind::AiOff; 6]);
         fixture.settings().set_ai(true).unwrap();
         fixture.services.world().close();
-        assert_eq!(refusals(&fixture), [ErrorKind::NoWorld; 4]);
+        assert_eq!(refusals(&fixture), [ErrorKind::NoWorld; 6]);
+    }
+
+    impl Fixture {
+        fn approve(&self, image: i64) -> Result<Value, AppError> {
+            block_on(images::approve(self.services.clone(), image))
+                .map(|approved| serde_json::to_value(approved).unwrap())
+        }
+
+        fn undo_image(&self, image: i64) -> Result<(), AppError> {
+            block_on(images::undo(self.services.clone(), image))
+        }
+
+        /// Sends `text` in `conversation` as a message that regenerates `image`.
+        fn regenerate(
+            &self,
+            conversation: Option<i64>,
+            text: &str,
+            image: i64,
+        ) -> Result<AnswerEnd, AppError> {
+            let outgoing = Outgoing {
+                conversation,
+                text: text.to_owned(),
+                active: None,
+                retry: false,
+                regenerates: Some(image),
+            };
+            block_on(send(
+                self.services.clone(),
+                outgoing,
+                Channel::new(|_| Ok(())),
+                WAIT,
+            ))
+        }
+
+        /// An image of one answer, generated and approved.
+        fn approve_an_image(&self) -> (i64, i64) {
+            let (conversation, image) = self.ask_for_an_image();
+            self.wait_for(image, store::ImageState::Pending);
+            self.approve(image).unwrap();
+            (conversation, image)
+        }
+
+        /// The review of `image`, the first of `conversation`'s first answer with images.
+        fn image_review(&self, conversation: i64) -> Value {
+            self.images(conversation).unwrap()["answers"][0]["images"][0].clone()
+        }
+    }
+
+    const GULL: &str = "images/Gull 0.png";
+
+    #[test]
+    fn an_approval_writes_the_stored_bytes_as_one_change_and_undoing_it_lets_it_be_approved_again()
+    {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        let (conversation, image) = fixture.ask_for_an_image();
+        fixture.wait_for(image, store::ImageState::Pending);
+        let page = (PAGE.to_owned(), SALTMERE.as_bytes().to_vec());
+
+        let approved = fixture.approve(image).unwrap();
+
+        assert_eq!(approved, json!({ "path": GULL, "undo": true }));
+        assert_eq!(fixture.files(), [page.clone(), (GULL.to_owned(), png())]);
+        let approval = (
+            "approved_image".to_owned(),
+            false,
+            vec!["images".to_owned(), GULL.to_owned()],
+        );
+        assert_eq!(fixture.changes(), std::slice::from_ref(&approval));
+        let review = fixture.image_review(conversation);
+        assert_eq!(
+            (&review["state"], &review["path"], &review["undo"]),
+            (&json!("approved"), &json!(GULL), &json!(true))
+        );
+        assert_eq!(
+            fixture.approve(image).unwrap_err().kind,
+            ErrorKind::Conflict
+        );
+
+        fixture.undo_image(image).unwrap();
+
+        assert_eq!(fixture.files(), [page]);
+        assert_eq!(
+            fixture.changes(),
+            [
+                approval,
+                (
+                    "undo".to_owned(),
+                    false,
+                    vec!["images".to_owned(), GULL.to_owned()]
+                )
+            ]
+        );
+        let review = fixture.image_review(conversation);
+        assert_eq!(
+            (&review["state"], &review["undone"], &review["path"]),
+            (&json!("pending"), &json!(true), &Value::Null)
+        );
+        assert_eq!(fixture.approve(image).unwrap()["path"], GULL);
+
+        // History set aside: the approval stays, but it can no longer be undone.
+        let history = history_testing::file(fixture.app_data.path(), fixture.world.path());
+        let connection = rusqlite::Connection::open(history).unwrap();
+        connection.pragma_update(None, "user_version", 99).unwrap();
+        drop(connection);
+        fixture.reopen_world();
+        assert_eq!(fixture.image_review(conversation)["undo"], false);
+        assert_eq!(
+            fixture.undo_image(image).unwrap_err().kind,
+            ErrorKind::NotFound
+        );
+        assert_eq!(fixture.state_of(image).0, store::ImageState::Approved);
+    }
+
+    #[test]
+    fn an_approval_writes_nothing_once_the_image_was_rejected_or_when_images_is_a_file() {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        let (_, image) = fixture.ask_for_an_image();
+        fixture.wait_for(image, store::ImageState::Pending);
+        let files = fixture.files();
+        let (reached, release) = fixture.pause_at(Step::ImageRead);
+        let approving = fixture.in_thread(move |services| images::approve(services, image));
+        reached.recv_timeout(WAIT).unwrap();
+
+        fixture.reject_image(image).unwrap();
+
+        release.send(()).unwrap();
+        let refused = approving.join().unwrap().unwrap_err();
+        assert_eq!(refused.kind, ErrorKind::Conflict);
+        assert_eq!(fixture.files(), files);
+        assert_eq!(fixture.changes(), []);
+        assert_eq!(fixture.state_of(image).0, store::ImageState::Rejected);
+
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        let (_, image) = fixture.ask_for_an_image();
+        fixture.wait_for(image, store::ImageState::Pending);
+        fs::write(fixture.world.path().join("images"), "not a folder").unwrap();
+
+        let refused = fixture.approve(image).unwrap_err();
+
+        assert_eq!(refused.kind, ErrorKind::InvalidPath);
+        assert_eq!(
+            refused.message,
+            "Something that is not a folder is named images at the world's top level."
+        );
+        assert_eq!(fixture.state_of(image).0, store::ImageState::Pending);
+        assert_eq!(fixture.saved_image(image).image.path, None);
+        assert_eq!(fixture.changes(), []);
+    }
+
+    #[test]
+    fn an_undo_after_the_image_file_or_its_folder_changed_writes_nothing_and_names_the_image() {
+        let images = ImageServer::answering();
+        let mut cases = vec!["changed", "deleted", "folder deleted"];
+        if cfg!(unix) {
+            cases.push("behind a link");
+        }
+        for case in cases {
+            let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+            let (conversation, image) = fixture.approve_an_image();
+            let file = fixture.world.path().join(GULL);
+            match case {
+                "changed" => fs::write(&file, b"edited").unwrap(),
+                "deleted" => fs::remove_file(&file).unwrap(),
+                "folder deleted" => {
+                    fs::remove_dir_all(fixture.world.path().join("images")).unwrap()
+                }
+                _ => {
+                    // The same bytes, read through a link, are not the file the approval wrote.
+                    let elsewhere = fixture.app_data.path().join("gull.png");
+                    fs::rename(&file, &elsewhere).unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+                }
+            }
+            let files = fixture.files();
+
+            let refused = fixture.undo_image(image).unwrap_err();
+
+            assert_eq!(refused.kind, ErrorKind::Conflict, "{case}");
+            assert_eq!(
+                refused.message,
+                format!("The image “{GULL}” changed or is gone, so nothing was undone."),
+                "{case}"
+            );
+            assert_eq!(fixture.files(), files, "{case}");
+            assert_eq!(fixture.changes().len(), 1, "{case}");
+            let review = fixture.image_review(conversation);
+            assert_eq!(
+                (&review["state"], &review["undo"]),
+                (&json!("approved"), &json!(true)),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_a_stop_mid_approval_or_undo_the_image_is_resolved_from_its_file_once() {
+        let images = ImageServer::answering();
+        // The mark left, whether the file holds the image, and what the image becomes.
+        let cases = [
+            ("approving", true, (store::ImageState::Approved, false)),
+            ("approving", false, (store::ImageState::Pending, false)),
+            ("undoing", true, (store::ImageState::Approved, false)),
+            ("undoing", false, (store::ImageState::Pending, true)),
+        ];
+        for (mark, holds, (state, undone)) in cases {
+            let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+            let (conversation, image) = fixture.approve_an_image();
+            fixture
+                .store_file()
+                .execute("UPDATE images SET state = ?1", [mark])
+                .unwrap();
+            if !holds {
+                fs::remove_file(fixture.world.path().join(GULL)).unwrap();
+            }
+            fixture.reopen_world();
+
+            fixture.images(conversation).unwrap();
+
+            let saved = fixture.saved_image(image).image;
+            assert_eq!(
+                (saved.state, saved.undone),
+                (state, undone),
+                "{mark} {holds}"
+            );
+            assert_eq!(saved.path.is_some(), holds, "{mark} {holds}");
+        }
+
+        // A file that cannot be read leaves the mark for the next opening.
+        #[cfg(unix)]
+        {
+            let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+            let (conversation, image) = fixture.approve_an_image();
+            let file = fixture.world.path().join(GULL);
+            let elsewhere = fixture.app_data.path().join("gull.png");
+            fs::rename(&file, &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+            fixture
+                .store_file()
+                .execute("UPDATE images SET state = 'approving'", [])
+                .unwrap();
+            fixture.reopen_world();
+
+            fixture.images(conversation).unwrap();
+
+            assert_eq!(fixture.state_of(image).0, store::ImageState::Approving);
+            fs::remove_file(&file).unwrap();
+            fs::rename(&elsewhere, &file).unwrap();
+            fixture.reopen_world();
+            fixture.images(conversation).unwrap();
+            assert_eq!(fixture.state_of(image).0, store::ImageState::Approved);
+        }
+    }
+
+    #[test]
+    fn a_regeneration_asks_for_one_revised_image_and_its_retry_asks_the_same() {
+        let images = ImageServer::answering();
+        let revised = "<image name=\"Gull older\">\nAn ink drawing of an old gull.\n</image>\n";
+        let text = Server::start({
+            let first = answer(
+                "200 OK",
+                &[("Content-Type", "text/event-stream")],
+                format!("{}data: [DONE]\n\n", delta(&requesting(1))).as_bytes(),
+            );
+            let failed = json_answer("500 Internal Server Error", "{}");
+            let again = answer(
+                "200 OK",
+                &[("Content-Type", "text/event-stream")],
+                format!("{}data: [DONE]\n\n", delta(revised)).as_bytes(),
+            );
+            let turn = std::sync::atomic::AtomicUsize::new(0);
+            move |_| {
+                let replies = [&first, &failed, &again];
+                let next = turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(replies[next.min(2)].clone())
+            }
+        });
+        let fixture = Fixture::imaging(text, &images.server);
+        let (conversation, earlier) = fixture.ask_for_an_image();
+        fixture.wait_for(earlier, store::ImageState::Pending);
+
+        let failed = fixture.regenerate(Some(conversation), "Older", earlier);
+        assert!(matches!(failed, Ok(AnswerEnd::Failed { answer: None, .. })));
+        fixture.retry(conversation).unwrap();
+
+        let bodies = fixture.bodies();
+        let asked = |body: &Value| body["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(asked(&bodies[1]), asked(&bodies[2]));
+        let content = asked(&bodies[2])["content"].as_str().unwrap().to_owned();
+        for part in [
+            "\"Gull 0\"",
+            "An ink drawing of gull 0.",
+            "exactly one image",
+            "What to change: Older",
+        ] {
+            assert!(content.contains(part), "{part} in {content}");
+        }
+        let saved = fixture.saved_images(conversation);
+        assert_eq!(
+            (saved.len(), &saved[1].name, saved[1].revises),
+            (2, &"Gull older".to_owned(), Some(earlier))
+        );
+
+        let other = conversation_of(&fixture.send(None, "Elsewhere", None).0.unwrap());
+        for conversation in [Some(other), None] {
+            assert_eq!(
+                fixture
+                    .regenerate(conversation, "Older", earlier)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::NotFound
+            );
+        }
+        assert_eq!(fixture.stored(other).len(), 2);
     }
 
     fn uri(text: &str) -> tauri::http::Uri {
@@ -4303,6 +4672,7 @@ mod tests {
             &[],
             "Write a new page for Kesh Tor, a hill fort near Saltmere, and change the sentence on \
              the Saltmere page to say that it is a fishing town.",
+            None,
         );
         let mut text = String::new();
 
