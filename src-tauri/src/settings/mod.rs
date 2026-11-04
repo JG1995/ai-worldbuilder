@@ -1,7 +1,8 @@
-//! The `settings` area: the application's settings, the AI switch, the saved text provider and
-//! the saved image provider, and the commands that read and change them. The providers' keys go
-//! through `secrets`, each in its own slot; the text provider's base URL's rules come from
-//! `providers`, and the image provider always goes to `providers::images::OPENROUTER`.
+//! The `settings` area: the application's settings, the AI switch, the theme, the saved text
+//! provider and the saved image provider, and the commands that read and change them. The
+//! providers' keys go through `secrets`, each in its own slot; the text provider's base URL's
+//! rules come from `providers`, and the image provider always goes to
+//! `providers::images::OPENROUTER`.
 //!
 //! The commands run one at a time under the settings lock, held for the whole operation, keychain
 //! calls included. Each runs on Tauri's blocking pool, because a keychain may wait for the user to
@@ -25,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager};
 
@@ -46,6 +47,19 @@ pub struct Settings {
     text_provider: Option<TextProvider>,
     /// The saved image provider, if any.
     image_provider: Option<ImageProvider>,
+    /// The chosen theme.
+    theme: Theme,
+}
+
+/// The application's look. Saturn Seal unless another is saved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "kebab-case")]
+pub enum Theme {
+    #[default]
+    SaturnSeal,
+    Bound,
+    Lamplight,
 }
 
 /// The saved text provider.
@@ -309,6 +323,17 @@ impl SettingsState {
         }
         let next = Saved {
             ai: on,
+            ..inner.saved.clone()
+        };
+        inner.save(next)
+    }
+
+    /// Saves `theme`. Unlike the other changes, it moves no request's generation and touches no
+    /// key: the theme is not an AI setting.
+    pub(crate) fn set_theme(&self, theme: Theme) -> Result<Settings, AppError> {
+        let mut inner = self.lock();
+        let next = Saved {
+            theme,
             ..inner.saved.clone()
         };
         inner.save(next)
@@ -766,6 +791,7 @@ fn to_settings(saved: &Saved) -> Settings {
             key: image.key,
             host: images::HOST.to_owned(),
         }),
+        theme: saved.theme,
     }
 }
 
@@ -865,6 +891,11 @@ pub async fn settings_get(app: AppHandle) -> Result<Settings, AppError> {
 #[tauri::command]
 pub async fn settings_ai_set(app: AppHandle, on: bool) -> Result<Settings, AppError> {
     blocking(app, move |state| state.set_ai(on)).await
+}
+
+#[tauri::command]
+pub async fn settings_theme_set(app: AppHandle, theme: Theme) -> Result<Settings, AppError> {
+    blocking(app, move |state| state.set_theme(theme)).await
 }
 
 #[tauri::command]
@@ -1002,7 +1033,12 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(fixture.state.get()).unwrap(),
-            json!({ "ai": true, "textProvider": null, "imageProvider": null })
+            json!({
+                "ai": true,
+                "textProvider": null,
+                "imageProvider": null,
+                "theme": "saturn-seal",
+            })
         );
     }
 
@@ -1043,6 +1079,44 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Io);
         assert_eq!(error.message, "The settings cannot be saved.");
         assert!(state.get().ai);
+
+        let error = state.set_theme(Theme::Bound).unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Io);
+        assert_eq!(state.get().theme, Theme::SaturnSeal);
+    }
+
+    #[test]
+    fn the_chosen_theme_is_answered_and_survives_a_restart() {
+        let fixture = Fixture::new();
+
+        let settings = fixture.state.set_theme(Theme::Lamplight).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["theme"],
+            "lamplight"
+        );
+        assert_eq!(fixture.state.get().theme, Theme::Lamplight);
+        let reloaded = SettingsState::with_secrets(
+            Some(fixture.folder.path()),
+            fixture.keychain.secrets(Some(fixture.folder.path())),
+        );
+        assert_eq!(reloaded.get().theme, Theme::Lamplight);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_theme_that_cannot_be_saved_keeps_the_previous_theme() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        fixture.state.set_theme(Theme::Bound).unwrap();
+        fs::set_permissions(fixture.folder.path(), fs::Permissions::from_mode(0o500)).unwrap();
+
+        let error = fixture.state.set_theme(Theme::Lamplight).unwrap_err();
+
+        fs::set_permissions(fixture.folder.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(error.kind, ErrorKind::Io);
+        assert_eq!(fixture.state.get().theme, Theme::Bound);
     }
 
     #[test]
@@ -1093,6 +1167,7 @@ mod tests {
                         "host": "openrouter.ai",
                     },
                     "imageProvider": null,
+                    "theme": "saturn-seal",
                 },
             })
         );
@@ -1552,6 +1627,58 @@ mod tests {
         fixture.state.image_base = format!("http://{}/api/v1", server.address());
         fixture.save_image(Some(IMAGE_KEY)).unwrap();
         fixture
+    }
+
+    #[test]
+    fn a_theme_change_keeps_the_ai_switch_both_providers_and_their_keys() {
+        let fixture = Fixture::new();
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+        fixture.save_image(Some(IMAGE_KEY)).unwrap();
+        fixture.state.set_ai(false).unwrap();
+        let before = serde_json::to_value(fixture.state.get()).unwrap();
+
+        let settings = fixture.state.set_theme(Theme::Bound).unwrap();
+
+        let mut after = serde_json::to_value(&settings).unwrap();
+        assert_eq!(after["theme"], "bound");
+        after["theme"] = before["theme"].clone();
+        assert_eq!(after, before);
+        assert_eq!(fixture.keychain.password().unwrap(), KEY);
+        assert_eq!(
+            fixture.keychain.password_of(KeySlot::Image).unwrap(),
+            IMAGE_KEY
+        );
+    }
+
+    #[test]
+    fn a_theme_change_leaves_running_and_prepared_requests_alone() {
+        let fixture = Fixture::new();
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+        fixture.save_image(Some(IMAGE_KEY)).unwrap();
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let running = start_counted(
+            &fixture.state,
+            &fixture.state.prepare_request().unwrap(),
+            &aborted,
+        )
+        .unwrap();
+        let text = fixture.state.prepare_request().unwrap();
+        let image = fixture.state.prepare_image_request().unwrap();
+
+        fixture.state.set_theme(Theme::Lamplight).unwrap();
+
+        assert_eq!(aborted.load(Ordering::SeqCst), 0);
+        assert!(
+            start_counted(&fixture.state, &text, &aborted)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            start_counted(&fixture.state, &image, &aborted)
+                .unwrap()
+                .is_some()
+        );
+        drop(running);
     }
 
     #[test]

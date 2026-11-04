@@ -72,6 +72,7 @@ export type { TextLine } from "./generated/TextLine";
 export type { TextMatch } from "./generated/TextMatch";
 export type { TextMatches } from "./generated/TextMatches";
 export type { TextProvider } from "./generated/TextProvider";
+export type { Theme } from "./generated/Theme";
 export type { TreeEntry } from "./generated/TreeEntry";
 export type { Undone } from "./generated/Undone";
 export type { VersionKind } from "./generated/VersionKind";

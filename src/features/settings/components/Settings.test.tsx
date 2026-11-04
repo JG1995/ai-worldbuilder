@@ -31,8 +31,14 @@ const withKey: SavedSettings = {
   ai: true,
   textProvider: provider("keychain"),
   imageProvider: null,
+  theme: "saturn-seal",
 };
-const empty: SavedSettings = { ai: true, textProvider: null, imageProvider: null };
+const empty: SavedSettings = {
+  ai: true,
+  textProvider: null,
+  imageProvider: null,
+  theme: "saturn-seal",
+};
 
 const IMAGE_MODEL = "google/gemini-2.5-flash-image";
 const imageProvider = (key: ImageProvider["key"]): ImageProvider => ({
@@ -200,9 +206,7 @@ describe("Settings", () => {
   it("asks before storing the key in a file, and Store in a file stores it there", async () => {
     const { calls } = renderSettings(empty, {
       provider_save: ({ keyFile }) =>
-        keyFile
-          ? saved({ ai: true, textProvider: provider("file"), imageProvider: null })
-          : { state: "no_keychain" },
+        keyFile ? saved({ ...empty, textProvider: provider("file") }) : { state: "no_keychain" },
     });
     await dialog();
     type("Base URL", BASE_URL);
@@ -299,6 +303,7 @@ describe("Settings", () => {
         ai: true,
         textProvider: provider("none"),
         imageProvider: null,
+        theme: "saturn-seal",
       }),
     });
     await dialog();
