@@ -1,3 +1,5 @@
+import boundDark from "@/assets/brand/bound-wordmark-dark.svg";
+import boundLight from "@/assets/brand/bound-wordmark-light.svg";
 import lamplightDark from "@/assets/brand/lamplight-wordmark-dark.svg";
 import lamplightLight from "@/assets/brand/lamplight-wordmark-light.svg";
 import saturnSealDark from "@/assets/brand/lockup-stacked-dark.svg";
@@ -5,8 +7,10 @@ import saturnSealLight from "@/assets/brand/lockup-stacked-light.svg";
 
 // Saturn Seal's stacked lockup is drawn 120px tall with one wordmark cap height of clear space on
 // every side; the kit master's viewBox is 442.487 units tall and its cap height is 100 units.
-// Lamplight's wordmark files include their clear space, so they are drawn 100px tall as they are.
+// Bound's and Lamplight's wordmark files include their clear space, so they are drawn 100px tall
+// as they are.
 const saturnSeal = { height: 120, padding: (120 * 100) / 442.487 };
+const bound = { height: 100 };
 const lamplight = { height: 100 };
 
 /**
@@ -31,6 +35,8 @@ export function WelcomeLogo() {
         className="box-content"
         style={saturnSeal}
       />
+      <img src={boundDark} alt="Grimoire.md" data-welcome-logo="bound-dark" style={bound} />
+      <img src={boundLight} alt="Grimoire.md" data-welcome-logo="bound-light" style={bound} />
       <img
         src={lamplightDark}
         alt="Grimoire.md"

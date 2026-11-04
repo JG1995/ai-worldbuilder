@@ -102,6 +102,14 @@ describe("bundled licence texts", () => {
       "SIL Open Font License, Version 1.1",
       "Copyright 2019 The Darker Grotesque Project Authors",
     ],
+    "grenze-OFL.txt": [
+      "SIL Open Font License, Version 1.1",
+      "Copyright 2019, The Grenze Project Authors",
+    ],
+    "grenze-gotisch-OFL.txt": [
+      "SIL Open Font License, Version 1.1",
+      "Copyright 2020 The Grenze Gotisch Project Authors",
+    ],
     "hanken-grotesk-OFL.txt": [
       "SIL Open Font License, Version 1.1",
       "Copyright 2021 The Hanken Grotesk Project Authors",
@@ -113,7 +121,7 @@ describe("bundled licence texts", () => {
     ],
   };
 
-  it("ships exactly the four licence texts under licenses/", () => {
+  it("ships exactly the six licence texts under licenses/", () => {
     expect(tauriConf.bundle.resources).toEqual(
       Object.fromEntries(
         Object.keys(licences).map((file) => [`../src/assets/licenses/${file}`, `licenses/${file}`]),

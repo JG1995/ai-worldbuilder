@@ -6,6 +6,11 @@ export const themes = [
     description: "Cold greys with a pale teal light.",
   },
   {
+    id: "bound",
+    name: "Bound",
+    description: "Bone on soot black with blackletter titles.",
+  },
+  {
     id: "lamplight",
     name: "Lamplight",
     description: "Night green with candle-yellow light and one serif.",

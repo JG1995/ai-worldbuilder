@@ -41,6 +41,41 @@ const themes: Record<string, { colours: Record<string, Modes>; level2Shadow: Mod
       light: "0 8px 24px rgba(19, 29, 36, 0.12)",
     },
   },
+  // .wiki/DESIGN-BOUND.md: its frontmatter, including the title strap's seal, then its Other values
+  // table.
+  bound: {
+    colours: {
+      window: { dark: "#160d0b", light: "#f3eee4" },
+      page: { dark: "#241816", light: "#fcfaf9" },
+      raised: { dark: "#342826", light: "#ffffff" },
+      hover: { dark: "#342826", light: "#e9e5e4" },
+      selected: { dark: "#3a3630", light: "#e6dccb" },
+      divider: { dark: "#4b3d3b", light: "#e9e5e4" },
+      outline: { dark: "#a29885", light: "#7c706e" },
+      text: { dark: "#f5f2f2", light: "#241816" },
+      "text-muted": { dark: "#a99f9d", light: "#5f5250" },
+      "text-disabled": { dark: "#7c706e", light: "#a99f9d" },
+      accent: { dark: "#e6dccb", light: "#59544a" },
+      "accent-hover": { dark: "#f3eee4", light: "#4a463e" },
+      "on-accent": { dark: "#160d0b", light: "#ffffff" },
+      selection: { dark: "#59544a", light: "#d8d3d2" },
+      highlight: { dark: "#553a10", light: "#f8dcae" },
+      success: { dark: "#3fc6a0", light: "#08795e" },
+      warning: { dark: "#e59b37", light: "#8f5a06" },
+      error: { dark: "#fe818c", light: "#b23046" },
+      info: { dark: "#66b2fd", light: "#196aaf" },
+      "on-status": { dark: "#160d0b", light: "#ffffff" },
+      "diff-added": { dark: "#073025", light: "#d6f8eb" },
+      "diff-removed": { dark: "#47151c", light: "#ffe9e9" },
+      seal: { dark: "#e57163", light: "#7d1a14" },
+      backdrop: { dark: "rgba(0, 0, 0, 0.5)", light: "rgba(36, 24, 22, 0.3)" },
+      input: { dark: "var(--color-raised)", light: "var(--color-page)" },
+    },
+    level2Shadow: {
+      dark: "0 8px 24px rgba(0, 0, 0, 0.5)",
+      light: "0 8px 24px rgba(36, 24, 22, 0.12)",
+    },
+  },
   // .wiki/DESIGN-LAMPLIGHT.md: its frontmatter, then its Other values table.
   lamplight: {
     colours: {

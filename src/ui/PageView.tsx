@@ -51,6 +51,8 @@ export function PageView({
             className={`${reading ? "body-reading" : "body"} mx-auto flex max-w-reading-measure flex-col gap-6 text-text`}
           >
             <h1 className="page-title break-words">{title}</h1>
+            {/* Bound's title strap; theme.css draws it under that theme only. */}
+            <div className="title-strap" aria-hidden="true" />
             {loading ? <p className="text-text-muted">Loading…</p> : children}
           </article>
         )}
