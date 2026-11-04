@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { applyTheme, type ThemeId, themes } from "@/ui/themes";
 import { ControlsSections } from "./ControlsSections";
 import { FoundationSections } from "./FoundationSections";
 import { ShellSections } from "./ShellSections";
@@ -45,6 +46,38 @@ export function ModeSwitch() {
   );
 }
 
+/** The theme switch. It starts from the theme the other showcase view set, and saves nothing. */
+export function ThemeSwitch() {
+  const [theme, setTheme] = useState<ThemeId>(
+    () => (document.documentElement.dataset.theme as ThemeId | undefined) ?? "saturn-seal",
+  );
+
+  function chooseTheme(next: ThemeId) {
+    // Applied before rendering, as the mode is, so the sections read the new theme's values.
+    applyTheme(next);
+    setTheme(next);
+  }
+
+  return (
+    <fieldset className="ui flex items-center gap-4">
+      <legend className="sr-only">Theme</legend>
+      {themes.map((option) => (
+        <label key={option.id} className="flex items-center gap-1">
+          <input
+            type="radio"
+            name="theme"
+            value={option.id}
+            checked={theme === option.id}
+            onChange={() => chooseTheme(option.id)}
+            className="accent-accent"
+          />
+          {option.name}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
 /** The development-only showcase of the design foundation. It stores nothing. */
 export function Showcase() {
   return (
@@ -52,6 +85,7 @@ export function Showcase() {
       <header className="sticky top-0 z-10 flex flex-wrap items-center gap-6 border-divider border-b bg-window px-6 py-3">
         <h1 className="ui-strong">Grimoire.md showcase</h1>
         <span className="label-caps text-text-muted">Sample data</span>
+        <ThemeSwitch />
         <ModeSwitch />
         <a href="#sample-world" className="ui ml-auto text-accent underline">
           Sample world screen

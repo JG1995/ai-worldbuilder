@@ -1,10 +1,15 @@
-/* The only stylesheet with design values. Every value comes from .wiki/DESIGN.md. */
+/*
+ * The only stylesheet with design values. Every value comes from .wiki/DESIGN.md, or from a
+ * theme's own document for that theme's block.
+ */
 @import "tailwindcss";
 @import "@fontsource/darker-grotesque/500.css";
 @import "@fontsource/darker-grotesque/700.css";
 @import "@fontsource/hanken-grotesk/400.css";
 @import "@fontsource/hanken-grotesk/500.css";
 @import "@fontsource/hanken-grotesk/700.css";
+/* Weight 200 to 800 and the optical size axis, which Lamplight's page title needs. */
+@import "@fontsource-variable/newsreader/opsz.css";
 
 @font-face {
   font-family: "Material Symbols Sharp";
@@ -224,6 +229,144 @@
 
     --level-2-shadow: 0 8px 24px rgba(19, 29, 36, 0.12);
     --welcome-ground: var(--color-page);
+  }
+}
+
+/*
+ * Lamplight, from .wiki/DESIGN-LAMPLIGHT.md. This rule outweighs Saturn Seal's light block, so
+ * every value that block overrides is set again in the nested light block. Newsreader is both the
+ * display and the text face; only the page title fixes its optical size, and every other role
+ * lets the browser follow the font size.
+ */
+:root[data-theme="lamplight"] {
+  --color-window: #03130f;
+  --color-page: #13231f;
+  --color-raised: #1b302b;
+  --color-hover: #1b302b;
+  --color-selected: #293b37;
+  --color-divider: #304641;
+  --color-outline: #849b94;
+  --color-text: #f0f4f3;
+  --color-text-muted: #96a5a1;
+  --color-text-disabled: #657873;
+  --color-accent: #f2dc93;
+  --color-accent-hover: #f6efc9;
+  --color-on-accent: #03130f;
+  --color-selection: #3e524c;
+  --color-highlight: #5b4027;
+  --color-success: #3fc6a0;
+  --color-warning: #f29237;
+  --color-error: #fe8477;
+  --color-info: #66b2fd;
+  --color-on-status: #03130f;
+  --color-diff-added: #073025;
+  --color-diff-removed: #471713;
+  --color-backdrop: rgba(0, 0, 0, 0.5);
+  --color-input: var(--color-raised);
+
+  --level-2-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Night Green in dark mode, white in light mode. */
+  --welcome-ground: var(--color-page);
+
+  --font-display: "Newsreader Variable", Georgia, serif;
+  --font-text: "Newsreader Variable", Georgia, serif;
+
+  --page-title-size: 38px;
+  --page-title-line-height: 1.15;
+  --page-title-letter-spacing: -0.005em;
+  --page-title-font-variation: "opsz" 72;
+
+  --world-name-size: 18px;
+  --world-name-weight: 600;
+  --world-name-letter-spacing: 0;
+  --world-name-text-transform: none;
+
+  --label-caps-size: 12px;
+  --label-caps-weight: 600;
+  --label-caps-letter-spacing: 0.08em;
+
+  --heading-1-size: 30px;
+  --heading-1-weight: 600;
+  --heading-1-line-height: 1.2;
+
+  --heading-2-size: 24px;
+  --heading-2-weight: 600;
+  --heading-2-line-height: 1.25;
+
+  --heading-3-size: 21px;
+  --heading-3-weight: 600;
+  --heading-3-line-height: 1.3;
+
+  --heading-4-size: 18px;
+  --heading-4-weight: 600;
+
+  --body-size: 18px;
+  --body-line-height: 1.6;
+
+  --body-reading-size: 20px;
+  --body-reading-line-height: 1.55;
+
+  --assistant-size: 16px;
+
+  --ui-size: 16px;
+
+  --ui-strong-size: 16px;
+  --ui-strong-weight: 600;
+
+  --ui-small-size: 15px;
+
+  @variant light {
+    --color-window: #f0f4f3;
+    --color-page: #ffffff;
+    --color-raised: #ffffff;
+    --color-hover: #e2e8e6;
+    --color-selected: #cce3dd;
+    --color-divider: #e2e8e6;
+    --color-outline: #657873;
+    --color-text: #0a201b;
+    --color-text-muted: #465a55;
+    --color-text-disabled: #96a5a1;
+    --color-accent: #6b4d2f;
+    --color-accent-hover: #5b4027;
+    --color-on-accent: #ffffff;
+    --color-selection: #e0f3ee;
+    --color-highlight: #f2dc93;
+    --color-success: #08795e;
+    --color-warning: #975306;
+    --color-error: #b4312b;
+    --color-info: #196aaf;
+    --color-on-status: #ffffff;
+    --color-diff-added: #d6f8eb;
+    --color-diff-removed: #ffe9e6;
+    --color-backdrop: rgba(10, 32, 27, 0.3);
+    --color-input: var(--color-page);
+
+    --level-2-shadow: 0 8px 24px rgba(10, 32, 27, 0.12);
+  }
+}
+
+/*
+ * The welcome logo (src/ui/WelcomeLogo.tsx) holds every theme's logo in both modes. Only the
+ * active theme's logo for the current mode is displayed; the others are display: none, so
+ * assistive technology meets one image.
+ */
+[data-welcome-logo] {
+  display: none;
+}
+
+:root:not([data-theme]) [data-welcome-logo="saturn-seal-dark"],
+:root[data-theme="lamplight"] [data-welcome-logo="lamplight-dark"] {
+  display: block;
+
+  @variant light {
+    display: none;
+  }
+}
+
+:root:not([data-theme]) [data-welcome-logo="saturn-seal-light"],
+:root[data-theme="lamplight"] [data-welcome-logo="lamplight-light"] {
+  @variant light {
+    display: block;
   }
 }
 

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Icon, type IconName } from "@/ui/Icon";
 import { glyphs } from "@/ui/icon-glyphs";
-import { StackedLockup } from "@/ui/StackedLockup";
+import { WelcomeLogo } from "@/ui/WelcomeLogo";
 import {
   sampleBody,
   sampleCode,
@@ -142,7 +142,7 @@ export function FoundationSections() {
         </ul>
       </Section>
 
-      <Section title="Type" use="Type roles. Darker Grotesque only in the first three.">
+      <Section title="Type" use="Type roles, in the active theme's faces.">
         <ul className="flex flex-col gap-6">
           {typeRoles.map((role) => (
             <li key={role.name} className="flex flex-col gap-1">
@@ -196,9 +196,9 @@ export function FoundationSections() {
         </ul>
       </Section>
 
-      <Section title="Logo" use="The stacked lockup on the welcome ground.">
-        <div className="flex justify-center bg-selected py-6 light:bg-page">
-          <StackedLockup height={160} />
+      <Section title="Logo" use="The welcome screen's logo on the welcome ground.">
+        <div className="flex justify-center bg-(--welcome-ground) py-6">
+          <WelcomeLogo />
         </div>
       </Section>
     </>

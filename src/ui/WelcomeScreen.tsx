@@ -2,7 +2,7 @@ import { useId } from "react";
 import type { RecentWorld } from "@/types/api";
 import { Button } from "./Button";
 import { Icon } from "./Icon";
-import { StackedLockup } from "./StackedLockup";
+import { WelcomeLogo } from "./WelcomeLogo";
 
 type WelcomeScreenProps = {
   recentWorlds: RecentWorld[];
@@ -28,7 +28,7 @@ export function WelcomeScreen({
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-(--welcome-ground) px-6">
       <div className="flex shrink-0 basis-1/2 items-center justify-center">
-        <StackedLockup height={120} />
+        <WelcomeLogo />
       </div>
       <div className="mx-auto flex w-full max-w-120 flex-col gap-8 pb-12">
         <div className="flex flex-wrap justify-center gap-3">
