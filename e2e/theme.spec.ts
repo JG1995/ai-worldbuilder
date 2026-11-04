@@ -39,6 +39,8 @@ test("the showcase loads every bundled face from the dev server only", async ({
     ['400 16px "Hanken Grotesk"', "A"],
     ['500 16px "Hanken Grotesk"', "A"],
     ['700 16px "Hanken Grotesk"', "A"],
+    ['400 16px "Newsreader Variable"', "A"],
+    ['600 16px "Newsreader Variable"', "A"],
     ['16px "Material Symbols Sharp"', "\u{e2c7}"],
   ];
   for (const [font, text] of fonts) {
@@ -56,9 +58,19 @@ test("the showcase loads every bundled face from the dev server only", async ({
   expect(requests.filter((url) => new URL(url).origin !== origin)).toEqual([]);
 });
 
-// The type roles in .wiki/DESIGN.md's frontmatter: sizes in px, letter spacing in em. CI cannot
-// read .wiki/, so this table is the copy the rendered roles are checked against; update both
-// together.
+type TypeRole = {
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: string;
+  lineHeight: number;
+  letterSpacing?: number;
+  textTransform?: string;
+  fontVariationSettings?: string;
+};
+
+// The type roles in each theme document's frontmatter: sizes in px, letter spacing in em. CI
+// cannot read .wiki/, so these tables are the copy the rendered roles are checked against; update
+// both together. Saturn Seal's document is .wiki/DESIGN.md.
 const saturnSealType = {
   "page-title": {
     fontFamily: "Darker Grotesque",
@@ -104,60 +116,158 @@ const saturnSealType = {
     fontWeight: "400",
     lineHeight: 1.5,
   },
-} satisfies Record<
-  string,
-  {
-    fontFamily: string;
-    fontSize: number;
-    fontWeight: string;
-    lineHeight: number;
-    letterSpacing?: number;
-    textTransform?: string;
-  }
->;
+} satisfies Record<string, TypeRole>;
+
+// .wiki/DESIGN-LAMPLIGHT.md. Its Newsreader is bundled as Fontsource's "Newsreader Variable".
+const lamplightType = {
+  "page-title": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 38,
+    fontWeight: "500",
+    fontVariationSettings: '"opsz" 72',
+    lineHeight: 1.15,
+    letterSpacing: -0.005,
+  },
+  "world-name": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 18,
+    fontWeight: "600",
+    lineHeight: 1.2,
+    letterSpacing: 0,
+  },
+  "label-caps": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 1.2,
+    letterSpacing: 0.08,
+    textTransform: "uppercase",
+  },
+  "heading-1": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 30,
+    fontWeight: "600",
+    lineHeight: 1.2,
+  },
+  "heading-2": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 24,
+    fontWeight: "600",
+    lineHeight: 1.25,
+  },
+  "heading-3": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 21,
+    fontWeight: "600",
+    lineHeight: 1.3,
+  },
+  "heading-4": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 18,
+    fontWeight: "600",
+    lineHeight: 1.4,
+  },
+  body: { fontFamily: "Newsreader Variable", fontSize: 18, fontWeight: "400", lineHeight: 1.6 },
+  "body-reading": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 20,
+    fontWeight: "400",
+    lineHeight: 1.55,
+  },
+  assistant: {
+    fontFamily: "Newsreader Variable",
+    fontSize: 16,
+    fontWeight: "400",
+    lineHeight: 1.55,
+  },
+  ui: { fontFamily: "Newsreader Variable", fontSize: 16, fontWeight: "400", lineHeight: 1.4 },
+  "ui-strong": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 16,
+    fontWeight: "600",
+    lineHeight: 1.4,
+  },
+  "ui-small": {
+    fontFamily: "Newsreader Variable",
+    fontSize: 15,
+    fontWeight: "400",
+    lineHeight: 1.4,
+  },
+  mono: {
+    fontFamily: "ui-monospace, Cascadia Mono, SF Mono, DejaVu Sans Mono, monospace",
+    fontSize: 13,
+    fontWeight: "400",
+    lineHeight: 1.5,
+  },
+} satisfies Record<string, TypeRole>;
+
+const themeTypes: [string, Record<string, TypeRole>][] = [
+  ["Saturn Seal", saturnSealType],
+  ["Lamplight", lamplightType],
+];
 
 const families = (value: string) =>
   value.split(",").map((family) => family.trim().replace(/^"(.*)"$/, "$1"));
 const px = (value: number) => `${Math.round(value * 100) / 100}px`;
 
-test("every type role in the showcase computes to its DESIGN.md values", async ({ page }) => {
-  await page.emulateMedia({ colorScheme: "dark" });
-  await page.goto("/showcase.html");
-  const typeSection = page.locator("section", {
-    has: page.getByRole("heading", { name: "Type", exact: true }),
-  });
-
-  for (const [role, expected] of Object.entries(saturnSealType)) {
-    const style = await typeSection
-      .locator(`li .${role}`)
-      .first()
-      .evaluate((element) => {
-        const { fontFamily, fontSize, fontWeight, lineHeight, letterSpacing, textTransform } =
-          getComputedStyle(element);
-        return { fontFamily, fontSize, fontWeight, lineHeight, letterSpacing, textTransform };
-      });
-    const expectedFamilies = families(expected.fontFamily);
-
-    expect(
-      {
-        ...style,
-        fontFamily: families(style.fontFamily).slice(0, expectedFamilies.length),
-        lineHeight: px(Number.parseFloat(style.lineHeight)),
-        letterSpacing:
-          style.letterSpacing === "normal" ? "normal" : px(Number.parseFloat(style.letterSpacing)),
-      },
-      role,
-    ).toEqual({
-      fontFamily: expectedFamilies,
-      fontSize: px(expected.fontSize),
-      fontWeight: expected.fontWeight,
-      lineHeight: px(expected.fontSize * expected.lineHeight),
-      letterSpacing:
-        "letterSpacing" in expected ? px(expected.fontSize * expected.letterSpacing) : "normal",
-      textTransform: "textTransform" in expected ? expected.textTransform : "none",
+for (const [theme, roles] of themeTypes) {
+  test(`every type role in the showcase computes to ${theme}'s values`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("/showcase.html");
+    await page.getByRole("radio", { name: theme }).check();
+    const typeSection = page.locator("section", {
+      has: page.getByRole("heading", { name: "Type", exact: true }),
     });
-  }
-});
+
+    for (const [role, expected] of Object.entries(roles)) {
+      const style = await typeSection
+        .locator(`li .${role}`)
+        .first()
+        .evaluate((element) => {
+          const {
+            fontFamily,
+            fontSize,
+            fontWeight,
+            lineHeight,
+            letterSpacing,
+            textTransform,
+            fontVariationSettings,
+          } = getComputedStyle(element);
+          return {
+            fontFamily,
+            fontSize,
+            fontWeight,
+            lineHeight,
+            letterSpacing,
+            textTransform,
+            fontVariationSettings,
+          };
+        });
+      const expectedFamilies = families(expected.fontFamily);
+
+      expect(
+        {
+          ...style,
+          fontFamily: families(style.fontFamily).slice(0, expectedFamilies.length),
+          lineHeight: px(Number.parseFloat(style.lineHeight)),
+          // Chromium reports a letter spacing of 0 as "normal", which is 0.
+          letterSpacing: px(
+            style.letterSpacing === "normal" ? 0 : Number.parseFloat(style.letterSpacing),
+          ),
+        },
+        role,
+      ).toEqual({
+        fontFamily: expectedFamilies,
+        fontSize: px(expected.fontSize),
+        fontWeight: expected.fontWeight,
+        lineHeight: px(expected.fontSize * expected.lineHeight),
+        letterSpacing: px(expected.fontSize * (expected.letterSpacing ?? 0)),
+        textTransform: expected.textTransform ?? "none",
+        fontVariationSettings: expected.fontVariationSettings ?? "normal",
+      });
+    }
+  });
+}
 
 test("the showcase link opens the showcase, whose switch sets the mode", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
@@ -166,15 +276,38 @@ test("the showcase link opens the showcase, whose switch sets the mode", async (
   await page.getByRole("link", { name: "Showcase" }).click();
   await expect(page).toHaveURL(/\/showcase\.html$/);
 
-  await page.getByRole("radio", { name: "Light" }).check();
+  await page.getByRole("radio", { name: "Light", exact: true }).check();
   expect(await bodyBackground(page)).toBe(windowLight);
 
-  await page.getByRole("radio", { name: "OS" }).check();
+  await page.getByRole("radio", { name: "OS", exact: true }).check();
   expect(await bodyBackground(page)).toBe(windowDark);
 
   await page.emulateMedia({ colorScheme: "light" });
   expect(await bodyBackground(page)).toBe(windowLight);
 
-  await page.getByRole("radio", { name: "Dark" }).check();
+  await page.getByRole("radio", { name: "Dark", exact: true }).check();
   expect(await bodyBackground(page)).toBe(windowDark);
+});
+
+test("the showcase's theme switch applies Lamplight and its wordmark in both modes", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/showcase.html");
+  const logo = page
+    .locator("section", { has: page.getByRole("heading", { name: "Logo", exact: true }) })
+    .getByRole("img", { name: "Grimoire.md" });
+  await expect(logo).toHaveAttribute("src", /lockup-stacked-dark\.svg$/);
+
+  await page.getByRole("radio", { name: "Lamplight" }).check();
+  expect(await bodyBackground(page)).toBe("rgb(3, 19, 15)");
+  await expect(logo).toHaveAttribute("src", /lamplight-wordmark-dark\.svg$/);
+
+  await page.getByRole("radio", { name: "Light", exact: true }).check();
+  expect(await bodyBackground(page)).toBe("rgb(240, 244, 243)");
+  await expect(logo).toHaveAttribute("src", /lamplight-wordmark-light\.svg$/);
+
+  await page.getByRole("radio", { name: "Saturn Seal" }).check();
+  expect(await bodyBackground(page)).toBe(windowLight);
+  await expect(logo).toHaveAttribute("src", /lockup-stacked-light\.svg$/);
 });

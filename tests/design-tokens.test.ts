@@ -41,6 +41,39 @@ const themes: Record<string, { colours: Record<string, Modes>; level2Shadow: Mod
       light: "0 8px 24px rgba(19, 29, 36, 0.12)",
     },
   },
+  // .wiki/DESIGN-LAMPLIGHT.md: its frontmatter, then its Other values table.
+  lamplight: {
+    colours: {
+      window: { dark: "#03130f", light: "#f0f4f3" },
+      page: { dark: "#13231f", light: "#ffffff" },
+      raised: { dark: "#1b302b", light: "#ffffff" },
+      hover: { dark: "#1b302b", light: "#e2e8e6" },
+      selected: { dark: "#293b37", light: "#cce3dd" },
+      divider: { dark: "#304641", light: "#e2e8e6" },
+      outline: { dark: "#849b94", light: "#657873" },
+      text: { dark: "#f0f4f3", light: "#0a201b" },
+      "text-muted": { dark: "#96a5a1", light: "#465a55" },
+      "text-disabled": { dark: "#657873", light: "#96a5a1" },
+      accent: { dark: "#f2dc93", light: "#6b4d2f" },
+      "accent-hover": { dark: "#f6efc9", light: "#5b4027" },
+      "on-accent": { dark: "#03130f", light: "#ffffff" },
+      selection: { dark: "#3e524c", light: "#e0f3ee" },
+      highlight: { dark: "#5b4027", light: "#f2dc93" },
+      success: { dark: "#3fc6a0", light: "#08795e" },
+      warning: { dark: "#f29237", light: "#975306" },
+      error: { dark: "#fe8477", light: "#b4312b" },
+      info: { dark: "#66b2fd", light: "#196aaf" },
+      "on-status": { dark: "#03130f", light: "#ffffff" },
+      "diff-added": { dark: "#073025", light: "#d6f8eb" },
+      "diff-removed": { dark: "#471713", light: "#ffe9e6" },
+      backdrop: { dark: "rgba(0, 0, 0, 0.5)", light: "rgba(10, 32, 27, 0.3)" },
+      input: { dark: "var(--color-raised)", light: "var(--color-page)" },
+    },
+    level2Shadow: {
+      dark: "0 8px 24px rgba(0, 0, 0, 0.5)",
+      light: "0 8px 24px rgba(10, 32, 27, 0.12)",
+    },
+  },
 };
 
 const srcDir = join(import.meta.dirname, "../src");

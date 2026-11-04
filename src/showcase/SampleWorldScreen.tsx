@@ -11,7 +11,7 @@ import { type Tab, TabStrip } from "@/ui/TabStrip";
 import { type Toast, ToastRegion } from "@/ui/Toast";
 import { WelcomeScreen } from "@/ui/WelcomeScreen";
 import { closeTab } from "./ShellSections";
-import { ModeSwitch } from "./Showcase";
+import { ModeSwitch, ThemeSwitch } from "./Showcase";
 import {
   largeSampleWorld,
   samplePageParagraphs,
@@ -216,6 +216,7 @@ export function SampleWorldScreen() {
         >
           Push a toast in 2 seconds
         </Button>
+        <ThemeSwitch />
         <ModeSwitch />
         <a href="#showcase" className="ui ml-auto text-accent underline">
           Back to the showcase

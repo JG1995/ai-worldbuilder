@@ -107,9 +107,13 @@ describe("bundled licence texts", () => {
       "Copyright 2021 The Hanken Grotesk Project Authors",
     ],
     "material-symbols-LICENSE.txt": ["Apache License", "Version 2.0"],
+    "newsreader-OFL.txt": [
+      "SIL Open Font License, Version 1.1",
+      "Copyright 2020 The Newsreader Project Authors",
+    ],
   };
 
-  it("ships exactly the three licence texts under licenses/", () => {
+  it("ships exactly the four licence texts under licenses/", () => {
     expect(tauriConf.bundle.resources).toEqual(
       Object.fromEntries(
         Object.keys(licences).map((file) => [`../src/assets/licenses/${file}`, `licenses/${file}`]),
