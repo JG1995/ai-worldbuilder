@@ -31,9 +31,9 @@ export function App() {
         quickOpen={(ports) => <QuickOpen {...ports} />}
         onOpenSettings={openSettings}
         layout={(parts) => <WorldLayout {...parts} onOpenSettings={openSettings} />}
-        // A running answer stops and is saved before the world changes or the window closes.
-        // With AI off the core refuses, and there is nothing to stop.
-        beforeWorldChange={() => assistantStop().catch(() => {})}
+        // A running answer stops and is saved, and every image generation stops, before the world
+        // changes or the window closes. With AI off the core refuses, and there is nothing to stop.
+        beforeWorldChange={() => assistantStop({ generations: true }).catch(() => {})}
         ai={settings.data?.ai === true}
       />
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}

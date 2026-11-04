@@ -18,15 +18,29 @@
 //! else is literal, with no entity decoding. A line that starts with another tag carrying a `path`
 //! attribute opens a block too, which cannot be read. The model's output is untrusted: nothing here
 //! touches the world, and a path is only text until the world checks it.
+//!
+//! An image request is a block of the same form, read by the same rules, with the prompt as its
+//! text:
+//!
+//! ```text
+//! <image name="Harbourmaster Oslo" frame="portrait">
+//! An ink drawing of a weathered harbourmaster.
+//! </image>
+//! ```
+//!
+//! An image request without a name or a prompt, or with another attribute, cannot be read; one
+//! without a `frame`, or with an unknown one, is square. Image requests take no part in the
+//! proposals' rules for paths named twice.
 
 use serde::Serialize;
 
-use super::store::{Passage, Proposal, ProposalContent};
+use super::store::{ImageFrame, Passage, Proposal, ProposalContent};
 use crate::history::fnv1a_64;
 use crate::index::is_attachment;
 
 const NEW_PAGE: &str = "new_page";
 const EDIT: &str = "edit";
+const IMAGE: &str = "image";
 const PATH_ATTRIBUTE: &str = " path=\"";
 
 /// What a proposal does.
@@ -38,8 +52,8 @@ pub enum ProposalKind {
     Edit,
 }
 
-/// A whole answer read: its prose, its proposals in order, how many blocks could not be read, and
-/// whether it ended inside a block, which was dropped.
+/// A whole answer read: its prose, its proposals in order, how many proposal blocks could not be
+/// read, and whether it ended inside one, which was dropped; and the same for its image requests.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parsed {
     pub prose: String,
@@ -47,6 +61,17 @@ pub struct Parsed {
     pub proposals: Vec<Proposal>,
     pub unreadable: u32,
     pub unfinished: bool,
+    pub images: Vec<RequestedImage>,
+    pub image_unreadable: u32,
+    pub image_unfinished: bool,
+}
+
+/// An image request as the model wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestedImage {
+    pub name: String,
+    pub frame: ImageFrame,
+    pub prompt: String,
 }
 
 /// What the splitter passes on.
@@ -56,6 +81,8 @@ pub enum Piece {
     Prose(String),
     /// A proposal's opening line is complete.
     Begun { kind: ProposalKind, path: String },
+    /// An image request's opening line is complete.
+    BegunImage { name: String },
 }
 
 /// Reads `raw`, a whole answer. A block still open at its end makes a `complete` answer's block
@@ -68,13 +95,22 @@ pub fn parse(raw: &str, complete: bool) -> Parsed {
         .into_iter()
         .filter_map(|piece| match piece {
             Piece::Prose(text) => Some(text),
-            Piece::Begun { .. } => None,
+            Piece::Begun { .. } | Piece::BegunImage { .. } => None,
         })
         .collect();
     // Each proposal with the key it is compared by.
     let mut kept: Vec<(String, Proposal)> = Vec::new();
     let mut unreadable = 0;
+    let mut images = Vec::new();
+    let mut image_unreadable = 0;
     for block in splitter.closed {
+        if block.name == IMAGE {
+            match block.image() {
+                Some(image) => images.push(image),
+                None => image_unreadable += 1,
+            }
+            continue;
+        }
         let Some(proposal) = block.proposal() else {
             unreadable += 1;
             continue;
@@ -91,15 +127,22 @@ pub fn parse(raw: &str, complete: bool) -> Parsed {
             },
         }
     }
-    let unfinished = splitter.open && !complete;
-    if splitter.open && complete {
-        unreadable += 1;
+    let (mut unfinished, mut image_unfinished) = (false, false);
+    match (splitter.open.as_deref(), complete) {
+        (Some(IMAGE), true) => image_unreadable += 1,
+        (Some(IMAGE), false) => image_unfinished = true,
+        (Some(_), true) => unreadable += 1,
+        (Some(_), false) => unfinished = true,
+        (None, _) => {}
     }
     Parsed {
         prose,
         proposals: kept.into_iter().map(|(_, proposal)| proposal).collect(),
         unreadable,
         unfinished,
+        images,
+        image_unreadable,
+        image_unfinished,
     }
 }
 
@@ -116,8 +159,8 @@ pub struct Splitter {
     state: State,
     /// The blocks closed so far, in order.
     closed: Vec<Block>,
-    /// The text ended inside a block.
-    open: bool,
+    /// The tag name of the block the text ended inside, if any.
+    open: Option<String>,
 }
 
 #[derive(Default)]
@@ -137,8 +180,8 @@ enum State {
 /// A block of the answer, from its opening line to its closing tag.
 struct Block {
     name: String,
-    /// The proposal's kind and path, when the opening tag is one and can be read.
-    opening: Option<(ProposalKind, String)>,
+    /// What the opening tag begins, when it can be read.
+    opening: Option<Opening>,
     /// The text after the opening tag, up to the line of the closing tag.
     content: String,
     /// The start of the current line, while it may still be the closing tag.
@@ -162,11 +205,11 @@ impl Splitter {
             State::Held(line) => match Block::opening(&line) {
                 Some(block) => {
                     pieces.begun(&block);
-                    self.open = true;
+                    self.open = Some(block.name);
                 }
                 None => pieces.prose(&line),
             },
-            State::Block { .. } => self.open = true,
+            State::Block { block, .. } => self.open = Some(block.name),
             State::LineStart | State::Prose | State::Closed => {}
         }
         pieces.0
@@ -262,13 +305,22 @@ impl Pieces {
     }
 
     fn begun(&mut self, block: &Block) {
-        if let Some((kind, path)) = &block.opening {
-            self.0.push(Piece::Begun {
+        match &block.opening {
+            Some(Opening::Proposal(kind, path)) => self.0.push(Piece::Begun {
                 kind: *kind,
                 path: path.clone(),
-            });
+            }),
+            Some(Opening::Image(name, _)) => self.0.push(Piece::BegunImage { name: name.clone() }),
+            None => {}
         }
     }
+}
+
+/// What a readable opening tag begins: a proposal of its kind for the path as the model gave it,
+/// or an image request with its name and frame.
+enum Opening {
+    Proposal(ProposalKind, String),
+    Image(String, ImageFrame),
 }
 
 /// The tag name at the start of `line`, which starts with `<`, and what follows it.
@@ -288,7 +340,7 @@ fn may_open(start: &str) -> bool {
     }
     match name {
         "" => false,
-        NEW_PAGE | EDIT => after.starts_with([' ', '\t', '>']),
+        NEW_PAGE | EDIT | IMAGE => after.starts_with([' ', '\t', '>']),
         _ => PATH_ATTRIBUTE.starts_with(after) || after.starts_with(PATH_ATTRIBUTE),
     }
 }
@@ -303,6 +355,14 @@ impl Block {
         let kind = match name {
             NEW_PAGE => ProposalKind::NewPage,
             EDIT => ProposalKind::Edit,
+            IMAGE if after.starts_with([' ', '\t', '>']) => {
+                return Some(match image_attributes(after) {
+                    Some((image, frame, content)) => {
+                        Self::new(name, Some(Opening::Image(image.to_owned(), frame)), content)
+                    }
+                    None => Self::new(name, None, ""),
+                });
+            }
             "" => return None,
             _ if after.starts_with(PATH_ATTRIBUTE) => return Some(Self::new(name, None, "")),
             _ => return None,
@@ -311,12 +371,16 @@ impl Block {
             return None;
         }
         Some(match path_attribute(after) {
-            Some((path, content)) => Self::new(name, Some((kind, path.to_owned())), content),
+            Some((path, content)) => Self::new(
+                name,
+                Some(Opening::Proposal(kind, path.to_owned())),
+                content,
+            ),
             None => Self::new(name, None, ""),
         })
     }
 
-    fn new(name: &str, opening: Option<(ProposalKind, String)>, content: &str) -> Self {
+    fn new(name: &str, opening: Option<Opening>, content: &str) -> Self {
         Self {
             name: name.to_owned(),
             opening,
@@ -327,7 +391,9 @@ impl Block {
 
     /// The proposal the block holds, if it follows the grammar.
     fn proposal(self) -> Option<Proposal> {
-        let (kind, path) = self.opening?;
+        let Some(Opening::Proposal(kind, path)) = self.opening else {
+            return None;
+        };
         let content = match kind {
             ProposalKind::NewPage => ProposalContent::NewPage {
                 text: inner(&self.content).to_owned(),
@@ -338,6 +404,48 @@ impl Block {
             },
         };
         Some(Proposal { path, content })
+    }
+
+    /// The image request the block holds, if it has a name and a prompt.
+    fn image(self) -> Option<RequestedImage> {
+        let Some(Opening::Image(name, frame)) = self.opening else {
+            return None;
+        };
+        let prompt = inner(&self.content);
+        (!prompt.trim().is_empty()).then(|| RequestedImage {
+            name,
+            frame,
+            prompt: prompt.to_owned(),
+        })
+    }
+}
+
+/// An image tag's attributes, from `after`, what follows the tag's name: its non-empty `name`, its
+/// frame (square unless `frame` names another), and the text after the tag. `None` when the tag
+/// has no name, another attribute, an attribute twice, or does not close.
+fn image_attributes(after: &str) -> Option<(&str, ImageFrame, &str)> {
+    let (mut name, mut frame) = (None, None);
+    let mut rest = after;
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        if let Some(content) = rest.strip_prefix('>') {
+            let name = name.filter(|name: &&str| !name.trim().is_empty())?;
+            let frame = frame
+                .and_then(ImageFrame::parse)
+                .unwrap_or(ImageFrame::Square);
+            return Some((name, frame, content));
+        }
+        let (attribute, value) = rest.split_once("=\"")?;
+        let (value, after_value) = value.split_once('"')?;
+        let slot = match attribute {
+            "name" => &mut name,
+            "frame" => &mut frame,
+            _ => return None,
+        };
+        if slot.replace(value).is_some() {
+            return None;
+        }
+        rest = after_value;
     }
 }
 
@@ -527,6 +635,9 @@ Done. A <edit path=\"x\"> mid-line stays.\n";
                 ],
                 unreadable: 0,
                 unfinished: false,
+                images: Vec::new(),
+                image_unreadable: 0,
+                image_unfinished: false,
             }
         );
     }
@@ -572,6 +683,83 @@ Done. A <edit path=\"x\"> mid-line stays.\n";
         assert_eq!((complete.unreadable, complete.unfinished), (1, false));
     }
 
+    fn requested(name: &str, frame: ImageFrame, prompt: &str) -> RequestedImage {
+        RequestedImage {
+            name: name.to_owned(),
+            frame,
+            prompt: prompt.to_owned(),
+        }
+    }
+
+    #[test]
+    fn image_requests_are_read_beside_proposals_with_their_frames_and_never_joined() {
+        let text = "Here.\n\
+<image name=\"Harbourmaster\" frame=\"portrait\">\nAn ink drawing of a harbourmaster.\n</image>\n\
+<new_page path=\"A.md\">\nx\n</new_page>\n\
+<image name=\"A.md\">\nNo frame, and a path's name.\n</image>\n\
+<image name=\"Harbourmaster\"\tframe=\"wide\">Same name, unknown frame.\n</image>\n\
+<image frame=\"square\">\nNo name.\n</image>\n\
+<image name=\"Empty\">\n  \n</image>\n\
+<image name=\"X\" style=\"y\">\nAnother attribute.\n</image>\n\
+<image name=\"X\" name=\"Y\">\nTwice.\n</image>\n\
+Done. <image name=\"Inline\"> mid-line stays.\n";
+
+        let parsed = parse(text, true);
+
+        assert_eq!(
+            parsed.prose,
+            "Here.\nDone. <image name=\"Inline\"> mid-line stays.\n"
+        );
+        assert_eq!(parsed.proposals, [new_page("A.md", "x")]);
+        assert_eq!((parsed.unreadable, parsed.unfinished), (0, false));
+        assert_eq!(
+            parsed.images,
+            [
+                requested(
+                    "Harbourmaster",
+                    ImageFrame::Portrait,
+                    "An ink drawing of a harbourmaster."
+                ),
+                requested("A.md", ImageFrame::Square, "No frame, and a path's name."),
+                requested(
+                    "Harbourmaster",
+                    ImageFrame::Square,
+                    "Same name, unknown frame."
+                ),
+            ]
+        );
+        assert_eq!(
+            (parsed.image_unreadable, parsed.image_unfinished),
+            (4, false)
+        );
+    }
+
+    #[test]
+    fn an_image_request_open_at_the_end_is_unfinished_or_unreadable_when_the_answer_is_complete() {
+        let text = "<new_page path=\"A.md\">\nWhole.\n</new_page>\n<image name=\"Gull\">\nA gu";
+
+        let stopped = parse(text, false);
+        let complete = parse(text, true);
+
+        assert_eq!(stopped.images, []);
+        assert_eq!(
+            (
+                stopped.unfinished,
+                stopped.image_unreadable,
+                stopped.image_unfinished
+            ),
+            (false, 0, true)
+        );
+        assert_eq!(
+            (
+                complete.unreadable,
+                complete.image_unreadable,
+                complete.image_unfinished
+            ),
+            (0, 1, false)
+        );
+    }
+
     #[test]
     fn edits_of_one_page_join_and_a_second_proposal_for_a_path_is_unreadable() {
         let text = "<edit path=\"places/saltmere\">\n<find>a</find><replace>b</replace>\n</edit>\n\
@@ -597,15 +785,16 @@ Done. A <edit path=\"x\"> mid-line stays.\n";
         // Short, because every pair of split points is tried.
         let text = "Hi <b>\n<new_page path=\"A\">\n```\nx </new_page>\n```\n</new_page>tail\n\
 <edit path=\"B.md\"><find>a</find>\n<replace>b</replace>\n</edit>\n<x path=\"C\">\n</x>\n\
-<edit path=\"Open.md\">\n<find>cut";
+<image name=\"G\" frame=\"wide\">\nA gull.\n</image>\n<edit path=\"Open.md\">\n<find>cut";
         let parsed = parse(text, false);
         assert_eq!(parsed.prose, "Hi <b>\ntail\n");
         assert_eq!((parsed.proposals.len(), parsed.unreadable), (2, 1));
+        assert_eq!(parsed.images.len(), 1);
         let expected = parsed.prose;
         let begun = |pieces: &[Piece]| {
             pieces
                 .iter()
-                .filter(|piece| matches!(piece, Piece::Begun { .. }))
+                .filter(|piece| matches!(piece, Piece::Begun { .. } | Piece::BegunImage { .. }))
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -623,6 +812,9 @@ Done. A <edit path=\"x\"> mid-line stays.\n";
                 Piece::Begun {
                     kind: ProposalKind::Edit,
                     path: "B.md".to_owned()
+                },
+                Piece::BegunImage {
+                    name: "G".to_owned()
                 },
                 Piece::Begun {
                     kind: ProposalKind::Edit,
@@ -646,7 +838,7 @@ Done. A <edit path=\"x\"> mid-line stays.\n";
                     .iter()
                     .filter_map(|piece| match piece {
                         Piece::Prose(text) => Some(text.as_str()),
-                        Piece::Begun { .. } => None,
+                        Piece::Begun { .. } | Piece::BegunImage { .. } => None,
                     })
                     .collect();
                 assert_eq!(prose, expected, "split at {first} and {second}");

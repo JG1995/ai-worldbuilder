@@ -35,6 +35,8 @@ keyring-core = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Only to recognise a failed secure connection in `reqwest`'s errors; `reqwest` picks its features.
 rustls = { version = "0.23", default-features = false }
+# Decodes the image provider's base64 images, and encodes a regeneration's reference.
+base64 = "0.23.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "^0.9.12"

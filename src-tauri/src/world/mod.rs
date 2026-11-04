@@ -31,6 +31,7 @@ use crate::index::{
 };
 pub use images::{IMAGE_SCHEME, respond as respond_image};
 use images::{ImageEmbed, ImageRequest};
+pub(crate) use images::{image as image_response, refused as refused_image};
 pub(crate) use page::compare;
 pub(crate) use page::{DiffLine, PageText};
 use recent::{Recent, RecentWorld, Workspace};

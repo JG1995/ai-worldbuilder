@@ -32,8 +32,13 @@ type Outgoing = {
 export const assistantSend = (outgoing: Outgoing, onEvent: (event: AnswerEvent) => void) =>
   invokeStreaming<AnswerEnd, AnswerEvent>("assistant_send", outgoing, onEvent);
 
-/** Stops the running answer, if any, and resolves once its text is saved as stopped. */
-export const assistantStop = () => invokeCommand<void>("assistant_stop");
+/**
+ * Stops the running answer, if any, and resolves once its text is saved as stopped. With
+ * `generations`, which only a world change or the window's close passes, every running image
+ * generation stops too.
+ */
+export const assistantStop = (options?: { generations: boolean }) =>
+  invokeCommand<void>("assistant_stop", options);
 
 /**
  * The links of an answer's text, each with the page it resolves to as on a page at the world's top

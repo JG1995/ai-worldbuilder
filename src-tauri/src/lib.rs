@@ -32,15 +32,19 @@ pub fn run() {
         .manage(world::WorldState::default())
         .manage(assistant::AssistantState::default())
         // Each image request is answered on a worker thread, so reading a file never blocks the
-        // webview.
+        // webview. A stored image of the assistant's goes to the assistant, every other request
+        // to the world.
         .register_asynchronous_uri_scheme_protocol(
             world::IMAGE_SCHEME,
             |context, request, responder| {
                 let app = context.app_handle().clone();
                 let uri = request.uri().clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    let state = app.state::<world::WorldState>();
-                    responder.respond(world::respond_image(&state, &uri));
+                    let response = match assistant::is_stored_image(&uri) {
+                        true => assistant::respond_image(&app, &uri),
+                        false => world::respond_image(&app.state::<world::WorldState>(), &uri),
+                    };
+                    responder.respond(response);
                 });
             },
         )
@@ -62,6 +66,11 @@ pub fn run() {
             state.set_events(Arc::new(move |event: world::WorldEvent| {
                 let _ = handle.emit(event.name(), &event);
             }));
+            let handle = app.handle().clone();
+            app.state::<assistant::AssistantState>()
+                .set_image_events(Arc::new(move |changed: assistant::ImageChanged| {
+                    let _ = handle.emit(assistant::IMAGE_CHANGED, changed);
+                }));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -128,6 +137,10 @@ pub fn run() {
             assistant::assistant_accept,
             assistant::assistant_reject,
             assistant::assistant_undo,
+            assistant::assistant_images,
+            assistant::assistant_image_generate,
+            assistant::assistant_image_cancel,
+            assistant::assistant_image_reject,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

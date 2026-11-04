@@ -1540,6 +1540,7 @@ name = "grimoire"
 version = "0.1.0"
 dependencies = [
  "apple-native-keyring-store",
+ "base64 0.23.1",
  "dbus",
  "dbus-secret-service-keyring-store",
  "keyring-core",

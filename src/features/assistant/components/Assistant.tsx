@@ -364,6 +364,8 @@ export function Assistant({
         // A new conversation is known from here on, so it can be found in the list.
         show(event.conversation);
         updateAnswer(answer.id, (shown) => ({ ...shown, context }));
+      } else if (event.kind === "image") {
+        // The pane does not show image requests yet.
       } else {
         updateAnswer(answer.id, (shown) =>
           shown.state === "streaming" ? { ...shown, text: shown.text + event.delta } : shown,
