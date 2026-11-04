@@ -17,7 +17,14 @@ it("launches on the welcome screen when the core has no world to reopen", async 
 });
 
 it("opens Settings with Ctrl+, and Escape closes it, returning focus", async () => {
-  mockWorldIpc({ settings_get: () => ({ ai: true, textProvider: null, imageProvider: null }) });
+  mockWorldIpc({
+    settings_get: () => ({
+      ai: true,
+      textProvider: null,
+      imageProvider: null,
+      theme: "saturn-seal",
+    }),
+  });
   render(<App />);
   const openWorld = await screen.findByRole("button", { name: "Open world…" });
   act(() => openWorld.focus());
@@ -116,13 +123,19 @@ describe("the assistant", () => {
       host: "api.example.com",
     },
     imageProvider: null,
+    theme: "saturn-seal",
   });
 
   const pressShortcut = () =>
     fireEvent.keyDown(document.body, { key: "A", ctrlKey: true, shiftKey: true });
 
   it("has a button with AI on, and Ctrl+Shift+A opens its pane with focus inside", async () => {
-    await openWorld(() => ({ ai: true, textProvider: null, imageProvider: null }));
+    await openWorld(() => ({
+      ai: true,
+      textProvider: null,
+      imageProvider: null,
+      theme: "saturn-seal",
+    }));
 
     const button = await screen.findByRole("button", { name: "Assistant" });
     expect(button).toHaveAttribute("aria-expanded", "false");
@@ -134,7 +147,12 @@ describe("the assistant", () => {
   });
 
   it("has no button, no pane and no shortcut with AI off", async () => {
-    await openWorld(() => ({ ai: false, textProvider: null, imageProvider: null }));
+    await openWorld(() => ({
+      ai: false,
+      textProvider: null,
+      imageProvider: null,
+      theme: "saturn-seal",
+    }));
     await act(() => Promise.resolve());
 
     // An uncancelled shortcut is left to the webview.

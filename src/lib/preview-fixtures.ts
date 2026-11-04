@@ -53,6 +53,7 @@ import type {
   TextLine,
   TextMatch,
   TextMatches,
+  Theme,
   TreeEntry,
   Undone,
   VersionKind,
@@ -829,7 +830,12 @@ let newLocation = previewLocations[0];
 const createdWorlds: Record<string, string[]> = {};
 
 /** The preview's settings, in memory. They hold where a key is stored, never a key. */
-let previewSettings: Settings = { ai: true, textProvider: null, imageProvider: null };
+let previewSettings: Settings = {
+  ai: true,
+  textProvider: null,
+  imageProvider: null,
+  theme: "saturn-seal",
+};
 
 function requireAi() {
   if (!previewSettings.ai) throw { kind: "ai_off", message: "AI features are off." };
@@ -1908,6 +1914,11 @@ export const previewFixtures: Record<string, unknown> = {
     const { on } = args as { on: boolean };
     if (!on) void stopAnswer();
     previewSettings = { ...previewSettings, ai: on };
+    return previewSettings;
+  },
+  settings_theme_set: (args?: InvokeArgs): Settings => {
+    const { theme } = args as { theme: Theme };
+    previewSettings = { ...previewSettings, theme };
     return previewSettings;
   },
   provider_save: (args?: InvokeArgs) => saveProvider(args),

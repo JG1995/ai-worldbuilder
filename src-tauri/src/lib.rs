@@ -119,6 +119,7 @@ pub fn run() {
             world::search_create,
             settings::settings_get,
             settings::settings_ai_set,
+            settings::settings_theme_set,
             settings::provider_save,
             settings::provider_key_remove,
             settings::provider_test,
