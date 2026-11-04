@@ -75,6 +75,19 @@ describe("Dialog", () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
+  it("fills the window on request, focusing its close button first", () => {
+    render(
+      <Dialog title="Harbourmaster Oslo" full closeButton onCancel={() => {}}>
+        Content
+      </Dialog>,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Harbourmaster Oslo" });
+    expect(dialog).toHaveClass("h-full", "w-full");
+    expect(dialog).not.toHaveClass("w-[440px]");
+    expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+  });
+
   it("cancels on Escape and returns focus to the element that opened it", () => {
     const opener = openDialog();
 

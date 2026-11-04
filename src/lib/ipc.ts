@@ -88,6 +88,17 @@ export function imageUrl(session: number, path: string, stamp: string) {
   return previewModule?.previewImageUrl(path) ?? "";
 }
 
+/**
+ * The URL of the image `id` that the assistant generated in the world opened as `session`: in
+ * Tauri, the core's `grimoire-image` scheme under `stored/`, which `convertFileSrc` encodes as one
+ * path segment; in the browser preview, the preview's generated image. A stored image's bytes
+ * never change, so its URL needs no stamp.
+ */
+export function storedImageUrl(session: number, id: number) {
+  if (isTauri()) return convertFileSrc(`stored/${session}/${id}`, "grimoire-image");
+  return previewModule?.previewStoredImageUrl(id) ?? "";
+}
+
 /** The browser preview's fixture for `name`. Development builds only. */
 async function previewFixture(name: string) {
   previewModule = await import("./preview-fixtures");

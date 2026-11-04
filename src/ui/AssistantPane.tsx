@@ -2,9 +2,12 @@ import type { EditorView } from "@codemirror/view";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type {
   AcceptFailure,
+  AnswerImages,
   AnswerReview,
   ConversationSummary,
   EditorLink,
+  GenerationFailure,
+  ImageReview,
   ProposalKind,
   ProviderFailure,
   StoreNotice,
@@ -13,6 +16,7 @@ import { Button, IconButton } from "./Button";
 import { Dialog } from "./Dialog";
 import { setLinks } from "./editor-links";
 import { Icon } from "./Icon";
+import { ImageCard } from "./ImageCard";
 import { createPageState, MarkdownEditor } from "./MarkdownEditor";
 import { Notice } from "./Notice";
 import { ProposalReview } from "./ProposalReview";
@@ -40,7 +44,13 @@ export type AnswerFailure = {
 };
 
 export type ChatMessage =
-  | { id: number; role: "user"; text: string }
+  | {
+      id: number;
+      role: "user";
+      text: string;
+      /** The name of the image it regenerates, when it is a regeneration message. */
+      regenerates?: string;
+    }
   | {
       id: number;
       role: "answer";
@@ -56,7 +66,36 @@ export type ChatMessage =
       proposals?: { change: ProposalKind; path: string }[];
       /** Its proposals, notes and accepted sets as the core reviewed them, once it has any. */
       review?: AnswerReview;
+      /** The names of the images it has begun to request so far while it arrives. */
+      requestedImages?: string[];
+      /** Its images and its notes about image requests, as the core reviewed them, once it has any. */
+      images?: AnswerImages;
     };
+
+/** What the pane does with the images of answers. */
+export type ImageActions = {
+  /** Where a stored image's bytes load from. */
+  url: (image: number) => string;
+  /** A failed generation's reason as a sentence. */
+  failureText: (failure: GenerationFailure) => string;
+  /** The images whose approval is being written. */
+  approving: readonly number[];
+  /** Why an image's last approval could not be written. */
+  approveFailure: { image: number; message: string } | null;
+  /** Approves a pending image; resolves with whether it was approved. */
+  onApprove: (image: number) => Promise<boolean>;
+  /** Sends `change` as a message that regenerates the image. */
+  onRegenerate: (image: number, change: string) => void;
+  /** Rejects a pending image; resolves with whether it was rejected. */
+  onReject: (image: number) => Promise<boolean>;
+  /** Starts generating an image; resolves with whether it started. */
+  onGenerate: (image: number) => Promise<boolean>;
+  onCancel: (image: number) => void;
+  /** Copies the embed of an approved image's path. */
+  onCopyEmbed: (path: string) => void;
+  /** Undoes an image's approval; resolves with whether it was undone. */
+  onUndo: (image: number) => Promise<boolean>;
+};
 
 /** The conversation and its composer. */
 export type AssistantChat = {
@@ -91,6 +130,8 @@ export type AssistantChat = {
   onReject: (proposal: number) => Promise<boolean>;
   /** Undoes an accepted set; resolves with whether it was undone. */
   onUndo: (set: number) => Promise<boolean>;
+  /** The answers' image cards. Without it, the pane shows none. */
+  images?: ImageActions;
 };
 
 /** The world's conversations, shown in place of the conversation and the composer. */
@@ -185,10 +226,14 @@ export function AssistantPane({
 
   const last = messages.at(-1);
   const running = last?.role === "answer" && last.state === "streaming";
-  // The answer holding the newest pending set: only its Accept or Accept selected is primary.
+  // The newest answer with anything pending holds the pane's one primary button: its Accept or
+  // Accept selected when it has pending proposals, otherwise its first pending image's Approve.
   let newestPending: number | undefined;
   for (const message of messages) {
-    const pending = message.role === "answer" && message.review?.proposals.some(appliesNow);
+    const pending =
+      message.role === "answer" &&
+      (message.review?.proposals.some(appliesNow) ||
+        message.images?.images.some(({ state }) => state === "pending"));
     if (pending) newestPending = message.id;
   }
   const focusComposer = () =>
@@ -254,7 +299,9 @@ export function AssistantPane({
               <p className="ui p-4 text-text-muted">
                 For each message, the assistant reads the pages of this world that matter to it and
                 sends them, with your message, to {host}. It can propose changes to pages, which are
-                written only when you accept them.
+                written only when you accept them. When you ask for an image, it sends the image's
+                prompt to openrouter.ai, and the image is saved in this world only when you approve
+                it.
               </p>
             )}
             {chat && messages.length > 0 && (
@@ -264,6 +311,7 @@ export function AssistantPane({
                     <UserMessage
                       key={message.id}
                       text={message.text}
+                      regenerates={message.regenerates}
                       // A message the next one does not answer, such as after a crash.
                       unanswered={messages[index + 1]?.role !== "answer"}
                       onRetry={model && message === last && !running ? chat.onRetry : undefined}
@@ -275,7 +323,9 @@ export function AssistantPane({
                       host={host}
                       canRetry={message === last && !running}
                       newest={message.id === newestPending}
+                      running={running}
                       chat={chat}
+                      onOpenSettings={onOpenSettings}
                       onFocusComposer={focusComposer}
                     />
                   ),
@@ -303,10 +353,12 @@ export function AssistantPane({
 
 function UserMessage({
   text,
+  regenerates,
   unanswered,
   onRetry,
 }: {
   text: string;
+  regenerates: string | undefined;
   unanswered: boolean;
   /** Offered only on the conversation's last message. */
   onRetry: (() => void) | undefined;
@@ -317,6 +369,11 @@ function UserMessage({
         // The border shows the block in light mode, where raised is as white as page.
         className="assistant ml-8 self-end whitespace-pre-wrap break-words rounded-md border border-divider bg-raised px-3 py-2 text-text"
       >
+        {regenerates !== undefined && (
+          <span className="ui-small block text-text-muted">
+            Regenerates the image “{regenerates}”
+          </span>
+        )}
         {text}
       </li>
       {unanswered && (
@@ -420,21 +477,52 @@ function Answer({
   host,
   canRetry,
   newest,
+  running,
   chat,
+  onOpenSettings,
   onFocusComposer,
 }: {
   answer: Extract<ChatMessage, { role: "answer" }>;
   host: string | undefined;
   canRetry: boolean;
-  /** It holds the pane's newest pending set. */
+  /** It is the pane's newest answer with anything pending, which holds the one primary button. */
   newest: boolean;
+  /** An answer is running. */
+  running: boolean;
   chat: AssistantChat;
+  onOpenSettings: () => void;
   onFocusComposer: () => void;
 }) {
-  const { text, state, context, failure, links, proposals, review } = answer;
-  // A new answer would replace its proposals, and with them the accepted set's Undo.
+  const { text, state, context, failure, links, proposals, review, requestedImages, images } =
+    answer;
+  const cards = useRef<HTMLDivElement>(null);
+  const imageActions = chat.images;
+  // A new answer would replace its proposals and images, and with them an accept's or an
+  // approval's Undo.
   const retryable =
-    canRetry && !review?.proposals.some((proposal) => proposal.state === "accepted");
+    canRetry &&
+    !review?.proposals.some((proposal) => proposal.state === "accepted") &&
+    !images?.images.some(
+      ({ id, state }) => state === "approved" || imageActions?.approving.includes(id),
+    );
+  const proposalsPending = review?.proposals.some(appliesNow) ?? false;
+  const primaryImage =
+    newest && !proposalsPending
+      ? images?.images.find(({ state }) => state === "pending")?.id
+      : undefined;
+
+  /** Moves focus after a reject to the answer's next pending card, else to the composer. */
+  async function rejectImage(actions: ImageActions, rejected: ImageReview) {
+    const shown = images?.images ?? [];
+    const next = shown
+      .slice(shown.indexOf(rejected) + 1)
+      .find((image) => image.state === "pending");
+    if (!(await actions.onReject(rejected.id))) return;
+    const card = next && cards.current?.querySelector<HTMLElement>(`[data-image="${next.id}"]`);
+    if (card) card.focus();
+    else onFocusComposer();
+  }
+
   return (
     <li className="flex flex-col gap-2">
       {context && <ContextDisclosure context={context} onOpenPage={chat.onOpenPage} />}
@@ -461,6 +549,16 @@ function Answer({
           ))}
         </ul>
       )}
+      {state === "streaming" && requestedImages && requestedImages.length > 0 && (
+        <ul aria-label="Requested images" className="ui-small flex flex-col gap-1 text-text-muted">
+          {requestedImages.map((name, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: lines are only added at the end, and the same name can repeat.
+            <li key={index} className="break-words">
+              Requesting an image: {name}
+            </li>
+          ))}
+        </ul>
+      )}
       {state === "stopped" && <p className="ui-small text-text-muted">Stopped.</p>}
       {state === "cut_off" && (
         <p className="ui-small text-text-muted">Cut off: the answer was too long.</p>
@@ -477,10 +575,22 @@ function Answer({
           The answer ended before a proposed change was complete.
         </p>
       )}
+      {images && images.unreadable > 0 && (
+        <p className="ui-small text-text-muted">
+          {images.unreadable === 1
+            ? "A requested image could not be read."
+            : `${images.unreadable} requested images could not be read.`}
+        </p>
+      )}
+      {images?.unfinished && (
+        <p className="ui-small text-text-muted">
+          The answer ended before an image request was complete.
+        </p>
+      )}
       {review && (
         <ProposalReview
           review={review}
-          newest={newest}
+          newest={newest && proposalsPending}
           failure={chat.acceptFailure}
           onAccept={(ids) => chat.onAccept(review.answer, ids)}
           onReject={chat.onReject}
@@ -488,6 +598,34 @@ function Answer({
           onOpenPage={chat.onOpenPage}
           onFocusComposer={onFocusComposer}
         />
+      )}
+      {imageActions && images && images.images.length > 0 && (
+        <div ref={cards} className="flex flex-col gap-2">
+          {images.images.map((image) => (
+            <ImageCard
+              key={image.id}
+              image={image}
+              url={imageActions.url(image.id)}
+              primary={image.id === primaryImage}
+              running={running}
+              failureText={image.failure && imageActions.failureText(image.failure)}
+              approveFailure={
+                imageActions.approveFailure?.image === image.id
+                  ? imageActions.approveFailure.message
+                  : null
+              }
+              onApprove={() => imageActions.onApprove(image.id)}
+              onRegenerate={(change) => imageActions.onRegenerate(image.id, change)}
+              onReject={() => void rejectImage(imageActions, image)}
+              onGenerate={() => imageActions.onGenerate(image.id)}
+              onCancel={() => imageActions.onCancel(image.id)}
+              onCopyEmbed={() => image.path !== null && imageActions.onCopyEmbed(image.path)}
+              onUndo={() => imageActions.onUndo(image.id)}
+              onOpenSettings={onOpenSettings}
+              onFocusComposer={onFocusComposer}
+            />
+          ))}
+        </div>
       )}
       {failure && (
         <Notice

@@ -1,6 +1,6 @@
 // The Tauri IPC mock for this feature's tests, with the channel messages the core sends while an
 // answer runs.
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockConvertFileSrc, mockIPC } from "@tauri-apps/api/mocks";
 import { vi } from "vitest";
 import type { AnswerEvent } from "@/types/api";
 
@@ -21,21 +21,31 @@ export function answerChannel(args: Record<string, unknown>) {
 }
 
 /**
- * Mocks the core with `assistant_stop` answering at once; the test supplies `assistant_send`.
- * Returns the calls it receives, in order, without the channel.
+ * Mocks the core with `assistant_stop` answering at once and `assistant_images` with no images,
+ * and with Tauri's events, which `emit` sends; the test supplies `assistant_send`. Returns the calls
+ * it receives, in order, without the channel.
  */
 export function mockAssistantIpc(overrides: Record<string, Handler>) {
   const calls: { command: string; args: Record<string, unknown> }[] = [];
-  const handlers: Record<string, Handler> = { assistant_stop: () => null, ...overrides };
+  const handlers: Record<string, Handler> = {
+    assistant_stop: () => null,
+    assistant_images: () => ({ answers: [], regenerations: [] }),
+    ...overrides,
+  };
   // `isTauri()` reads `globalThis.isTauri`, which the real runtime sets and `mockIPC` does not.
   vi.stubGlobal("isTauri", true);
-  mockIPC((command, payload) => {
-    const args = (payload ?? {}) as Record<string, unknown>;
-    const { onEvent: _channel, ...sent } = args;
-    calls.push({ command, args: sent });
-    const handler = handlers[command];
-    if (!handler) throw `unexpected command ${command}`;
-    return handler(args);
-  });
+  mockIPC(
+    (command, payload) => {
+      const args = (payload ?? {}) as Record<string, unknown>;
+      const { onEvent: _channel, ...sent } = args;
+      calls.push({ command, args: sent });
+      const handler = handlers[command];
+      if (!handler) throw `unexpected command ${command}`;
+      return handler(args);
+    },
+    { shouldMockEvents: true },
+  );
+  // Stored images get the image scheme's URLs.
+  mockConvertFileSrc("linux");
   return calls;
 }

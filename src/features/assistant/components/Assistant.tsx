@@ -1,14 +1,19 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import type { IpcError } from "@/lib/ipc";
+import { type IpcError, listenEvent, storedImageUrl } from "@/lib/ipc";
 import type {
   Accepted,
   AcceptFailure,
   AnswerEnd,
   AnswerEvent,
   AnswerReview,
+  AssistantEvents,
   ContextPage,
+  ConversationImages,
   ConversationSummary,
   EditorLink,
+  GenerationFailure,
+  ImageApproved,
+  ImageReview,
   ProposalKind,
   ProposalReview,
   SavedMessage,
@@ -21,6 +26,7 @@ import {
   type AnswerState,
   AssistantPane,
   type ChatMessage,
+  type ImageActions,
 } from "@/ui/AssistantPane";
 import type { LinkAnchor } from "@/ui/editor-links";
 import {
@@ -28,6 +34,12 @@ import {
   assistantConversation,
   assistantConversations,
   assistantDelete,
+  assistantImageApprove,
+  assistantImageCancel,
+  assistantImageGenerate,
+  assistantImageReject,
+  assistantImages,
+  assistantImageUndo,
   assistantLinks,
   assistantReject,
   assistantReview,
@@ -81,7 +93,13 @@ type AssistantProps = {
   onOpenSettings: () => void;
 };
 
-type UserMessage = { id: number; role: "user"; text: string };
+type UserMessage = {
+  id: number;
+  role: "user";
+  text: string;
+  /** The name of the image it regenerates, when it was sent here as a regeneration. */
+  regenerates?: string;
+};
 
 type AnswerMessage = {
   id: number;
@@ -96,6 +114,8 @@ type AnswerMessage = {
   saved: number | null;
   /** The proposals begun while it arrived. */
   proposals: { change: ProposalKind; path: string }[];
+  /** The names of the images it began to request while it arrived. */
+  requestedImages: string[];
 };
 
 type Message = UserMessage | AnswerMessage;
@@ -130,6 +150,60 @@ const appliesNow = ({ state, check }: ProposalReview) =>
 
 const changes = (count: number) => `${count} ${count === 1 ? "change" : "changes"}`;
 
+const noImages: ConversationImages = { answers: [], regenerations: [] };
+
+/** The images of `read` by id. */
+const imagesById = (read: ConversationImages) =>
+  new Map(read.answers.flatMap(({ images }) => images.map((image) => [image.id, image])));
+
+/** What is announced about an image that changed between two reads, if anything. */
+function imageNews(before: ImageReview | undefined, after: ImageReview) {
+  if (before?.state !== "generating") return null;
+  if (after.state === "pending") return `The image “${after.name}” was generated.`;
+  if (after.notGenerated === "failed") return `The image “${after.name}” could not be generated.`;
+  return null;
+}
+
+/** `text`, then `reason` when there is one, as one sentence. */
+function withReason(text: string, reason: string | null) {
+  if (!reason) return `${text}.`;
+  return /[.!?]$/.test(reason) ? `${text}: ${reason}` : `${text}: ${reason}.`;
+}
+
+/** What a failed generation means, and what to check. */
+function imageFailureText({ reason, detail }: GenerationFailure) {
+  switch (reason) {
+    case "unreachable":
+      return `${withReason("openrouter.ai could not be reached", detail)} Check your network connection.`;
+    case "insecure":
+      return `${withReason("The secure connection to openrouter.ai failed", detail)} Check your network connection.`;
+    case "timeout":
+      return "openrouter.ai did not send the image in time. Try again later.";
+    case "key_refused":
+      return "OpenRouter did not accept the image provider's API key. Check it in Settings.";
+    case "no_credit":
+      return "The OpenRouter account is out of credit, or the key has reached its limit.";
+    case "unknown_model":
+      return "The image provider's model is not one of OpenRouter's image models. Check the model in Settings.";
+    case "rate_limited":
+      return "OpenRouter is limiting requests. Wait a moment before generating again.";
+    case "refused":
+      return "OpenRouter refused the request.";
+    case "provider_error":
+      return "OpenRouter reported a problem on its side. Try again later.";
+    case "redirected":
+      return `OpenRouter redirected the request to ${detail ?? "another address"}, which was not followed.`;
+    case "invalid_reply":
+      return "OpenRouter's reply could not be read.";
+    case "no_image":
+      return "OpenRouter returned no usable image: no PNG, JPEG or WebP image within the size limit. Nothing was kept.";
+    case "key_unreadable":
+      return `${withReason("The image provider's key cannot be read from its storage", detail)} Nothing was sent.`;
+    case "interrupted":
+      return "The connection ended before the image arrived.";
+  }
+}
+
 /**
  * The assistant's conversations in this world: it shows the one shown last, sends a message, or
  * the last one again, with the active page's path, shows the answer as it arrives, and stops it
@@ -156,11 +230,19 @@ export function Assistant({
   /** The proposals of the conversation shown, as the core last reviewed them. */
   const [reviews, setReviews] = useState<AnswerReview[]>([]);
   const [acceptFailure, setAcceptFailure] = useState<AcceptFailure | null>(null);
+  /** The images of the conversation shown, as the core last reviewed them. */
+  const [images, setImages] = useState<ConversationImages>(noImages);
+  const [approving, setApproving] = useState<readonly number[]>([]);
+  const [approveFailure, setApproveFailure] = useState<ImageActions["approveFailure"]>(null);
   const nextId = useRef(0);
   /** The conversation shown, for reads that start after an action ends. */
   const shownConversation = useRef<number | null>(null);
   /** Counts the reviews asked for: only the answer to the latest is shown. */
   const reviewsAsked = useRef(0);
+  /** Counts the image reads asked for: only the answer to the latest is shown. */
+  const imagesAsked = useRef(0);
+  /** The images last shown, which the next read is compared with. */
+  const imagesRead = useRef(noImages);
   /**
    * Counts the conversations shown: what a request or a load started for an earlier one is
    * ignored once another shows.
@@ -197,6 +279,36 @@ export function Assistant({
     }
   }
 
+  /**
+   * Asks the core for the shown conversation's images again, shows them once they arrive, and
+   * announces an image that was generated or failed meanwhile.
+   */
+  async function readImages() {
+    const id = shownConversation.current;
+    if (id === null) return;
+    const count = shownCount.current;
+    const asked = ++imagesAsked.current;
+    let read: ConversationImages;
+    try {
+      read = await assistantImages(id);
+    } catch {
+      // Without an answer, such as with AI just switched off, the images stay as they are.
+      return;
+    }
+    if (shownCount.current !== count || imagesAsked.current !== asked) return;
+    const known = imagesById(imagesRead.current);
+    const news = [...imagesById(read).values()]
+      .map((image) => imageNews(known.get(image.id), image))
+      .filter((text) => text !== null);
+    if (news.length > 0) setAnnouncement(news.join(" "));
+    showImages(read);
+  }
+
+  function showImages(read: ConversationImages) {
+    imagesRead.current = read;
+    setImages(read);
+  }
+
   /** Reads how the world's conversations are kept again; a failure leaves the notice shown. */
   function readNotice() {
     assistantConversations().then(
@@ -214,9 +326,28 @@ export function Assistant({
 
   // The proposals, when a conversation shows and again whenever the index changes, which a write
   // to a page does; an answer that ends reads them itself.
-  const reviewShown = useEffectEvent(() => void readReviews());
+  const reviewShown = useEffectEvent(() => {
+    void readReviews();
+    void readImages();
+  });
   // biome-ignore lint/correctness/useExhaustiveDependencies: each change of either reads them again.
   useEffect(() => reviewShown(), [conversation, indexRevision]);
+
+  // The images again whenever an image of the shown conversation changes in the core.
+  const imageChanged = useEffectEvent(
+    ({ session, conversation }: AssistantEvents["assistant:image-changed"]) => {
+      if (session === ports.session && conversation === shownConversation.current) {
+        void readImages();
+      }
+    },
+  );
+  useEffect(
+    () =>
+      listenEvent<AssistantEvents["assistant:image-changed"]>("assistant:image-changed", (event) =>
+        imageChanged(event),
+      ),
+    [],
+  );
 
   // The tab dot marks the pages of the pending edits that apply, until the assistant unmounts,
   // which it does when AI goes off.
@@ -268,6 +399,7 @@ export function Assistant({
       linked: null,
       saved: null,
       proposals: [],
+      requestedImages: [],
     };
   }
 
@@ -286,6 +418,7 @@ export function Assistant({
       linked: null,
       saved: saved.id,
       proposals: [],
+      requestedImages: [],
     };
   }
 
@@ -294,6 +427,8 @@ export function Assistant({
     shownCount.current++;
     setMessages([]);
     setReviews([]);
+    showImages(noImages);
+    setApproveFailure(null);
     setAcceptFailure(null);
     setRefusal(null);
     setLoadError(null);
@@ -337,7 +472,7 @@ export function Assistant({
    */
   async function request(
     answer: AnswerMessage,
-    outgoing: { text: string; retry: boolean },
+    outgoing: { text: string; retry: boolean; regenerates?: number },
     refused: (message: string) => void,
   ) {
     const count = shownCount.current;
@@ -365,7 +500,12 @@ export function Assistant({
         show(event.conversation);
         updateAnswer(answer.id, (shown) => ({ ...shown, context }));
       } else if (event.kind === "image") {
-        // The pane does not show image requests yet.
+        const { name } = event;
+        updateAnswer(answer.id, (shown) =>
+          shown.state === "streaming"
+            ? { ...shown, requestedImages: [...shown.requestedImages, name] }
+            : shown,
+        );
       } else {
         updateAnswer(answer.id, (shown) =>
           shown.state === "streaming" ? { ...shown, text: shown.text + event.delta } : shown,
@@ -375,7 +515,13 @@ export function Assistant({
     let end: AnswerEnd;
     try {
       end = await assistantSend(
-        { conversation, text: outgoing.text, active: ports.activePage, retry: outgoing.retry },
+        {
+          conversation,
+          text: outgoing.text,
+          active: ports.activePage,
+          retry: outgoing.retry,
+          regenerates: outgoing.regenerates,
+        },
         onEvent,
       );
     } catch (error) {
@@ -401,6 +547,7 @@ export function Assistant({
     }));
     setAnnouncement(announcements[end.state]);
     void readReviews();
+    void readImages();
   }
 
   /**
@@ -507,6 +654,104 @@ export function Assistant({
     });
   }
 
+  /** Sends `change` as a message that regenerates the image `image`. */
+  function regenerate(image: number, change: string) {
+    const name = imagesById(images).get(image)?.name;
+    const user: UserMessage = {
+      id: nextId.current++,
+      role: "user",
+      text: change,
+      regenerates: name,
+    };
+    const answer = newAnswer();
+    setMessages((current) => [...current, user, answer]);
+    void request(answer, { text: change, retry: false, regenerates: image }, (message) => {
+      setMessages((current) => current.filter(({ id }) => id !== user.id && id !== answer.id));
+      setRefusal(`The change could not be sent: ${message}`);
+    });
+  }
+
+  /**
+   * Approves the pending image `image`: the core writes it to the world's `images` folder, the
+   * tree takes in the folder, and a toast says where it was saved, with Undo when history recorded
+   * it. A write that fails shows on the card. Resolves with whether it was approved.
+   */
+  async function approveImage(image: number): Promise<boolean> {
+    setAnnouncement("");
+    setApproveFailure(null);
+    setApproving((current) => [...current, image]);
+    let approved: ImageApproved;
+    try {
+      approved = await assistantImageApprove(image);
+    } catch (error) {
+      const { kind, message } = error as IpcError;
+      // On a conflict, the cards read again show why.
+      if (kind !== "conflict") setApproveFailure({ image, message });
+      setAnnouncement(withReason("The image was not saved", message));
+      await readImages();
+      return false;
+    } finally {
+      setApproving((current) => current.filter((id) => id !== image));
+    }
+    // The watcher ignores the core's own writes, so the tree reads the new folder itself.
+    await ports.pagesWritten([], { flash: false });
+    await readImages();
+    const text = `Image saved as ${approved.path}`;
+    const undoAction = { label: "Undo", run: () => void undoImage(image) };
+    ports.showToast(text, approved.undo ? undoAction : undefined);
+    setAnnouncement(text);
+    return true;
+  }
+
+  /** Undoes the approval of `image`; a refusal shows as a toast. Resolves with whether it was. */
+  async function undoImage(image: number): Promise<boolean> {
+    setAnnouncement("");
+    try {
+      await assistantImageUndo(image);
+    } catch (error) {
+      const { message } = error as IpcError;
+      ports.showToast(message);
+      setAnnouncement(message);
+      await readImages();
+      return false;
+    }
+    await ports.pagesDeleted([]);
+    await readImages();
+    setAnnouncement("The image's approval was undone.");
+    return true;
+  }
+
+  /**
+   * Runs an image command, then reads the images again and announces `done`. A refusal other than
+   * a conflict, which the cards read again show, is a toast. Resolves with whether it ran.
+   */
+  async function imageCommand(run: () => Promise<void>, done?: string): Promise<boolean> {
+    setAnnouncement("");
+    try {
+      await run();
+    } catch (error) {
+      const { kind, message } = error as IpcError;
+      if (kind !== "conflict") ports.showToast(message);
+      setAnnouncement(message);
+      await readImages();
+      return false;
+    }
+    await readImages();
+    if (done) setAnnouncement(done);
+    return true;
+  }
+
+  function copyEmbed(path: string) {
+    setAnnouncement("");
+    // `navigator.clipboard` is missing outside a secure context, which a rejection reports too.
+    Promise.resolve()
+      .then(() => navigator.clipboard.writeText(`![[${path}]]`))
+      .then(
+        () => setAnnouncement("Copied the embed"),
+        () => setAnnouncement("The embed could not be copied."),
+      );
+  }
+
   /** Answers the last message again, in place of its failed answer, or where none arrived. */
   function retry() {
     if (!last) return;
@@ -572,14 +817,35 @@ export function Assistant({
    * The message as the pane shows it, with each context page marked when the world lost it, and
    * the links of its current text.
    */
-  function shown(message: Message): ChatMessage {
-    if (message.role === "user") return message;
+  function shown(message: Message, position: number): ChatMessage {
+    if (message.role === "user") {
+      const regenerates =
+        message.regenerates ??
+        images.regenerations.find((regeneration) => regeneration.message === position)?.name;
+      return { ...message, regenerates };
+    }
     const { linked, context, saved, ...answer } = message;
     const links = linked?.text === message.text ? linked.links : undefined;
     const review = saved === null ? undefined : reviews.find((read) => read.answer === saved);
-    if (!context) return { ...answer, context: null, links, review };
+    const imagesOf =
+      saved === null ? undefined : images.answers.find((read) => read.answer === saved);
+    const reviewed = { ...answer, links, review, images: imagesOf };
+    if (!context) return { ...reviewed, context: null };
     const marked = context.pages.map((page) => ({ ...page, gone: !ports.hasPage(page.path) }));
-    return { ...answer, context: { ...context, pages: marked }, links, review };
+    return { ...reviewed, context: { ...context, pages: marked } };
+  }
+
+  /**
+   * The messages as the pane shows them. A message's position counts the messages the core keeps,
+   * as its regenerations name them, which leaves out an answer that was not saved.
+   */
+  function shownMessages() {
+    let position = 0;
+    return messages.map((message) => {
+      const at = position;
+      if (message.role === "user" || message.saved !== null) position++;
+      return shown(message, at);
+    });
   }
 
   /**
@@ -621,7 +887,7 @@ export function Assistant({
           : undefined
       }
       chat={{
-        messages: messages.map(shown),
+        messages: shownMessages(),
         draft,
         onDraftChange: setDraft,
         onSend: send,
@@ -644,6 +910,20 @@ export function Assistant({
             proposals.filter((proposal) => proposal.accept === set),
           );
           return undo(set, pagesOf(linked));
+        },
+        images: {
+          url: (image) => storedImageUrl(ports.session, image),
+          failureText: imageFailureText,
+          approving,
+          approveFailure,
+          onApprove: approveImage,
+          onRegenerate: regenerate,
+          onReject: (image) =>
+            imageCommand(() => assistantImageReject(image), "The image was rejected."),
+          onGenerate: (image) => imageCommand(() => assistantImageGenerate(image)),
+          onCancel: (image) => void imageCommand(() => assistantImageCancel(image)),
+          onCopyEmbed: copyEmbed,
+          onUndo: undoImage,
         },
       }}
     />

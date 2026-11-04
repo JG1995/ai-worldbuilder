@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -7,8 +8,10 @@ import type {
   AnswerReview,
   ContextPage,
   Conversation,
+  ConversationImages,
   Conversations,
   EditorLinks,
+  ImageReview,
   ProposalReview,
 } from "@/types/api";
 import { answerChannel, mockAssistantIpc } from "../api/test-ipc";
@@ -50,14 +53,18 @@ function mockPendingSends(
   });
   /** The calls that sent a message, in order. */
   const sent = () => calls.filter(({ command }) => command === "assistant_send");
-  /** The commands called, in order, without the reads of the conversations, links and proposals. */
+  /**
+   * The commands called, in order, without the reads of the conversations, links, proposals and
+   * images.
+   */
+  const reads = [
+    "assistant_conversations",
+    "assistant_links",
+    "assistant_review",
+    "assistant_images",
+  ];
   const commands = () =>
-    calls
-      .map(({ command }) => command)
-      .filter(
-        (command) =>
-          !["assistant_conversations", "assistant_links", "assistant_review"].includes(command),
-      );
+    calls.map(({ command }) => command).filter((command) => !reads.includes(command));
   return { calls, sends, sent, commands };
 }
 
@@ -444,9 +451,16 @@ describe("answers as references into the world", () => {
     });
     follow(answer, "Nowhere");
     expect(ports.openPage).toHaveBeenCalledOnce();
-    // Nothing is created: the core is asked only to send, and for links, conversations and proposals.
+    // Nothing is created: the core is asked only to send, and for links, conversations, proposals
+    // and images.
     expect(new Set(calls.map(({ command }) => command))).toEqual(
-      new Set(["assistant_conversations", "assistant_send", "assistant_links", "assistant_review"]),
+      new Set([
+        "assistant_conversations",
+        "assistant_send",
+        "assistant_links",
+        "assistant_review",
+        "assistant_images",
+      ]),
     );
   });
 
@@ -1144,5 +1158,248 @@ describe("proposals", () => {
     await waitFor(() => expect(liveRegion()).toHaveTextContent(message));
     expect(ports.showToast).toHaveBeenCalledExactlyOnceWith(message);
     expect(ports.pagesWritten).not.toHaveBeenCalled();
+  });
+});
+
+describe("images", () => {
+  const conversation: Conversation = {
+    id: 3,
+    title: "Draw the harbourmaster",
+    messages: [
+      { role: "user", text: "Draw the harbourmaster", time: 100 },
+      {
+        role: "answer",
+        id: 11,
+        text: "Here is a prompt.",
+        time: 101,
+        state: "complete",
+        pages: [],
+        leftOut: 0,
+        indexing: false,
+      },
+      { role: "user", text: "Older", time: 102 },
+    ],
+  };
+  const oslo = (overrides: Partial<ImageReview> = {}): ImageReview => ({
+    id: 5,
+    name: "Oslo",
+    frame: "portrait",
+    prompt: "Ink drawing of a harbourmaster.",
+    state: "pending",
+    notGenerated: null,
+    failure: null,
+    undone: false,
+    path: null,
+    undo: false,
+    revises: null,
+    revisesName: null,
+    reference: null,
+    ...overrides,
+  });
+  const imagesWith = (image: ImageReview): ConversationImages => ({
+    answers: [{ answer: 11, unreadable: 0, unfinished: false, images: [image] }],
+    regenerations: [{ message: 2, image: 5, name: "Oslo" }],
+  });
+
+  /** Mocks the core with the conversation above, whose images `images` reads, and `overrides`. */
+  function mockCore(images: () => ConversationImages, overrides: Record<string, Handler> = {}) {
+    const mocked = mockPendingSends(undefined, {
+      assistant_conversation: () => conversation,
+      assistant_images: () => images(),
+      ...overrides,
+    });
+    const reads = () => mocked.calls.filter(({ command }) => command === "assistant_images").length;
+    const argsOf = (command: string) => mocked.calls.find((call) => call.command === command)?.args;
+    return { ...mocked, reads, argsOf };
+  }
+
+  const card = () => screen.findByRole("article", { name: "Image: Oslo" });
+  const button = async (name: string) => within(await card()).getByRole("button", { name });
+
+  it("reads the images with the conversation, and again when an image of the shown conversation changes", async () => {
+    let image = oslo({ state: "generating" });
+    const { reads } = mockCore(() => imagesWith(image));
+    renderAssistant({}, 3);
+
+    expect(await button("Cancel")).toBeVisible();
+    expect(screen.getByText("Older")).toHaveTextContent("Regenerates the image “Oslo”Older");
+    image = oslo();
+    const before = reads();
+    await waitFor(async () => {
+      await emit("assistant:image-changed", { session: 1, conversation: 3 });
+      expect(reads()).toBeGreaterThan(before);
+    });
+    expect(await button("Approve")).toBeVisible();
+    expect(liveRegion()).toHaveTextContent("The image “Oslo” was generated.");
+
+    const after = reads();
+    await act(() => emit("assistant:image-changed", { session: 2, conversation: 3 }));
+    await act(() => emit("assistant:image-changed", { session: 1, conversation: 9 }));
+    expect(reads()).toBe(after);
+  });
+
+  it("approves an image: takes in the new folder, and the toast says where it was saved, with Undo", async () => {
+    let image = oslo();
+    const { argsOf } = mockCore(() => imagesWith(image), {
+      assistant_image_approve: () => {
+        image = oslo({ state: "approved", path: "images/Oslo.png", undo: true });
+        return { path: "images/Oslo.png", undo: true };
+      },
+      assistant_image_undo: () => {
+        image = oslo({ undone: true });
+        return null;
+      },
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(await button("Approve"));
+
+    await waitFor(() => expect(ports.showToast).toHaveBeenCalledOnce());
+    expect(argsOf("assistant_image_approve")).toEqual({ image: 5 });
+    expect(ports.pagesWritten).toHaveBeenCalledExactlyOnceWith([], { flash: false });
+    const [message, action] = vi.mocked(ports.showToast).mock.calls[0];
+    expect(message).toBe("Image saved as images/Oslo.png");
+    expect(action?.label).toBe("Undo");
+    expect(liveRegion()).toHaveTextContent("Image saved as images/Oslo.png");
+    await waitFor(async () => expect(await button("Undo")).toHaveFocus());
+
+    await act(async () => action?.run());
+    await waitFor(() => expect(ports.pagesDeleted).toHaveBeenCalledExactlyOnceWith([]));
+    expect(argsOf("assistant_image_undo")).toEqual({ image: 5 });
+    expect(await card()).toHaveTextContent("Undone; it can be approved again");
+  });
+
+  it("shows an approval that cannot be written on the card, and a refused undo as a toast", async () => {
+    const refused = "The image “images/Oslo.png” changed or is gone, so nothing was undone.";
+    let image = oslo();
+    mockCore(() => imagesWith(image), {
+      assistant_image_approve: () => {
+        throw { kind: "invalid_path", message: "The world is read-only." };
+      },
+      assistant_image_undo: () => {
+        throw { kind: "conflict", message: refused };
+      },
+    });
+    const ports = renderAssistant({}, 3);
+
+    fireEvent.click(await button("Approve"));
+
+    await waitFor(async () =>
+      expect(within(await card()).getByRole("alert")).toHaveTextContent(
+        "The image could not be saved: The world is read-only.",
+      ),
+    );
+    expect(ports.showToast).not.toHaveBeenCalled();
+    expect(ports.pagesWritten).not.toHaveBeenCalled();
+
+    image = oslo({ state: "approved", path: "images/Oslo.png", undo: true });
+    act(() => ports.indexChanged());
+    fireEvent.click(await button("Undo"));
+    await waitFor(() => expect(ports.showToast).toHaveBeenCalledExactlyOnceWith(refused));
+    expect(liveRegion()).toHaveTextContent(refused);
+    expect(ports.pagesDeleted).not.toHaveBeenCalled();
+  });
+
+  it("rejects an image, which collapses to its header", async () => {
+    let image = oslo();
+    const { argsOf } = mockCore(() => imagesWith(image), {
+      assistant_image_reject: () => {
+        image = oslo({ state: "rejected" });
+        return null;
+      },
+    });
+    renderAssistant({}, 3);
+
+    fireEvent.click(await button("Reject"));
+
+    await waitFor(async () => expect(await card()).toHaveTextContent("Rejected"));
+    expect(argsOf("assistant_image_reject")).toEqual({ image: 5 });
+    expect(within(await card()).queryAllByRole("button")).toEqual([]);
+    expect(liveRegion()).toHaveTextContent("The image was rejected.");
+  });
+
+  it("generates an image that was not generated, and cancels its generation", async () => {
+    let image = oslo({ state: "not_generated", notGenerated: "interrupted" });
+    const { argsOf } = mockCore(() => imagesWith(image), {
+      assistant_image_generate: () => {
+        image = oslo({ state: "generating" });
+        return null;
+      },
+      assistant_image_cancel: () => {
+        image = oslo({ state: "not_generated", notGenerated: "cancelled" });
+        return null;
+      },
+    });
+    renderAssistant({}, 3);
+
+    fireEvent.click(await button("Generate"));
+    await waitFor(async () => expect(await button("Cancel")).toHaveFocus());
+    expect(argsOf("assistant_image_generate")).toEqual({ image: 5 });
+    fireEvent.click(await button("Cancel"));
+
+    await waitFor(async () => expect(await button("Generate")).toBeVisible());
+    expect(argsOf("assistant_image_cancel")).toEqual({ image: 5 });
+    expect(await card()).toHaveTextContent("The generation was cancelled.");
+  });
+
+  it("copies an approved image's embed", async () => {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    mockCore(() => imagesWith(oslo({ state: "approved", path: "images/Oslo 2.png" })));
+    renderAssistant({}, 3);
+
+    fireEvent.click(await button("Copy embed"));
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("![[images/Oslo 2.png]]"),
+    );
+    expect(liveRegion()).toHaveTextContent("Copied the embed");
+  });
+
+  it("sends a change as a message that regenerates the image, naming it", async () => {
+    const { sends, sent } = mockCore(() => imagesWith(oslo()));
+    renderAssistant({}, 3);
+
+    fireEvent.click(await button("Regenerate"));
+    const change = screen.getByRole("textbox", { name: "Change" });
+    fireEvent.change(change, { target: { value: "With a grey beard" } });
+    fireEvent.keyDown(change, { key: "Enter" });
+
+    await waitFor(() => expect(sends).toHaveLength(1));
+    expect(sent()[0].args).toEqual({
+      conversation: 3,
+      text: "With a grey beard",
+      active: "Places/Kesh Tor.md",
+      retry: false,
+      regenerates: 5,
+    });
+    expect(screen.getByText("With a grey beard")).toHaveTextContent(
+      "Regenerates the image “Oslo”With a grey beard",
+    );
+    expect(composer()).toHaveFocus();
+  });
+
+  it("names each image begun while the answer streams, until it ends", async () => {
+    const { sends } = mockPendingSends();
+    renderAssistant();
+    const pending = await startAnswer(sends, "Draw the harbourmaster");
+
+    act(() => pending.send({ kind: "image", name: "Oslo" }));
+
+    expect(screen.getByText("Requesting an image: Oslo")).toBeInTheDocument();
+    await act(async () =>
+      pending.end({ state: "complete", conversation: 7, text: "Done.", answer: 11 }),
+    );
+    expect(screen.queryByText("Requesting an image: Oslo")).toBeNull();
+  });
+
+  it("shows no image when the core refuses to list them, as with AI off", async () => {
+    mockCore(() => {
+      throw { kind: "ai_off", message: "AI features are off." };
+    });
+    renderAssistant({}, 3);
+
+    expect(await screen.findByText("Here is a prompt.")).toBeInTheDocument();
+    expect(screen.queryByRole("article")).toBeNull();
   });
 });

@@ -32,7 +32,29 @@ passage:
 </edit>
 
 Lines such as [Proposed new page \"Places/Kesh Tor.md\": accepted] record your earlier proposals \
-and what became of them; never write them yourself.";
+and what became of them; never write them yourself.
+
+You can request images, but only when the user asks for one, and at most four in one answer. The \
+user reviews each image before anything is saved. Write each request in this form, with its \
+opening and closing tags at the start of a line. Its name says what the image shows, its frame is \
+square, portrait or landscape, and its text is the prompt:
+
+<image name=\"Harbourmaster Oslo\" frame=\"portrait\">
+Ink and watercolour illustration. A weathered harbourmaster of about sixty with a grey-streaked \
+beard, an oilskin coat and a brass spyglass, standing on a rain-wet stone quay at dusk. Waist up, \
+three-quarter view. Lantern light from the left; slate blues and warm amber.
+</image>
+
+Write each prompt as a brief for an illustrator: the medium and style first, then the subject's \
+concrete details as the world's pages give them, then the setting, the composition, the lighting \
+and the colours. Describe what the image shows rather than what to leave out, and leave out \
+filler words. The image model sees nothing but the prompt, so put every detail in it: a name \
+alone tells it nothing.
+
+An image's path is known only once the user approves it. Lines such as [Image \"Harbourmaster \
+Oslo\": saved as images/Harbourmaster Oslo.png] record your earlier images and what became of \
+them; never write them yourself. Propose an edit that embeds an image, such as \
+![[images/Harbourmaster Oslo.png]], only after such a line reports its saved path.";
 
 /// A request's messages, and what its context event tells: the pages it carries, how many earlier
 /// messages it leaves out, and whether the index was still being built. All come from this one
@@ -265,5 +287,23 @@ mod tests {
             ]
         );
         assert!(request.messages[0].content.contains("<edit path="));
+    }
+
+    #[test]
+    fn the_instructions_describe_image_requests_their_limit_and_their_outcome_lines() {
+        let request = build("Kesh", &Context::default(), &[], "Now?", None);
+
+        let instructions = &request.messages[0].content;
+        for told in [
+            "<image name=\"",
+            "frame=\"portrait\">\n",
+            "\n</image>",
+            "square, portrait or landscape",
+            "at most four in one answer",
+            "[Image \"",
+            "![[images/",
+        ] {
+            assert!(instructions.contains(told), "{told}");
+        }
     }
 }

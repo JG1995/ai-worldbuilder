@@ -1,11 +1,12 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { AnswerReview, EditorLink } from "@/types/api";
+import type { AnswerImages, AnswerReview, EditorLink, ImageReview } from "@/types/api";
 import {
   type AnswerState,
   type AssistantChat,
   AssistantPane,
   type ChatMessage,
+  type ImageActions,
   maxComposerLines,
 } from "./AssistantPane";
 
@@ -354,6 +355,187 @@ describe("AssistantPane's answers", () => {
       "Proposing a new page: Places/Saltmere/Docks",
       "Proposing an edit: Places/Saltmere.md",
     ]);
+  });
+
+  describe("with images", () => {
+    const imageActions = (overrides: Partial<ImageActions> = {}): ImageActions => ({
+      url: (image) => `blob:image-${image}`,
+      failureText: () => "The reason.",
+      approving: [],
+      approveFailure: null,
+      onApprove: vi.fn(() => Promise.resolve(true)),
+      onRegenerate: vi.fn(),
+      onReject: vi.fn(() => Promise.resolve(true)),
+      onGenerate: vi.fn(() => Promise.resolve(true)),
+      onCancel: vi.fn(),
+      onCopyEmbed: vi.fn(),
+      onUndo: vi.fn(() => Promise.resolve(true)),
+      ...overrides,
+    });
+    const image = (id: number, state: ImageReview["state"], name = `Image ${id}`): ImageReview => ({
+      id,
+      name,
+      frame: "square",
+      prompt: `A prompt for ${name}`,
+      state,
+      notGenerated: state === "not_generated" ? "over_limit" : null,
+      failure: null,
+      undone: false,
+      path: state === "approved" ? `images/${name}.png` : null,
+      undo: state === "approved",
+      revises: null,
+      revisesName: null,
+      reference: null,
+    });
+    const imagesOf = (
+      answer: number,
+      images: ImageReview[],
+      notes = { unreadable: 0, unfinished: false },
+    ): AnswerImages => ({ answer, ...notes, images });
+    /** A saved answer with its images, and its proposals when `review` is given. */
+    const withImages = (id: number, images: ImageReview[], review?: AnswerReview) => ({
+      ...answer(id, "complete", `Answer ${id}`),
+      review,
+      images: imagesOf(id, images),
+    });
+    const pane = (chat: AssistantChat) => (
+      <AssistantPane model="mistral-small" onOpenSettings={() => {}} chat={chat} />
+    );
+    /** The cards holding an accent-filled button. */
+    const primaries = () =>
+      [...document.querySelectorAll("button.bg-accent")].map((button) =>
+        button.closest("article")?.getAttribute("aria-label"),
+      );
+
+    it("shows an answer's image cards after its proposals, and the empty conversation says images go to openrouter.ai", () => {
+      const { unmount } = renderPane(chatWith({ images: imageActions() }));
+      expect(screen.getByText(/sends them, with your message/)).toHaveTextContent(
+        "When you ask for an image, it sends the image's prompt to openrouter.ai, and the image is saved in this world only when you approve it.",
+      );
+      unmount();
+
+      renderPane(
+        chatWith({
+          images: imageActions(),
+          messages: [
+            { id: 1, role: "user", text: "Write Kesh Tor and draw it" },
+            withImages(
+              2,
+              [image(5, "pending", "Kesh Tor"), image(6, "generating")],
+              reviewWith("pending"),
+            ),
+          ],
+        }),
+      );
+
+      const cards = screen.getAllByRole("article").map((card) => card.getAttribute("aria-label"));
+      expect(cards).toEqual(["New page: Kesh Tor", "Image: Kesh Tor", "Image: Image 6"]);
+      expect(screen.getByRole("img", { name: "Kesh Tor" })).toHaveAttribute("src", "blob:image-5");
+    });
+
+    it("gives the one primary button to the newest answer with anything pending: its Accept, else its first pending image's Approve", () => {
+      const messages = (newest: ChatMessage): ChatMessage[] => [
+        { id: 1, role: "user", text: "Draw two" },
+        withImages(2, [image(5, "pending"), image(6, "pending")]),
+        { id: 3, role: "user", text: "Write and draw" },
+        newest,
+      ];
+      const chat = (newest: ChatMessage) =>
+        chatWith({ images: imageActions(), messages: messages(newest) });
+      const { rerender } = renderPane(
+        chat(withImages(4, [image(7, "pending")], reviewWith("pending"))),
+      );
+      expect(primaries()).toEqual(["New page: Kesh Tor"]);
+
+      rerender(
+        pane(
+          chat(withImages(4, [image(7, "approved"), image(8, "pending")], reviewWith("accepted"))),
+        ),
+      );
+      expect(primaries()).toEqual(["Image: Image 8"]);
+
+      rerender(pane(chat(withImages(4, [image(7, "rejected")], reviewWith("accepted")))));
+      expect(primaries()).toEqual(["Image: Image 5"]);
+
+      // A pending proposal that no longer applies cannot be accepted, so the image keeps the light.
+      const stale = reviewWith("pending");
+      stale.proposals[0].check = { state: "no_longer_applies", reason: "The page exists." };
+      rerender(pane(chat(withImages(4, [image(7, "pending")], stale))));
+      expect(primaries()).toEqual(["Image: Image 7"]);
+    });
+
+    it("offers no Retry on a failed answer whose image is approved or being approved", () => {
+      const failedWith = (state: ImageReview["state"]): ChatMessage[] => [
+        { id: 1, role: "user", text: "Draw Kesh Tor" },
+        { ...failed, images: imagesOf(11, [image(5, state)]) },
+      ];
+      const { rerender } = renderPane(
+        chatWith({ images: imageActions(), messages: failedWith("pending") }),
+      );
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+
+      rerender(
+        pane(
+          chatWith({ images: imageActions({ approving: [5] }), messages: failedWith("pending") }),
+        ),
+      );
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+      rerender(pane(chatWith({ images: imageActions(), messages: failedWith("approved") })));
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    });
+
+    it("notes unreadable and unfinished image requests, and names the images begun while an answer arrives and a regeneration's image", () => {
+      renderPane(
+        chatWith({
+          images: imageActions(),
+          messages: [
+            { id: 1, role: "user", text: "Older", regenerates: "Harbourmaster Oslo" },
+            {
+              ...answer(2, "complete", "Here."),
+              images: imagesOf(2, [], { unreadable: 2, unfinished: true }),
+            },
+            { id: 3, role: "user", text: "Draw the quay" },
+            { ...answer(4, "streaming", "Drawing."), requestedImages: ["The quay", "The gull"] },
+          ],
+        }),
+      );
+
+      expect(screen.getByText("Older")).toHaveTextContent(
+        "Regenerates the image “Harbourmaster Oslo”Older",
+      );
+      expect(screen.getByText("2 requested images could not be read.")).toBeInTheDocument();
+      expect(
+        screen.getByText("The answer ended before an image request was complete."),
+      ).toBeInTheDocument();
+      const lines = within(screen.getByRole("list", { name: "Requested images" })).getAllByRole(
+        "listitem",
+      );
+      expect(lines.map((line) => line.textContent)).toEqual([
+        "Requesting an image: The quay",
+        "Requesting an image: The gull",
+      ]);
+    });
+
+    it("moves focus after a reject to the answer's next pending card, else to the composer", async () => {
+      renderPane(
+        chatWith({
+          images: imageActions(),
+          messages: [
+            { id: 1, role: "user", text: "Draw three" },
+            withImages(2, [image(5, "pending"), image(6, "approved"), image(7, "pending")]),
+          ],
+        }),
+      );
+      const reject = (card: string) =>
+        within(screen.getByRole("article", { name: card })).getByRole("button", {
+          name: "Reject",
+        });
+
+      await act(async () => fireEvent.click(reject("Image: Image 5")));
+      expect(screen.getByRole("article", { name: "Image: Image 7" })).toHaveFocus();
+      await act(async () => fireEvent.click(reject("Image: Image 7")));
+      expect(composer()).toHaveFocus();
+    });
   });
 });
 
