@@ -6,6 +6,7 @@ export type { AcceptedSet } from "./generated/AcceptedSet";
 export type { AcceptFailure } from "./generated/AcceptFailure";
 export type { AnswerEnd } from "./generated/AnswerEnd";
 export type { AnswerEvent } from "./generated/AnswerEvent";
+export type { AnswerImages } from "./generated/AnswerImages";
 export type { AnswerReview } from "./generated/AnswerReview";
 export type { AnswerState } from "./generated/AnswerState";
 export type { Backlink } from "./generated/Backlink";
@@ -13,6 +14,7 @@ export type { Backlinks } from "./generated/Backlinks";
 export type { Comparison } from "./generated/Comparison";
 export type { ContextPage } from "./generated/ContextPage";
 export type { Conversation } from "./generated/Conversation";
+export type { ConversationImages } from "./generated/ConversationImages";
 export type { ConversationSummary } from "./generated/ConversationSummary";
 export type { Conversations } from "./generated/Conversations";
 export type { DiffLine } from "./generated/DiffLine";
@@ -20,12 +22,17 @@ export type { EditorLink } from "./generated/EditorLink";
 export type { EditorLinks } from "./generated/EditorLinks";
 export type { EntryKind } from "./generated/EntryKind";
 export type { ErrorKind } from "./generated/ErrorKind";
+export type { GenerationFailure } from "./generated/GenerationFailure";
 export type { HistoryVersion } from "./generated/HistoryVersion";
 export type { ImageEmbed } from "./generated/ImageEmbed";
 export type { ImageFailure } from "./generated/ImageFailure";
 export type { ImageForm } from "./generated/ImageForm";
+export type { ImageFrame } from "./generated/ImageFrame";
 export type { ImageProvider } from "./generated/ImageProvider";
+export type { ImageReference } from "./generated/ImageReference";
 export type { ImageRequest } from "./generated/ImageRequest";
+export type { ImageReview } from "./generated/ImageReview";
+export type { ImageState } from "./generated/ImageState";
 export type { ImageTestOutcome } from "./generated/ImageTestOutcome";
 export type { KeyStorage } from "./generated/KeyStorage";
 export type { LineKind } from "./generated/LineKind";
@@ -37,6 +44,7 @@ export type { Mark } from "./generated/Mark";
 export type { MatchField } from "./generated/MatchField";
 export type { NewEntry } from "./generated/NewEntry";
 export type { NewLocation } from "./generated/NewLocation";
+export type { NotGenerated } from "./generated/NotGenerated";
 export type { PageMatch } from "./generated/PageMatch";
 export type { PageMatches } from "./generated/PageMatches";
 export type { PageText } from "./generated/PageText";
@@ -53,6 +61,7 @@ export type { ProviderFailure } from "./generated/ProviderFailure";
 export type { ProviderField } from "./generated/ProviderField";
 export type { ProviderSaved } from "./generated/ProviderSaved";
 export type { RecentWorld } from "./generated/RecentWorld";
+export type { Regeneration } from "./generated/Regeneration";
 export type { RestoredPage } from "./generated/RestoredPage";
 export type { SavedMessage } from "./generated/SavedMessage";
 export type { Settings } from "./generated/Settings";
@@ -92,4 +101,13 @@ export type WorldEvents = {
   "world:index-changed": { session: number };
   /** The page index cannot be built, because the world cannot be listed, for the reason given. */
   "world:index-failed": { session: number; message: string };
+};
+
+/**
+ * The assistant's events, by the name each is sent under. Kept by hand: the core's `ImageChanged`
+ * in `assistant/images.rs` is not a generated type.
+ */
+export type AssistantEvents = {
+  /** An image of `conversation`, in the world opening `session`, changed its state. */
+  "assistant:image-changed": { session: number; conversation: number };
 };

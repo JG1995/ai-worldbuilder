@@ -126,7 +126,7 @@ pub struct SettingsState {
     secrets: Arc<Secrets>,
     /// Where image requests go in tests: a local server instead of OpenRouter.
     #[cfg(test)]
-    image_base: String,
+    pub(crate) image_base: String,
 }
 
 struct Inner {
@@ -194,9 +194,23 @@ impl PreparedRequest {
 
 /// Where an image provider's request goes, and with which model.
 #[derive(Clone)]
-struct ImageTarget {
+pub struct ImageTarget {
     base: String,
     model: String,
+}
+
+/// A request to the image provider.
+pub type PreparedImageRequest = Prepared<ImageTarget>;
+
+impl PreparedImageRequest {
+    /// `providers::images::OPENROUTER`, or a local server in tests.
+    pub fn base(&self) -> &str {
+        &self.provider.base
+    }
+
+    pub fn model(&self) -> &str {
+        &self.provider.model
+    }
 }
 
 /// The request was not started: AI was switched off, or its provider saved again or its key
@@ -471,9 +485,10 @@ impl SettingsState {
         })
     }
 
-    /// The image test's first step, under the lock: AI is on, and an image provider is saved with
-    /// a stored key.
-    fn prepare_image_test(&self) -> Result<Prepared<ImageTarget>, AppError> {
+    /// An image request's or the image test's first step, under the lock: AI is on, and an image
+    /// provider is saved with a stored key. It holds the image generation and a copy of the
+    /// provider.
+    pub fn prepare_image_request(&self) -> Result<PreparedImageRequest, AppError> {
         let inner = self.lock();
         if !inner.saved.ai {
             return Err(ai_off());
@@ -661,6 +676,17 @@ impl SettingsState {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         lock(&self.inner)
     }
+
+    /// How many requests of `kind` are in the registry: started and not yet ended.
+    #[cfg(test)]
+    pub(crate) fn running_requests(&self, kind: ProviderKind) -> usize {
+        let inner = self.lock();
+        inner
+            .requests
+            .iter()
+            .filter(|running| running.kind == kind)
+            .count()
+    }
 }
 
 /// Every change to the state is a whole value, so it stays consistent after a panic.
@@ -802,7 +828,7 @@ async fn test_image(
     key: Option<String>,
     timeout: Duration,
 ) -> ImageTestOutcome {
-    // `prepare_image_test` lets only a provider with a stored key be tested.
+    // `prepare_image_request` lets only a provider with a stored key be tested.
     let key = key.unwrap_or_default();
     images::test(&target.base, &target.model, &key, timeout).await
 }
@@ -901,7 +927,7 @@ pub async fn image_provider_key_remove(app: AppHandle) -> Result<Settings, AppEr
 /// generating an image.
 #[tauri::command]
 pub async fn image_provider_test(app: AppHandle) -> Result<ImageTestOutcome, AppError> {
-    run_test(app, SettingsState::prepare_image_test, |target, key| {
+    run_test(app, SettingsState::prepare_image_request, |target, key| {
         test_image(target, key, providers::TIMEOUT)
     })
     .await
@@ -1493,7 +1519,7 @@ mod tests {
     /// The image test's steps as `image_provider_test` runs them.
     impl SettingsState {
         fn begin_image_test(&self) -> Result<ImageTest, AppError> {
-            self.begin_test(self.prepare_image_test()?)
+            self.begin_test(self.prepare_image_request()?)
         }
 
         fn launch_image_test(
@@ -1694,7 +1720,7 @@ mod tests {
             fixture.save(BASE_URL, Some(KEY)).unwrap();
             fixture.save_image(Some(IMAGE_KEY)).unwrap();
             let text = fixture.state.prepare_request().unwrap();
-            let image = fixture.state.prepare_image_test().unwrap();
+            let image = fixture.state.prepare_image_request().unwrap();
             let text_aborted = Arc::new(AtomicUsize::new(0));
             let image_aborted = Arc::new(AtomicUsize::new(0));
             let _text_guard = start_counted(&fixture.state, &text, &text_aborted).unwrap();

@@ -407,11 +407,9 @@ pub enum Settling {
 }
 
 /// The shape an image request asks for.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
 pub enum ImageFrame {
     Square,
     Portrait,
@@ -427,11 +425,7 @@ impl ImageFrame {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
-    fn parse(text: &str) -> Option<Self> {
+    pub(super) fn parse(text: &str) -> Option<Self> {
         match text {
             "square" => Some(Self::Square),
             "portrait" => Some(Self::Portrait),
@@ -482,11 +476,9 @@ impl ImageState {
 }
 
 /// Why an image is not generated.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
 pub enum NotGenerated {
     /// Its answer was stopped.
     Stopped,
@@ -515,10 +507,6 @@ impl NotGenerated {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     fn parse(text: &str) -> Option<Self> {
         match text {
             "stopped" => Some(Self::Stopped),
@@ -535,21 +523,15 @@ impl NotGenerated {
 
 /// What a regeneration's generation did with the image it revises: sent it, left it out because
 /// the model takes no image input, or found it gone.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
 pub enum ImageReference {
     Sent,
     NotTaken,
     Gone,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 impl ImageReference {
     fn as_str(self) -> &'static str {
         match self {
@@ -582,10 +564,6 @@ pub struct NewImage {
 }
 
 /// A saved image request and where it stands.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedImage {
     pub id: i64,
@@ -608,10 +586,6 @@ pub struct SavedImage {
 }
 
 /// A generated image's file content and its media type.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBytes {
     pub media_type: String,
@@ -620,10 +594,6 @@ pub struct ImageBytes {
 
 /// An image with its conversation, its answer and its bytes, which it has from its generation
 /// until it is rejected.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredImage {
     pub conversation: i64,
@@ -633,10 +603,6 @@ pub struct StoredImage {
 }
 
 /// An answer's images and its notes about image requests.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedAnswerImages {
     pub answer: i64,
@@ -647,24 +613,18 @@ pub struct SavedAnswerImages {
     pub images: Vec<SavedImage>,
 }
 
-/// A user message that regenerates an image, by the message's id, with the image's name.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
+/// A user message that regenerates an image, with the image's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedRegeneration {
-    pub message: i64,
+    /// The message's position, from 0, among its conversation's messages, as `conversation` lists
+    /// them; `SavedMessage` carries no id for a user message.
+    pub message: u32,
     pub image: i64,
     pub name: String,
 }
 
 /// A conversation's answers that have images or notes about them, in order, and its regeneration
 /// messages.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedImages {
     pub answers: Vec<SavedAnswerImages>,
@@ -1081,10 +1041,6 @@ impl Store {
     }
 
     /// Starts generating an image that is not generated.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     pub fn start_generating(&mut self, image: i64) -> Result<(), AppError> {
         self.write(|transaction| {
             require(
@@ -1103,10 +1059,6 @@ impl Store {
 
     /// Keeps a generating image's `bytes`, of `media_type`, and makes it pending. `reference` says
     /// what a regeneration did with the image it revises.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     pub fn generated(
         &mut self,
         image: i64,
@@ -1133,10 +1085,6 @@ impl Store {
     }
 
     /// Ends a generating image's generation without an image, for `reason`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     pub fn not_generated(&mut self, image: i64, reason: NotGenerated) -> Result<(), AppError> {
         self.write(|transaction| {
             require(transaction, image, ImageState::Generating, NOT_GENERATING)?;
@@ -1149,10 +1097,6 @@ impl Store {
     }
 
     /// Rejects a pending image for good and deletes its bytes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     pub fn reject_image(&mut self, image: i64) -> Result<(), AppError> {
         self.write(|transaction| {
             require(transaction, image, ImageState::Pending, NOT_PENDING_IMAGE)?;
@@ -1485,20 +1429,12 @@ impl Store {
     }
 
     /// The image `image` with its conversation, its answer and its bytes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     pub fn image(&self, image: i64) -> Result<StoredImage, AppError> {
         self.read_image(image)
             .map_err(store_error)?
             .ok_or_else(no_image)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     fn read_image(&self, image: i64) -> rusqlite::Result<Option<StoredImage>> {
         let Some((conversation, answer, saved)) = self
             .connection
@@ -1538,20 +1474,12 @@ impl Store {
 
     /// The answers of `conversation` that have images or notes about them, in order, each with its
     /// images, and the conversation's regeneration messages whose image still exists.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     pub fn images(&self, conversation: i64) -> Result<SavedImages, AppError> {
         self.read_images(conversation)
             .map_err(store_error)?
             .ok_or_else(no_conversation)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "generations arrive in package image-generation")
-    )]
     fn read_images(&self, conversation: i64) -> rusqlite::Result<Option<SavedImages>> {
         let exists: bool = self.connection.query_row(
             "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1)",
@@ -1588,7 +1516,10 @@ impl Store {
         let regenerations = self
             .connection
             .prepare(
-                "SELECT messages.id, images.id, images.name
+                "SELECT (SELECT count(*) FROM messages AS earlier
+                         WHERE earlier.conversation = messages.conversation
+                           AND earlier.id < messages.id),
+                        images.id, images.name
                  FROM messages JOIN images ON images.id = messages.regenerates
                  WHERE messages.conversation = ?1 ORDER BY messages.id",
             )?
@@ -2095,19 +2026,11 @@ fn unfinished_sets(connection: &Connection) -> rusqlite::Result<Vec<UnfinishedSe
 }
 
 /// The columns `saved_image` reads, in order.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 const IMAGE_COLUMNS: &str = "images.id, images.name, images.frame, images.prompt, images.revises,
     images.reference, images.state, images.reason, images.undone, images.path, images.change,
     images.started";
 
 /// The image in `row`, read from `IMAGE_COLUMNS` starting at the column `first`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 fn saved_image(row: &rusqlite::Row, first: usize) -> rusqlite::Result<SavedImage> {
     let reference: Option<String> = row.get(first + 5)?;
     let reason: Option<String> = row.get(first + 7)?;
@@ -2131,10 +2054,6 @@ fn saved_image(row: &rusqlite::Row, first: usize) -> rusqlite::Result<SavedImage
 }
 
 /// Refuses unless `image` is in the state `from`, with `refusal` when it is in another.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 fn require(
     transaction: &Transaction,
     image: i64,
@@ -2258,15 +2177,7 @@ fn no_image() -> AppError {
     AppError::new(ErrorKind::NotFound, "The image does not exist.")
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 const NOT_PENDING_IMAGE: &str = "The image is no longer pending.";
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "generations arrive in package image-generation")
-)]
 const NOT_GENERATING: &str = "The image is no longer being generated.";
 
 fn no_set() -> AppError {
@@ -3620,14 +3531,15 @@ mod tests {
 
         let store = opened(&app_data);
 
-        let message: i64 = store
-            .connection
-            .query_row(
-                "SELECT id FROM messages WHERE text = 'Brighter'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        // The fifth message, after Draw, Plain, Again and Here.
+        let message = 4;
+        assert!(
+            matches!(
+                &store.conversation(conversation).unwrap().messages[message as usize],
+                SavedMessage::User { text, .. } if text == "Brighter"
+            ),
+            "a regeneration's position names its message in the conversation's list"
+        );
         let not_generated = |id, name: &str, reason| SavedImage {
             id,
             name: name.to_owned(),

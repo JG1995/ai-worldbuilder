@@ -279,7 +279,7 @@ fn open(state: &WorldState, uri_path: &str) -> Option<(File, &'static str)> {
     Some((file, content_type))
 }
 
-fn image(bytes: Vec<u8>, content_type: &'static str) -> Response<Vec<u8>> {
+pub(crate) fn image(bytes: Vec<u8>, content_type: &'static str) -> Response<Vec<u8>> {
     let mut response = Response::new(bytes);
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -300,7 +300,7 @@ fn image(bytes: Vec<u8>, content_type: &'static str) -> Response<Vec<u8>> {
 }
 
 /// Every refusal: 404 with an empty body and no headers.
-fn refused() -> Response<Vec<u8>> {
+pub(crate) fn refused() -> Response<Vec<u8>> {
     let mut response = Response::new(Vec::new());
     *response.status_mut() = StatusCode::NOT_FOUND;
     response

@@ -181,7 +181,7 @@ describe("the assistant", () => {
     expect(within(pane).getByRole("button", { name: "Stop" })).toBeInTheDocument();
   });
 
-  it("stops a running answer before the world closes", async () => {
+  it("stops a running answer and every image generation before the world closes", async () => {
     const calls = await openWorld(withProvider, { assistant_stop: () => null });
 
     fireEvent.click(screen.getByRole("button", { name: "World menu" }));
@@ -189,8 +189,10 @@ describe("the assistant", () => {
 
     await screen.findByRole("button", { name: "Open world…" });
     const commands = calls.map(({ command }) => command);
-    expect(commands.lastIndexOf("assistant_stop")).toBeLessThan(commands.indexOf("world_close"));
-    expect(commands.lastIndexOf("assistant_stop")).toBeGreaterThan(commands.indexOf("world_open"));
+    const stop = commands.lastIndexOf("assistant_stop");
+    expect(stop).toBeLessThan(commands.indexOf("world_close"));
+    expect(stop).toBeGreaterThan(commands.indexOf("world_open"));
+    expect(calls[stop].args).toEqual({ generations: true });
   });
 
   it("has no button while the settings load", async () => {

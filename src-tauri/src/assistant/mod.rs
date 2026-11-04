@@ -16,6 +16,9 @@
 //! a set left unfinished, by this command or by an earlier opening, is resolved from what its pages
 //! hold.
 //!
+//! An answer's image requests are read from its whole text too, saved with it, and the first four
+//! of a complete or cut-off answer generated through the image provider (`images`).
+//!
 //! Lock order: settings, then world, then the assistant lock, then a store's lock. The assistant
 //! lock is held only briefly and never while calling into settings or reading a page; calls into
 //! settings, key reads and page reads run on the blocking pool, and so does the store's own file,
@@ -23,11 +26,14 @@
 //! when an accept or undo marks its set inside the world lock. No lock is held across an `.await`.
 
 mod context;
+mod images;
 mod proposals;
 mod request;
 mod store;
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+pub use images::{IMAGE_CHANGED, ImageChanged, is_stored_image, respond_image};
+
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -43,7 +49,7 @@ use crate::world::{self, BatchWrite, ChangeId, CurrentWorld, DiffLine, WorldStat
 use proposals::{Parsed, Piece, ProposalKind, Splitter};
 use request::Request;
 use store::{
-    Answer, AnswerProposals, AnswerState, Conversation, Conversations, HistoryChange,
+    Answer, AnswerProposals, AnswerState, Conversation, Conversations, HistoryChange, NotGenerated,
     ProposalContent, ProposalState, SavedProposal, SetPage, SetState, Store, UnfinishedSet,
 };
 
@@ -79,6 +85,8 @@ pub enum AnswerEvent {
     /// The answer began a proposal of the kind `change` for the page at `path`, as the model gave
     /// it.
     Proposal { change: ProposalKind, path: String },
+    /// The answer began an image request with this name, as the model gave it.
+    Image { name: String },
 }
 
 /// How an answer ended. Each carries the conversation, which is new when the message started one,
@@ -242,6 +250,8 @@ pub struct AssistantState {
     inner: Mutex<Inner>,
     /// Notified when a running answer has ended and been saved.
     ended: Condvar,
+    /// Where image changes are sent, set once at launch.
+    image_events: OnceLock<images::ImageSink>,
     /// Called at a step of `send`, so the tests can act between two steps.
     #[cfg(test)]
     hook: Mutex<Option<(Step, Hook)>>,
@@ -256,6 +266,7 @@ struct Inner {
     store: Option<(u64, SharedStore)>,
     running: Option<Running>,
     next_run: u64,
+    generations: images::Generations,
 }
 
 type SharedStore = Arc<Mutex<Store>>;
@@ -415,7 +426,12 @@ impl AssistantState {
         }
         let mut store = lock_store(&shared);
         let (conversation, text) = match (outgoing.retry, outgoing.conversation) {
-            (true, Some(conversation)) => (conversation, store.prepare_retry(conversation)?),
+            (true, Some(conversation)) => {
+                let text = store.prepare_retry(conversation)?;
+                // The answer it removed took its images along; their generations stop.
+                inner.generations.drop_gone(conversation, &store);
+                (conversation, text)
+            }
             (true, None) => {
                 return Err(AppError::new(
                     ErrorKind::NotFound,
@@ -458,6 +474,7 @@ impl AssistantState {
             .map(|piece| match piece {
                 Piece::Prose(delta) => AnswerEvent::Text { delta },
                 Piece::Begun { kind, path } => AnswerEvent::Proposal { change: kind, path },
+                Piece::BegunImage { name } => AnswerEvent::Image { name },
             })
             .collect()
     }
@@ -470,7 +487,9 @@ impl AssistantState {
     }
 
     /// Saves how the request of the running answer `run` ended, with `parsed`, read from its text
-    /// `raw`, in its session's store, and returns its end.
+    /// `raw`, in its session's store, and returns its end and the images to generate now, which
+    /// it has only when an image `provider` is saved.
+    #[expect(clippy::too_many_arguments, reason = "the steps of one answer's end")]
     fn finish(
         &self,
         run: u64,
@@ -479,7 +498,8 @@ impl AssistantState {
         carried: &Carried,
         raw: &str,
         parsed: Parsed,
-    ) -> Result<AnswerEnd, AppError> {
+        provider: bool,
+    ) -> Result<(AnswerEnd, Vec<i64>), AppError> {
         let mut inner = self.lock();
         let running = running(&mut inner, run).ok_or_else(internal)?;
         let state = match &outcome {
@@ -491,7 +511,14 @@ impl AssistantState {
             // its key removed.
             Err(_) => Some(AnswerState::Stopped),
         };
+        let generates = matches!(outcome, Ok(StreamEnd::Complete | StreamEnd::CutOff));
+        let otherwise = match outcome {
+            Ok(StreamEnd::Failed { .. }) => NotGenerated::AnswerFailed,
+            _ => NotGenerated::Stopped,
+        };
+        let new_images = images::new_images(&parsed.images, generates, provider, otherwise);
         let mut answer = None;
+        let mut started = Vec::new();
         if let (Some(state), Some(store)) = (state, &running.store) {
             let pages: Vec<(String, bool)> = carried
                 .pages
@@ -507,19 +534,19 @@ impl AssistantState {
                 proposals: &parsed.proposals,
                 unreadable: parsed.unreadable,
                 unfinished: parsed.unfinished,
-                images: &[],
-                image_unreadable: 0,
-                image_unfinished: false,
+                images: &new_images,
+                image_unreadable: parsed.image_unreadable,
+                image_unfinished: parsed.image_unfinished,
             };
             // A write the file refuses is made in memory, and the store's notice says that the
             // conversations are not being saved; the answer ends either way.
-            answer = lock_store(store)
-                .add_answer(conversation, &saved, now())
-                .ok()
-                .map(|(answer, _)| answer);
+            if let Ok((saved, images)) = lock_store(store).add_answer(conversation, &saved, now()) {
+                answer = Some(saved);
+                started = images::to_start(images, generates, provider);
+            }
         }
         let text = parsed.prose;
-        Ok(match outcome {
+        let end = match outcome {
             Ok(StreamEnd::Complete) => AnswerEnd::Complete {
                 conversation,
                 text,
@@ -547,7 +574,8 @@ impl AssistantState {
                 text,
                 answer,
             },
-        })
+        };
+        Ok((end, started))
     }
 
     /// Asks the running answer, if any and if `which` it is, to stop, aborts its request, waits
@@ -594,13 +622,14 @@ fn running(inner: &mut Inner, run: u64) -> Option<&mut Running> {
 }
 
 /// The store of `world`'s session, opened from the world's file when the session changed, so a
-/// reopened world reads its file again.
+/// reopened world reads its file again. Opening it aborts every generation of an older session.
 fn store_of(inner: &mut Inner, world: &CurrentWorld) -> Result<SharedStore, AppError> {
     if let Some((session, store)) = &inner.store
         && *session == world.session
     {
         return Ok(Arc::clone(store));
     }
+    inner.generations.replace_session(world.session);
     let now = u64::try_from(now()).unwrap_or_default();
     let store = Store::open(world.app_data.as_deref(), &world.root, now)?;
     let store = Arc::new(Mutex::new(store));
@@ -703,11 +732,26 @@ pub(crate) async fn send<S: Services>(
     let outcome = task.await;
     let end = blocking(&services, move |services| {
         drop(guard);
+        let image_request = services.settings().prepare_image_request().ok();
         let assistant = services.assistant();
         let raw = assistant.take_raw(run_id)?;
         let complete = matches!(outcome, Ok(StreamEnd::Complete));
         let parsed = read_answer(services.world(), session, &raw, complete);
-        assistant.finish(run_id, conversation, outcome, &carried, &raw, parsed)
+        let provider = image_request.is_some();
+        let (end, started) = assistant.finish(
+            run_id,
+            conversation,
+            outcome,
+            &carried,
+            &raw,
+            parsed,
+            provider,
+        )?;
+        // Before the answer's entry ends, so a stop that waits for it sees these generations.
+        if let Some(prepared) = image_request.filter(|_| !started.is_empty()) {
+            images::start_all(services, session, &prepared, &started);
+        }
+        Ok(end)
     })
     .await;
     drop(run);
@@ -845,25 +889,29 @@ async fn stream<S: Services>(
 }
 
 /// Refuses while AI is off; otherwise stops the running answer, if any, and returns once it has
-/// been saved.
-pub(crate) async fn stop<S: Services>(services: S) -> Result<(), AppError> {
-    blocking(&services, |services| {
+/// been saved. With `generations`, which a world change or the window's close asks for, it aborts
+/// every running generation too; each ends as interrupted.
+pub(crate) async fn stop<S: Services>(services: S, generations: bool) -> Result<(), AppError> {
+    blocking(&services, move |services| {
         if !services.settings().ai_on() {
             return Err(settings::ai_off());
         }
         let assistant = services.assistant();
-        drop(assistant.stop_running(assistant.lock(), |_| true));
+        let inner = assistant.stop_running(assistant.lock(), |_| true);
+        if generations {
+            inner.generations.abort_all();
+        }
         Ok(())
     })
     .await
 }
 
-/// Refuses while AI is off; otherwise runs `work` on the open world's store, under the assistant
-/// lock, after stopping the running answer when `stopping` it is.
+/// Refuses while AI is off; otherwise runs `work` on the assistant's state and the open world's
+/// store, under the assistant lock, after stopping the running answer when `stopping` it is.
 async fn with_store<S: Services, T: Send + 'static>(
     services: &S,
     stopping: impl Fn(&Running) -> bool + Send + 'static,
-    work: impl FnOnce(&mut Store) -> Result<T, AppError> + Send + 'static,
+    work: impl FnOnce(&mut Inner, &mut Store) -> Result<T, AppError> + Send + 'static,
 ) -> Result<T, AppError> {
     blocking(services, move |services| {
         if !services.settings().ai_on() {
@@ -873,14 +921,14 @@ async fn with_store<S: Services, T: Send + 'static>(
         let assistant = services.assistant();
         let mut inner = assistant.stop_running(assistant.lock(), stopping);
         let store = store_of(&mut inner, &world)?;
-        work(&mut lock_store(&store))
+        work(&mut inner, &mut lock_store(&store))
     })
     .await
 }
 
 /// The open world's conversations, newest first, and how they are kept.
 pub(crate) async fn conversations<S: Services>(services: S) -> Result<Conversations, AppError> {
-    with_store(&services, |_| false, |store| store.conversations()).await
+    with_store(&services, |_| false, |_, store| store.conversations()).await
 }
 
 /// One of the open world's conversations with its messages.
@@ -888,14 +936,19 @@ pub(crate) async fn conversation<S: Services>(
     services: S,
     id: i64,
 ) -> Result<Conversation, AppError> {
-    with_store(&services, |_| false, move |store| store.conversation(id)).await
+    with_store(&services, |_| false, move |_, store| store.conversation(id)).await
 }
 
 /// Deletes one of the open world's conversations for good, once an answer running in it has
-/// stopped and been saved.
+/// stopped and been saved, and stops its images' generations.
 pub(crate) async fn delete<S: Services>(services: S, id: i64) -> Result<(), AppError> {
     let answering = move |running: &Running| running.conversation == Some(id);
-    with_store(&services, answering, move |store| store.delete(id)).await
+    with_store(&services, answering, move |inner, store| {
+        store.delete(id)?;
+        inner.generations.drop_conversation(id);
+        Ok(())
+    })
+    .await
 }
 
 /// Refuses while AI is off; otherwise the links of `text`, an answer's text, each with the page it
@@ -1433,10 +1486,11 @@ pub async fn assistant_send(
     send(app, outgoing, on_event, providers::READ_TIMEOUT).await
 }
 
-/// Stops the running answer, if any, and returns once its text has been saved.
+/// Stops the running answer, if any, and returns once its text has been saved. With `generations`,
+/// which only a world change or the window's close passes, it stops every generation too.
 #[tauri::command]
-pub async fn assistant_stop(app: AppHandle) -> Result<(), AppError> {
-    stop(app).await
+pub async fn assistant_stop(app: AppHandle, generations: Option<bool>) -> Result<(), AppError> {
+    stop(app, generations.unwrap_or(false)).await
 }
 
 /// The links of an answer's text, resolved as on a page at the world's top level.
@@ -1496,14 +1550,45 @@ pub async fn assistant_undo(app: AppHandle, set: i64) -> Result<Undone, AppError
     undo(app, set).await
 }
 
+/// A conversation's images, with each answer's notes about image requests, and its regeneration
+/// messages.
+#[tauri::command]
+pub async fn assistant_images(
+    app: AppHandle,
+    conversation: i64,
+) -> Result<images::ConversationImages, AppError> {
+    images::images(app, conversation).await
+}
+
+/// Starts generating an image that is not generated, and returns once it has started.
+#[tauri::command]
+pub async fn assistant_image_generate(app: AppHandle, image: i64) -> Result<(), AppError> {
+    images::generate(app, image).await
+}
+
+/// Stops generating an image, if it is being generated.
+#[tauri::command]
+pub async fn assistant_image_cancel(app: AppHandle, image: i64) -> Result<(), AppError> {
+    images::cancel(app, image).await
+}
+
+/// Rejects a pending image for good and deletes its bytes.
+#[tauri::command]
+pub async fn assistant_image_reject(app: AppHandle, image: i64) -> Result<(), AppError> {
+    images::reject(app, image).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::history::testing as history_testing;
     use crate::history::{Entry, History, Kind, State};
     use crate::index::{BuildState, EditorLink, LinkState};
-    use crate::providers::test_support::{Server, answer, stream_head};
+    use crate::providers::test_support::{Recorded, Server, answer, json_answer, stream_head};
     use crate::secrets::test_support::{KEY, MockKeychain};
+    use crate::settings::ProviderKind;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     use serde_json::{Value, json};
     use std::fs;
     use std::path::Path;
@@ -1552,6 +1637,8 @@ mod tests {
         server: Server,
         world: TempDir,
         app_data: TempDir,
+        /// Each image change sent, in order.
+        image_events: Arc<Mutex<Vec<ImageChanged>>>,
     }
 
     impl Fixture {
@@ -1562,10 +1649,28 @@ mod tests {
         }
 
         fn without_provider(server: Server) -> Self {
+            Self::build(server, None)
+        }
+
+        /// `new`, with an image provider saved whose requests go to `images` with `IMAGE_KEY`.
+        fn imaging(server: Server, images: &Server) -> Self {
+            let fixture = Self::build(server, Some(format!("http://{}/api/v1", images.address())));
+            fixture.save_provider();
+            fixture
+                .settings()
+                .save_image_provider(IMAGE_MODEL, Some(IMAGE_KEY), false)
+                .unwrap();
+            fixture
+        }
+
+        fn build(server: Server, image_base: Option<String>) -> Self {
             let data = tempfile::tempdir().unwrap();
             let keychain = MockKeychain::new();
-            let settings =
+            let mut settings =
                 SettingsState::with_secrets(Some(data.path()), keychain.secrets(Some(data.path())));
+            // Never OpenRouter: without an image server, a closed port on this computer.
+            settings.image_base =
+                image_base.unwrap_or_else(|| "http://127.0.0.1:1/api/v1".to_owned());
             let world = tempfile::tempdir().unwrap();
             fs::create_dir(world.path().join("Places")).unwrap();
             fs::write(world.path().join(PAGE), "# Saltmere\nA port town.\n").unwrap();
@@ -1576,12 +1681,18 @@ mod tests {
             };
             states.world.load_recent(data.path());
             states.world.open(world.path().to_path_buf()).unwrap();
+            let image_events = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&image_events);
+            states
+                .assistant
+                .set_image_events(Arc::new(move |changed| sink.lock().unwrap().push(changed)));
             let fixture = Self {
                 services: TestServices(Arc::new(states)),
                 keychain,
                 server,
                 world,
                 app_data: data,
+                image_events,
             };
             fixture.indexed();
             fixture
@@ -1672,7 +1783,7 @@ mod tests {
         }
 
         fn stop(&self) -> Result<(), AppError> {
-            block_on(stop(self.services.clone()))
+            block_on(stop(self.services.clone(), false))
         }
 
         /// Calls `hook` when `send` reaches `step`.
@@ -2015,7 +2126,7 @@ mod tests {
     /// mark is set; the thread's stop returns once the answer has ended.
     fn stop_from_another_thread(services: &TestServices) -> thread::JoinHandle<()> {
         let stopper = services.clone();
-        let handle = thread::spawn(move || block_on(stop(stopper)).unwrap());
+        let handle = thread::spawn(move || block_on(stop(stopper, false)).unwrap());
         wait_until("the stop mark", || {
             services
                 .assistant()
@@ -3502,6 +3613,667 @@ mod tests {
                 accepted: Vec::new(),
             }]
         );
+    }
+
+    const IMAGE_MODEL: &str = "test/image-model";
+    const IMAGE_KEY: &str = "sk-or-image-9876543210";
+
+    /// A PNG the structural check accepts.
+    fn png() -> Vec<u8> {
+        [
+            b"\x89PNG\r\n\x1a\n".as_slice(),
+            b"\0\0\0\rIHDR pixels",
+            b"\0\0\0\0IEND\xae\x42\x60\x82",
+        ]
+        .concat()
+    }
+
+    /// An answer that requests `count` portrait images, each complete.
+    fn requesting(count: usize) -> String {
+        let mut text = "Here.\n".to_owned();
+        for index in 0..count {
+            text.push_str(&format!(
+                "<image name=\"Gull {index}\" frame=\"portrait\">\nAn ink drawing of gull {index}.\n</image>\n"
+            ));
+        }
+        text
+    }
+
+    /// The image provider: a model listing whose model takes an aspect ratio and image input, and
+    /// generations that answer with `png()`, or with `failure`, once `released`.
+    struct ImageServer {
+        server: Server,
+        released: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ImageServer {
+        fn answering() -> Self {
+            Self::start(true, None)
+        }
+
+        /// Generations hold their connection open until `release`.
+        fn holding() -> Self {
+            Self::start(false, None)
+        }
+
+        fn failing(failure: Vec<u8>) -> Self {
+            Self::start(true, Some(failure))
+        }
+
+        fn start(released: bool, failure: Option<Vec<u8>>) -> Self {
+            let released = Arc::new((Mutex::new(released), Condvar::new()));
+            let gate = Arc::clone(&released);
+            let listing = json!({
+                "data": [{
+                    "id": IMAGE_MODEL,
+                    "architecture": { "input_modalities": ["text", "image"] },
+                    "supported_parameters": ["aspect_ratio"],
+                }]
+            })
+            .to_string();
+            let reply =
+                json!({ "data": [{ "b64_json": STANDARD.encode(png()), "media_type": "image/png" }] })
+                    .to_string();
+            let server = Server::start(move |request| match request.path.as_str() {
+                "/api/v1/images/models" => Some(json_answer("200 OK", &listing)),
+                "/api/v1/images" => {
+                    let (open, opened) = &*gate;
+                    let mut open = open.lock().unwrap();
+                    while !*open {
+                        open = opened.wait(open).unwrap();
+                    }
+                    Some(
+                        failure
+                            .clone()
+                            .unwrap_or_else(|| json_answer("200 OK", &reply)),
+                    )
+                }
+                _ => Some(json_answer("404 Not Found", "{}")),
+            });
+            Self { server, released }
+        }
+
+        fn release(&self) {
+            let (open, opened) = &*self.released;
+            *open.lock().unwrap() = true;
+            opened.notify_all();
+        }
+
+        /// Each generation request received, in order.
+        fn generations(&self) -> Vec<Recorded> {
+            self.server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/api/v1/images")
+                .collect()
+        }
+    }
+
+    impl Fixture {
+        fn current_store(&self) -> SharedStore {
+            self.assistant().lock().store.clone().unwrap().1
+        }
+
+        fn saved_images(&self, conversation: i64) -> Vec<store::SavedImage> {
+            lock_store(&self.current_store())
+                .images(conversation)
+                .unwrap()
+                .answers
+                .into_iter()
+                .flat_map(|answer| answer.images)
+                .collect()
+        }
+
+        fn saved_image(&self, image: i64) -> store::StoredImage {
+            lock_store(&self.current_store()).image(image).unwrap()
+        }
+
+        fn state_of(&self, image: i64) -> (store::ImageState, Option<NotGenerated>) {
+            let saved = self.saved_image(image).image;
+            (saved.state, saved.reason)
+        }
+
+        /// Waits until `image` is in `state`.
+        fn wait_for(&self, image: i64, state: store::ImageState) {
+            wait_until(&format!("image {image} {state:?}"), || {
+                self.state_of(image).0 == state
+            });
+        }
+
+        /// How many image requests settings' registry holds: started and not yet ended.
+        fn image_requests(&self) -> usize {
+            self.settings().running_requests(ProviderKind::Image)
+        }
+
+        fn images(&self, conversation: i64) -> Result<Value, AppError> {
+            block_on(images::images(self.services.clone(), conversation))
+                .map(|images| serde_json::to_value(images).unwrap())
+        }
+
+        fn generate(&self, image: i64) -> Result<(), AppError> {
+            block_on(images::generate(self.services.clone(), image))
+        }
+
+        fn cancel(&self, image: i64) -> Result<(), AppError> {
+            block_on(images::cancel(self.services.clone(), image))
+        }
+
+        fn reject_image(&self, image: i64) -> Result<(), AppError> {
+            block_on(images::reject(self.services.clone(), image))
+        }
+
+        /// Sends a message whose answer requests one image, and returns the conversation and the
+        /// image.
+        fn ask_for_an_image(&self) -> (i64, i64) {
+            let (end, _) = self.send(None, "Draw a gull", None);
+            let conversation = conversation_of(&end.unwrap());
+            (conversation, self.saved_images(conversation)[0].id)
+        }
+
+        /// Adds a regeneration message of `earlier` and an answer whose one image revises it, as
+        /// package image-approval will, and returns that image.
+        fn add_regeneration(&self, conversation: i64, earlier: i64) -> i64 {
+            let store = self.current_store();
+            let mut store = lock_store(&store);
+            store
+                .add_user_message(Some(conversation), "Brighter", Some(earlier), 0)
+                .unwrap();
+            let revising = [store::NewImage {
+                name: "Gull brighter".to_owned(),
+                frame: store::ImageFrame::Square,
+                prompt: "A bright ink drawing of a gull.".to_owned(),
+                revises: Some(earlier),
+                reason: NotGenerated::Interrupted,
+            }];
+            let answer = Answer {
+                state: AnswerState::Complete,
+                text: "Again.",
+                pages: &[],
+                left_out: 0,
+                indexing: false,
+                proposals: &[],
+                unreadable: 0,
+                unfinished: false,
+                images: &revising,
+                image_unreadable: 0,
+                image_unfinished: false,
+            };
+            store.add_answer(conversation, &answer, 0).unwrap().1[0]
+        }
+    }
+
+    #[test]
+    fn an_answer_s_first_four_images_are_generated_with_the_image_key_and_the_rest_are_not() {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(5)), &images.server);
+
+        let (end, events) = fixture.send(None, "Draw five gulls", None);
+
+        let conversation = conversation_of(&end.unwrap());
+        let begun: Vec<Value> = events
+            .into_iter()
+            .filter(|event| event["kind"] == "image")
+            .collect();
+        assert_eq!(
+            begun,
+            (0..5)
+                .map(|index| json!({ "kind": "image", "name": format!("Gull {index}") }))
+                .collect::<Vec<_>>()
+        );
+        let saved = fixture.saved_images(conversation);
+        for image in &saved[..4] {
+            fixture.wait_for(image.id, store::ImageState::Pending);
+            assert_eq!(fixture.saved_image(image.id).bytes.unwrap().bytes, png());
+        }
+        assert_eq!(
+            fixture.state_of(saved[4].id),
+            (
+                store::ImageState::NotGenerated,
+                Some(NotGenerated::OverLimit)
+            )
+        );
+        let mut prompts: Vec<String> = images
+            .generations()
+            .iter()
+            .map(|request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["model"], IMAGE_MODEL);
+                assert_eq!(body["aspect_ratio"], "3:4");
+                body["prompt"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        prompts.sort();
+        assert_eq!(
+            prompts,
+            (0..4)
+                .map(|index| format!("An ink drawing of gull {index}."))
+                .collect::<Vec<_>>()
+        );
+        // Each key goes only to its own provider, and neither is kept.
+        for request in images.server.requests() {
+            assert_eq!(
+                request.header("authorization"),
+                Some(format!("Bearer {IMAGE_KEY}").as_str())
+            );
+        }
+        for request in fixture.server.requests() {
+            assert_eq!(
+                request.header("authorization"),
+                Some(format!("Bearer {KEY}").as_str())
+            );
+        }
+        let stored = String::from_utf8_lossy(&fixture.store_bytes()).into_owned();
+        assert!(!stored.contains(IMAGE_KEY) && !stored.contains(KEY));
+        // Each start and each finish says which session's conversation changed.
+        let session = fixture.services.world().current().unwrap().session;
+        wait_until("eight changes", || {
+            fixture.image_events.lock().unwrap().len() == 8
+        });
+        assert!(
+            fixture
+                .image_events
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|changed| *changed
+                    == ImageChanged {
+                        session,
+                        conversation
+                    })
+        );
+    }
+
+    #[test]
+    fn a_stopped_or_failed_answer_s_images_and_any_without_an_image_provider_are_not_generated() {
+        let one = requesting(1);
+        let images = ImageServer::answering();
+        let stopped = Fixture::imaging(stalling(&one), &images.server);
+        let (handle, events) = stopped.start(None, "Draw", None, false);
+        wait_until("the image event", || {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == "image")
+        });
+        stopped.stop().unwrap();
+        let conversation = conversation_of(&handle.join().unwrap().unwrap());
+        let failed = Fixture::imaging(
+            Server::streaming(vec![stream_head(), delta(&one).into_bytes()], false),
+            &images.server,
+        );
+        let unsaved = Fixture::new(answering(&one));
+
+        let cases = [
+            (&stopped, conversation, NotGenerated::Stopped),
+            (
+                &failed,
+                failed.ask_for_an_image().0,
+                NotGenerated::AnswerFailed,
+            ),
+            (
+                &unsaved,
+                unsaved.ask_for_an_image().0,
+                NotGenerated::NoProvider,
+            ),
+        ];
+
+        for (fixture, conversation, reason) in cases {
+            let saved = fixture.saved_images(conversation);
+            assert_eq!(saved.len(), 1, "{reason:?}");
+            assert_eq!(
+                fixture.state_of(saved[0].id),
+                (store::ImageState::NotGenerated, Some(reason))
+            );
+        }
+        assert!(images.server.requests().is_empty());
+    }
+
+    #[test]
+    fn generate_starts_an_image_that_is_not_generated_and_refuses_any_other() {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        fixture.settings().remove_image_key().unwrap();
+        let (_, image) = fixture.ask_for_an_image();
+        let no_provider = (
+            store::ImageState::NotGenerated,
+            Some(NotGenerated::NoProvider),
+        );
+        assert_eq!(fixture.state_of(image), no_provider);
+
+        assert_eq!(
+            fixture.generate(image).unwrap_err().kind,
+            ErrorKind::NotFound
+        );
+        assert_eq!(fixture.state_of(image), no_provider);
+        assert!(images.server.requests().is_empty());
+
+        fixture
+            .settings()
+            .save_image_provider(IMAGE_MODEL, Some(IMAGE_KEY), false)
+            .unwrap();
+        fixture.generate(image).unwrap();
+        fixture.wait_for(image, store::ImageState::Pending);
+        assert_eq!(images.generations().len(), 1);
+        assert_eq!(
+            fixture.generate(image).unwrap_err().kind,
+            ErrorKind::Conflict
+        );
+        assert_eq!(fixture.generate(999).unwrap_err().kind, ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn each_way_to_stop_a_generation_aborts_its_request_and_leaves_no_image() {
+        let interrupted = Some((
+            store::ImageState::NotGenerated,
+            Some(NotGenerated::Interrupted),
+        ));
+        let cases = [
+            (
+                "cancel",
+                Some((
+                    store::ImageState::NotGenerated,
+                    Some(NotGenerated::Cancelled),
+                )),
+            ),
+            ("stop with generations", interrupted),
+            ("image provider saved", interrupted),
+            ("image key removed", interrupted),
+            ("AI off", interrupted),
+            ("a newer session's store", interrupted),
+            ("conversation deleted", None),
+            ("answer retried", None),
+        ];
+        for (name, expected) in cases {
+            let images = ImageServer::holding();
+            let text = requesting(1);
+            let retried = name == "answer retried";
+            let fixture = match retried {
+                // Only a stopped answer can be retried; its image is generated on request.
+                true => Fixture::imaging(stalling(&text), &images.server),
+                false => Fixture::imaging(answering(&text), &images.server),
+            };
+            let (conversation, image) = match retried {
+                true => {
+                    let (handle, events) = fixture.start(None, "Draw", None, false);
+                    wait_until("the image event", || events.lock().unwrap().len() >= 2);
+                    fixture.stop().unwrap();
+                    let conversation = conversation_of(&handle.join().unwrap().unwrap());
+                    let image = fixture.saved_images(conversation)[0].id;
+                    fixture.generate(image).unwrap();
+                    (conversation, image)
+                }
+                false => fixture.ask_for_an_image(),
+            };
+            wait_until("the held generation", || images.generations().len() == 1);
+            assert_eq!(
+                fixture.state_of(image).0,
+                store::ImageState::Generating,
+                "{name}"
+            );
+
+            let mut retry = None;
+            match name {
+                "cancel" => fixture.cancel(image).unwrap(),
+                "stop with generations" => block_on(stop(fixture.services.clone(), true)).unwrap(),
+                "image provider saved" => drop(
+                    fixture
+                        .settings()
+                        .save_image_provider(IMAGE_MODEL, None, false)
+                        .unwrap(),
+                ),
+                "image key removed" => drop(fixture.settings().remove_image_key().unwrap()),
+                "AI off" => drop(fixture.settings().set_ai(false).unwrap()),
+                "a newer session's store" => {
+                    fixture.reopen_world();
+                    fixture.conversations().unwrap();
+                }
+                "conversation deleted" => fixture.delete(conversation).unwrap(),
+                _ => retry = Some(fixture.start(Some(conversation), "", None, true)),
+            }
+
+            // Only an abort ends a request the server holds open.
+            wait_until(name, || fixture.image_requests() == 0);
+            fixture.settings().set_ai(true).unwrap();
+            match expected {
+                Some(state) => {
+                    wait_until(name, || Some(fixture.state_of(image)) == expected);
+                    assert_eq!(Some(fixture.state_of(image)), Some(state));
+                    assert_eq!(fixture.saved_image(image).bytes, None, "{name}");
+                }
+                None => assert_eq!(
+                    lock_store(&fixture.current_store())
+                        .image(image)
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::NotFound,
+                    "{name}"
+                ),
+            }
+            images.release();
+            if let Some((handle, _)) = retry {
+                fixture.stop().unwrap();
+                handle.join().unwrap().unwrap();
+            }
+            assert_eq!(
+                images.generations().len(),
+                1,
+                "{name}: nothing was sent again"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pane_s_stop_another_conversation_and_a_text_provider_save_leave_a_generation_running() {
+        let images = ImageServer::holding();
+        let fixture = Fixture::imaging(
+            answering_in_turn(&[&requesting(1), "Plain."]),
+            &images.server,
+        );
+        let (conversation, image) = fixture.ask_for_an_image();
+        wait_until("the held generation", || images.generations().len() == 1);
+
+        fixture.stop().unwrap();
+        fixture.send(None, "Something else", None).0.unwrap();
+        fixture.conversation(conversation).unwrap();
+        fixture.save_provider();
+
+        assert_eq!(fixture.image_requests(), 1);
+        assert_eq!(fixture.state_of(image).0, store::ImageState::Generating);
+        images.release();
+        fixture.wait_for(image, store::ImageState::Pending);
+        assert_eq!(fixture.saved_image(image).bytes.unwrap().bytes, png());
+    }
+
+    #[test]
+    fn a_failure_is_kept_for_the_opening_and_reject_deletes_an_image_s_bytes() {
+        let failing = ImageServer::failing(json_answer(
+            "402 Payment Required",
+            r#"{"error":{"message":"Out of credit."}}"#,
+        ));
+        let fixture = Fixture::imaging(answering(&requesting(1)), &failing.server);
+        let (conversation, image) = fixture.ask_for_an_image();
+        wait_until("the failure", || {
+            fixture.state_of(image) == (store::ImageState::NotGenerated, Some(NotGenerated::Failed))
+        });
+
+        let review = fixture.images(conversation).unwrap();
+
+        assert_eq!(
+            review["answers"][0]["images"][0],
+            json!({
+                "id": image,
+                "name": "Gull 0",
+                "frame": "portrait",
+                "prompt": "An ink drawing of gull 0.",
+                "state": "not_generated",
+                "notGenerated": "failed",
+                "failure": {
+                    "reason": "no_credit",
+                    "detail": null,
+                    "providerMessage": "Out of credit.",
+                },
+                "undone": false,
+                "path": null,
+                "undo": false,
+                "revises": null,
+                "revisesName": null,
+                "reference": null,
+            })
+        );
+
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        let (_, image) = fixture.ask_for_an_image();
+        fixture.wait_for(image, store::ImageState::Pending);
+
+        fixture.reject_image(image).unwrap();
+
+        assert_eq!(fixture.state_of(image).0, store::ImageState::Rejected);
+        assert_eq!(fixture.saved_image(image).bytes, None);
+        assert_eq!(
+            fixture.reject_image(image).unwrap_err().kind,
+            ErrorKind::Conflict
+        );
+    }
+
+    #[test]
+    fn a_regeneration_sends_the_earlier_image_while_it_has_its_bytes() {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        let (conversation, earlier) = fixture.ask_for_an_image();
+        fixture.wait_for(earlier, store::ImageState::Pending);
+        let revising = fixture.add_regeneration(conversation, earlier);
+
+        fixture.generate(revising).unwrap();
+
+        fixture.wait_for(revising, store::ImageState::Pending);
+        let body: Value = serde_json::from_slice(&images.generations()[1].body).unwrap();
+        assert_eq!(
+            body["input_references"][0]["image_url"]["url"],
+            format!("data:image/png;base64,{}", STANDARD.encode(png()))
+        );
+        let review = fixture.images(conversation).unwrap();
+        let shown = &review["answers"][1]["images"][0];
+        assert_eq!(
+            (
+                &shown["revises"],
+                &shown["revisesName"],
+                &shown["reference"]
+            ),
+            (&json!(earlier), &json!("Gull 0"), &json!("sent"))
+        );
+        // Draw, its answer, then the regeneration message.
+        assert_eq!(
+            review["regenerations"],
+            json!([{ "message": 2, "image": earlier, "name": "Gull 0" }])
+        );
+
+        fixture.reject_image(earlier).unwrap();
+        let after_rejection = fixture.add_regeneration(conversation, earlier);
+        fixture.generate(after_rejection).unwrap();
+
+        fixture.wait_for(after_rejection, store::ImageState::Pending);
+        let body: Value = serde_json::from_slice(&images.generations()[2].body).unwrap();
+        assert_eq!(body.get("input_references"), None);
+        assert_eq!(
+            fixture.saved_image(after_rejection).image.reference,
+            Some(store::ImageReference::Gone)
+        );
+    }
+
+    #[test]
+    fn every_image_command_refuses_while_ai_is_off_or_no_world_is_open() {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(1)), &images.server);
+        let (conversation, image) = fixture.ask_for_an_image();
+        let refusals = |fixture: &Fixture| {
+            [
+                fixture.images(conversation).map(drop),
+                fixture.generate(image),
+                fixture.cancel(image),
+                fixture.reject_image(image),
+            ]
+            .map(|result| result.unwrap_err().kind)
+        };
+
+        fixture.settings().set_ai(false).unwrap();
+        assert_eq!(refusals(&fixture), [ErrorKind::AiOff; 4]);
+        fixture.settings().set_ai(true).unwrap();
+        fixture.services.world().close();
+        assert_eq!(refusals(&fixture), [ErrorKind::NoWorld; 4]);
+    }
+
+    fn uri(text: &str) -> tauri::http::Uri {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn the_scheme_serves_only_the_open_session_s_stored_bytes_and_world_images_still_load() {
+        let images = ImageServer::answering();
+        let fixture = Fixture::imaging(answering(&requesting(2)), &images.server);
+        let (end, _) = fixture.send(None, "Draw two gulls", None);
+        let saved = fixture.saved_images(conversation_of(&end.unwrap()));
+        let (image, rejected) = (saved[0].id, saved[1].id);
+        fixture.wait_for(image, store::ImageState::Pending);
+        fixture.wait_for(rejected, store::ImageState::Pending);
+        fixture.reject_image(rejected).unwrap();
+        let session = fixture.services.world().current().unwrap().session;
+
+        for base in [
+            "grimoire-image://localhost",
+            "http://grimoire-image.localhost",
+        ] {
+            let served = uri(&format!("{base}/stored%2F{session}%2F{image}"));
+            assert!(is_stored_image(&served));
+
+            let response = respond_image(&fixture.services, &served);
+
+            assert_eq!(response.status(), 200, "{base}");
+            assert_eq!(response.body(), &png());
+            assert_eq!(response.headers()["content-type"], "image/png");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        }
+        let refused = [
+            format!("stored%2F{}%2F{image}", session + 1),
+            format!("stored%2F{session}%2F999"),
+            format!("stored%2F{session}%2F{rejected}"),
+            format!("stored%2F{session}"),
+            format!("stored%2Fx%2F{image}"),
+            format!("stored%2F%2B{session}%2F{image}"),
+            format!("stored%2F{session}%2F{image}%2F1"),
+            format!("stored%252F{session}%252F{image}"),
+        ];
+        for path in refused {
+            let request = uri(&format!("grimoire-image://localhost/{path}"));
+
+            let response = match is_stored_image(&request) {
+                true => respond_image(&fixture.services, &request),
+                false => world::respond_image(fixture.services.world(), &request),
+            };
+
+            assert_eq!(response.status(), 404, "{path}");
+            assert!(
+                response.body().is_empty() && response.headers().is_empty(),
+                "{path}"
+            );
+        }
+
+        fs::write(fixture.world.path().join("Places/map.png"), png()).unwrap();
+        let world_image = uri(&format!(
+            "grimoire-image://localhost/{session}%2FPlaces%2Fmap.png"
+        ));
+        assert!(!is_stored_image(&world_image));
+        let response = world::respond_image(fixture.services.world(), &world_image);
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), &png());
+
+        // The store is still the session's, but its world is closed.
+        fixture.services.world().close();
+        let served = uri(&format!(
+            "grimoire-image://localhost/stored%2F{session}%2F{image}"
+        ));
+        assert_eq!(respond_image(&fixture.services, &served).status(), 404);
     }
 
     /// Asks the provider in `GRIMOIRE_TEST_BASE_URL`, `GRIMOIRE_TEST_MODEL` and
