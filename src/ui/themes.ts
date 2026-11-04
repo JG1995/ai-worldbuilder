@@ -1,3 +1,5 @@
+import type { Theme } from "@/types/api";
+
 /** The themes, in the order they are offered. Each one's values live in theme.css. */
 export const themes = [
   {
@@ -15,8 +17,10 @@ export const themes = [
     name: "Lamplight",
     description: "Night green with candle-yellow light and one serif.",
   },
-] as const;
+] as const satisfies readonly { id: Theme; name: string; description: string }[];
 
+// The saved theme reaches `applyTheme` as the core's `Theme`, so a theme missing here fails to
+// compile.
 export type ThemeId = (typeof themes)[number]["id"];
 
 /** Shows `id` at once. Saturn Seal is the root element without a `data-theme` attribute. */

@@ -31,7 +31,7 @@ it("opens Settings with Ctrl+, and Escape closes it, returning focus", async () 
 
   fireEvent.keyDown(openWorld, { key: ",", ctrlKey: true });
   const settings = await screen.findByRole("dialog", { name: "Settings" });
-  expect(within(settings).getByRole("switch", { name: "AI features" })).toHaveFocus();
+  expect(within(settings).getByRole("radio", { name: "Saturn Seal" })).toHaveFocus();
   fireEvent.keyDown(settings, { key: "Escape" });
 
   expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();

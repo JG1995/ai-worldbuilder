@@ -1,5 +1,5 @@
 import { invokeCommand } from "@/lib/ipc";
-import type { ImageTestOutcome, ProviderSaved, Settings, TestOutcome } from "@/types/api";
+import type { ImageTestOutcome, ProviderSaved, Settings, TestOutcome, Theme } from "@/types/api";
 
 /** The saved settings: whether AI is on, and the saved text provider without its key. */
 export const settingsGet = () => invokeCommand<Settings>("settings_get");
@@ -12,6 +12,13 @@ export const settingsGetKey = ["settings_get"] as const;
  * be saved, and the switch then keeps its state.
  */
 export const settingsAiSet = (on: boolean) => invokeCommand<Settings>("settings_ai_set", { on });
+
+/**
+ * Saves the theme at once. Rejects with `io` when the settings cannot be saved, and the saved theme
+ * then stays as it was.
+ */
+export const settingsThemeSet = (theme: Theme) =>
+  invokeCommand<Settings>("settings_theme_set", { theme });
 
 /**
  * Saves the text provider. A typed `key` goes to the system keychain, or with `keyFile`, when no

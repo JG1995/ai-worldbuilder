@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   ImageFailure,
   ImageProvider,
@@ -11,8 +11,10 @@ import type {
   Settings as SavedSettings,
   TestOutcome,
   TextProvider,
+  Theme,
 } from "@/types/api";
 import { glyphs } from "@/ui/icon-glyphs";
+import { applySavedTheme, resetTheme } from "../logic/saved-theme";
 import { Settings } from "./Settings";
 
 type Handler = (args: Record<string, unknown>) => unknown;
@@ -624,6 +626,152 @@ describe("Settings", () => {
       await waitFor(() => expect(field("API key")).toHaveAccessibleDescription(fileLine));
       expect(result).toBeInTheDocument();
       expect(field("API key", image)).toHaveValue("sk-or-unsaved");
+    });
+  });
+
+  describe("appearance", () => {
+    afterEach(resetTheme);
+
+    /** Starts the application in `theme`, as `main.tsx` does before anything renders. */
+    async function startIn(theme: Theme) {
+      vi.stubGlobal("isTauri", true);
+      mockIPC(() => ({ ...empty, theme }));
+      await applySavedTheme();
+    }
+
+    const radio = (name: string) => screen.getByRole("radio", { name });
+
+    it.each([
+      ["on", true],
+      ["off", false],
+    ])("shows first with the saved theme checked and focused, with AI %s", async (_, ai) => {
+      await startIn("bound");
+      renderSettings({ ...withKey, ai, theme: "bound" });
+      const settings = await dialog();
+
+      const appearance = within(settings).getAllByRole("group")[0];
+      expect(appearance).toHaveAccessibleName("Appearance");
+      const options = within(appearance).getByRole("radiogroup", { name: "Theme" });
+      expect(within(options).getAllByRole("radio")).toEqual([
+        radio("Saturn Seal"),
+        radio("Bound"),
+        radio("Lamplight"),
+      ]);
+      expect(radio("Lamplight")).toHaveAccessibleDescription(
+        "Night green with candle-yellow light and one serif.",
+      );
+      expect(radio("Bound")).toBeChecked();
+      expect(radio("Bound")).toHaveFocus();
+    });
+
+    it("applies a choice at once and saves it", async () => {
+      const { calls } = renderSettings(empty, {
+        settings_theme_set: ({ theme }) => ({ ...empty, theme }),
+      });
+      await dialog();
+
+      fireEvent.click(radio("Lamplight"));
+
+      expect(document.documentElement.dataset.theme).toBe("lamplight");
+      expect(radio("Lamplight")).toBeChecked();
+      await waitFor(() =>
+        expect(calls.at(-1)).toEqual({
+          command: "settings_theme_set",
+          args: { theme: "lamplight" },
+        }),
+      );
+    });
+
+    it("returns to the saved theme with the reason when a save fails, until a choice saves", async () => {
+      await startIn("bound");
+      let fail = true;
+      renderSettings(
+        { ...empty, theme: "bound" },
+        {
+          settings_theme_set: ({ theme }) => {
+            if (fail) throw { kind: "io", message: "Read-only file system." };
+            return { ...empty, theme };
+          },
+        },
+      );
+      await dialog();
+
+      fireEvent.click(radio("Lamplight"));
+
+      const appearance = within(screen.getByRole("group", { name: "Appearance" }));
+      expect(await appearance.findByRole("alert")).toHaveTextContent(
+        "The setting could not be saved: Read-only file system.",
+      );
+      expect(document.documentElement.dataset.theme).toBe("bound");
+      expect(radio("Bound")).toBeChecked();
+
+      fail = false;
+      fireEvent.click(radio("Lamplight"));
+
+      await waitFor(() => expect(appearance.queryByRole("alert")).not.toBeInTheDocument());
+      expect(document.documentElement.dataset.theme).toBe("lamplight");
+    });
+
+    it("saves the last of quick choices, one save at a time", async () => {
+      const finish: (() => void)[] = [];
+      let inFlight = 0;
+      let mostInFlight = 0;
+      const { calls } = renderSettings(empty, {
+        settings_theme_set: ({ theme }) => {
+          inFlight += 1;
+          mostInFlight = Math.max(mostInFlight, inFlight);
+          return new Promise((resolve) =>
+            finish.push(() => {
+              inFlight -= 1;
+              resolve({ ...empty, theme });
+            }),
+          );
+        },
+      });
+      await dialog();
+
+      fireEvent.click(radio("Bound"));
+      fireEvent.click(radio("Saturn Seal"));
+      fireEvent.click(radio("Lamplight"));
+      await waitFor(() => expect(finish).toHaveLength(1));
+      finish[0]();
+      await waitFor(() => expect(finish).toHaveLength(2));
+      finish[1]();
+
+      await waitFor(() => expect(inFlight).toBe(0));
+      const sent = calls.filter(({ command }) => command === "settings_theme_set");
+      expect(sent.map(({ args }) => args)).toEqual([{ theme: "bound" }, { theme: "lamplight" }]);
+      expect(mostInFlight).toBe(1);
+      expect(document.documentElement.dataset.theme).toBe("lamplight");
+      expect(radio("Lamplight")).toBeChecked();
+    });
+
+    it("keeps a provider saved while the theme was saving", async () => {
+      let finishTheme = () => {};
+      renderSettings(empty, {
+        // The core's answer holds no provider: it was made before the provider was saved.
+        settings_theme_set: ({ theme }) =>
+          new Promise((resolve) => {
+            finishTheme = () => resolve({ ...empty, theme });
+          }),
+        provider_save: () => saved(withKey),
+      });
+      await dialog();
+      fireEvent.click(radio("Lamplight"));
+      type("Base URL", BASE_URL);
+      type("Model", MODEL);
+      type("API key", "sk-secret");
+      fireEvent.click(save());
+      await waitFor(() => expect(field("API key")).toHaveAccessibleDescription(keychainLine));
+
+      // The cache tells its observers on a timer.
+      await act(async () => {
+        finishTheme();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+
+      expect(field("API key")).toHaveAccessibleDescription(keychainLine);
+      expect(radio("Lamplight")).toBeChecked();
     });
   });
 });

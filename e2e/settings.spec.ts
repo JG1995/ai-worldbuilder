@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 // The browser preview's settings in src/lib/preview-fixtures.ts start with AI on and no provider.
 
@@ -19,9 +19,9 @@ test("switching AI off leaves only the switch, and switching it on brings the pr
 }) => {
   const { settings } = await openFromWelcome(page);
   const toggle = settings.getByRole("switch", { name: "AI features" });
-  await expect(toggle).toBeFocused();
   await expect(settings.getByLabel("Base URL")).toBeVisible();
 
+  await toggle.focus();
   await page.keyboard.press("Space");
 
   await expect(toggle).toHaveAttribute("aria-checked", "false");
@@ -126,6 +126,77 @@ test("an image provider is saved and tested in its own group, which AI off hides
 
   await settings.getByRole("switch", { name: "AI features" }).click();
   await expect(image).toHaveCount(0);
+});
+
+const groundDark = { "saturn-seal": "rgb(9, 16, 22)", lamplight: "rgb(3, 19, 15)" };
+
+const bodyGround = (page: Page) =>
+  page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+
+/** Chooses Lamplight, two themes below the checked Saturn Seal, with the arrow keys. */
+async function chooseLamplight(page: Page, settings: Locator) {
+  await expect(settings.getByRole("radio", { name: "Saturn Seal" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  const lamplight = settings.getByRole("radio", { name: "Lamplight" });
+  await expect(lamplight).toBeChecked();
+  await expect(lamplight).toBeFocused();
+}
+
+test("a theme chosen with the keyboard applies at once and is checked when Settings reopens", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const { button, settings } = await openFromWelcome(page);
+  expect(await bodyGround(page)).toBe(groundDark["saturn-seal"]);
+
+  await chooseLamplight(page, settings);
+
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "lamplight");
+  expect(await bodyGround(page)).toBe(groundDark.lamplight);
+  await expect(settings).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await button.click();
+  await expect(settings.getByRole("radio", { name: "Lamplight" })).toBeChecked();
+  await expect(settings.getByRole("radio", { name: "Lamplight" })).toBeFocused();
+});
+
+test("a theme switch keeps an unsaved edit, and a click on a later line then lands on it", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open world…" }).click();
+  const row = (name: string) => page.getByRole("treeitem", { name, exact: true });
+  // In the preview, saving this page always fails, so its edit stays unsaved.
+  await row("Locations").click();
+  await row("Locked chronicle").click();
+  const locked = page.getByRole("textbox", { name: "Locked chronicle" });
+  await locked.click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type("An unsaved line.");
+  await expect(page.getByRole("alert")).toContainText("This page could not be saved");
+  await row("Campaign overview").click({ modifiers: ["Control"] });
+  const overview = page.getByRole("textbox", { name: "Campaign overview" });
+  await expect(overview).toContainText("A plain of fused sand");
+
+  await page.keyboard.press("Control+Comma");
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await chooseLamplight(page, settings);
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await page.evaluate(() => document.fonts.ready);
+
+  const lastLine = overview.locator(".cm-line").filter({ hasText: "for dice notation" });
+  await lastLine.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" Roll twice.");
+  await expect(lastLine).toContainText("Roll twice.");
+
+  await page.getByRole("tab", { name: "Locked chronicle", exact: true }).click();
+  await expect(locked).toContainText("An unsaved line.");
 });
 
 test("Ctrl+, opens Settings from a world", async ({ page }) => {

@@ -1,5 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useId, useRef, useState } from "react";
+import {
+  type FormEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { IpcError } from "@/lib/ipc";
 import type {
   ImageProvider,
@@ -15,6 +23,7 @@ import { Dialog } from "@/ui/Dialog";
 import { Notice } from "@/ui/Notice";
 import { TextInput } from "@/ui/TextInput";
 import { Toggle } from "@/ui/Toggle";
+import { themes } from "@/ui/themes";
 import {
   imageProviderKeyRemove,
   imageProviderSave,
@@ -28,6 +37,7 @@ import {
   settingsGet,
   settingsGetKey,
 } from "../api/commands";
+import { chooseTheme, subscribeTheme, themeState } from "../logic/saved-theme";
 
 const aiDescription =
   "Off hides the assistant and every AI feature, and sends nothing to an AI provider. Your provider settings are kept.";
@@ -139,7 +149,7 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
   const busy = useRef(false);
   const [saving, setSaving] = useState(false);
-  const aiSwitch = useRef<HTMLButtonElement>(null);
+  const checkedTheme = useRef<HTMLInputElement>(null);
   const keyInput = useRef<HTMLInputElement>(null);
   // Bumped to move focus to the key field once the control that had it is gone.
   const [keyFocusRequest, setKeyFocusRequest] = useState(0);
@@ -288,9 +298,9 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
 
   return (
     <>
-      <Dialog title="Settings" wide closeButton onCancel={onClose} initialFocus={aiSwitch}>
+      <Dialog title="Settings" wide closeButton onCancel={onClose} initialFocus={checkedTheme}>
+        <AppearanceGroup checkedRef={checkedTheme} />
         <Toggle
-          ref={aiSwitch}
           label="AI features"
           checked={saved.ai}
           onChange={(on) => void setAi(on)}
@@ -393,6 +403,54 @@ function SettingsDialog({ saved, onClose }: { saved: SavedSettings; onClose: () 
         />
       )}
     </>
+  );
+}
+
+/**
+ * The Theme radio group. A choice shows at once and is saved; the theme and its saving live in
+ * `saved-theme.ts`, so they outlast the dialog.
+ */
+function AppearanceGroup({ checkedRef }: { checkedRef: RefObject<HTMLInputElement | null> }) {
+  const queryClient = useQueryClient();
+  const { shown, failure } = useSyncExternalStore(subscribeTheme, themeState);
+  const id = useId();
+
+  return (
+    <fieldset
+      aria-labelledby={`${id}-heading`}
+      className="flex min-w-0 flex-col gap-4 border-divider border-b pb-4"
+    >
+      <h3 id={`${id}-heading`} className="label-caps text-text-muted">
+        Appearance
+      </h3>
+      <div role="radiogroup" aria-label="Theme" className="flex flex-col gap-3">
+        {themes.map((theme) => (
+          // The grid centres the radio on the name's line in every theme's type.
+          <label key={theme.id} className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1">
+            <input
+              ref={theme.id === shown ? checkedRef : undefined}
+              type="radio"
+              name={`${id}-theme`}
+              checked={theme.id === shown}
+              onChange={() => chooseTheme(queryClient, theme.id)}
+              aria-labelledby={`${id}-${theme.id}`}
+              aria-describedby={`${id}-${theme.id}-description`}
+              className="accent-accent"
+            />
+            <span id={`${id}-${theme.id}`} className="ui-strong text-text">
+              {theme.name}
+            </span>
+            <span
+              id={`${id}-${theme.id}-description`}
+              className="col-start-2 ui-small text-text-muted"
+            >
+              {theme.description}
+            </span>
+          </label>
+        ))}
+      </div>
+      {failure && <Notice status="error">{failure}</Notice>}
+    </fieldset>
   );
 }
 
