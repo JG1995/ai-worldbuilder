@@ -804,11 +804,11 @@ function RemoveKeyConfirmation({
       onCancel={onCancel}
       actions={
         <>
-          <Button variant="destructive" onClick={onConfirm}>
-            Remove key
-          </Button>
           <Button ref={cancel} variant="secondary" onClick={onCancel}>
             Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            Remove key
           </Button>
         </>
       }
