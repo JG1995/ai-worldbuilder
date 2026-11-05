@@ -207,6 +207,12 @@ function Card({
           <button
             type="button"
             onClick={(event) => onOpenPage(page, { newTab: event.ctrlKey || event.metaKey })}
+            // Chromium fires no click for Ctrl+Enter on a button.
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              onOpenPage(page, { newTab: event.ctrlKey || event.metaKey });
+            }}
             className="ui-strong min-w-0 break-words rounded-sm text-left text-accent underline transition-colors hover:text-accent-hover"
           >
             {name}

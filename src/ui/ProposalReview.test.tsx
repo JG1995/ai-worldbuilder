@@ -95,7 +95,14 @@ describe("ProposalReview", () => {
     expect(within(shown).getByText("Only in the proposal:")).toHaveClass("sr-only");
     expect(within(shown).getByText("Only in the page now:")).toHaveClass("sr-only");
     fireEvent.click(within(shown).getByRole("button", { name: "Saltmere" }), { ctrlKey: true });
-    expect(onOpenPage).toHaveBeenCalledExactlyOnceWith("Places/Saltmere.md", { newTab: true });
+    fireEvent.keyDown(within(shown).getByRole("button", { name: "Saltmere" }), {
+      key: "Enter",
+      metaKey: true,
+    });
+    expect(onOpenPage.mock.calls).toEqual([
+      ["Places/Saltmere.md", { newTab: true }],
+      ["Places/Saltmere.md", { newTab: true }],
+    ]);
     fireEvent.click(within(shown).getByRole("button", { name: "Accept" }));
     expect(onAccept).toHaveBeenCalledExactlyOnceWith([1]);
   });
