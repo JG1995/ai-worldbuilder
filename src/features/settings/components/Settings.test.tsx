@@ -313,6 +313,12 @@ describe("Settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove key" }));
     const confirmation = screen.getByRole("dialog", { name: "Remove the API key?" });
     expect(within(confirmation).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    // Cancel comes first, as in the other confirmations.
+    expect(
+      within(confirmation)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Cancel", "Remove key"]);
     fireEvent.click(within(confirmation).getByRole("button", { name: "Remove key" }));
 
     await waitFor(() =>
