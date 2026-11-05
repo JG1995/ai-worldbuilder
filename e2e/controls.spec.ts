@@ -249,3 +249,30 @@ test("every button variant keeps a visible border and its height under forced co
     expect(await height(button)).toBe(normalHeights[index]);
   }
 });
+
+test("the toggle's thumb keeps a visible border and its size under forced colours, on and off", async ({
+  page,
+}) => {
+  await openShowcase(page);
+  const toggle = page.getByRole("switch", { name: "AI features" });
+  const thumb = toggle.locator("span");
+  const size = async () => {
+    const box = await thumb.boundingBox();
+    return box && { width: box.width, height: box.height };
+  };
+  const normalSize = await size();
+
+  await page.emulateMedia({ forcedColors: "active" });
+  for (const checked of ["true", "false"]) {
+    await expect(toggle).toHaveAttribute("aria-checked", checked);
+    const border = await thumb.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { style: style.borderTopStyle, width: Number.parseFloat(style.borderTopWidth) };
+    });
+    // Forced colours repaint the thumb's fill and the track's on fill away; the border stays.
+    expect(border.style).not.toBe("none");
+    expect(border.width).toBeGreaterThanOrEqual(1);
+    expect(await size()).toEqual(normalSize);
+    await toggle.click();
+  }
+});
