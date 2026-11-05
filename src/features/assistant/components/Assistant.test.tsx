@@ -241,8 +241,18 @@ describe("the context disclosure", () => {
     expect(row).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByRole("button", { name: "Kesh Tor" }));
     fireEvent.click(screen.getByRole("button", { name: "Overview" }), { ctrlKey: true });
-    expect(ports.openPage).toHaveBeenNthCalledWith(1, "Places/Kesh Tor.md", { newTab: false });
-    expect(ports.openPage).toHaveBeenNthCalledWith(2, "Overview.md", { newTab: true });
+    // Chromium fires no click for Ctrl+Enter on a button, so Enter is handled on its own.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Overview" }), {
+      key: "Enter",
+      ctrlKey: true,
+    });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Kesh Tor" }), { key: "Enter" });
+    expect(vi.mocked(ports.openPage).mock.calls).toEqual([
+      ["Places/Kesh Tor.md", { newTab: false }],
+      ["Overview.md", { newTab: true }],
+      ["Overview.md", { newTab: true }],
+      ["Places/Kesh Tor.md", { newTab: false }],
+    ]);
     const overview = screen.getByRole("button", { name: "Overview" }).closest("li");
     expect(overview).toHaveTextContent("(partly read)");
     // A page the world no longer has shows its name without a link.

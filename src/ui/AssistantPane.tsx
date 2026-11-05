@@ -735,6 +735,12 @@ function ContextDisclosure({
                       onClick={(event) =>
                         onOpenPage(page.path, { newTab: event.ctrlKey || event.metaKey })
                       }
+                      // Chromium fires no click for Ctrl+Enter on a button.
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        onOpenPage(page.path, { newTab: event.ctrlKey || event.metaKey });
+                      }}
                       className="rounded-sm text-accent underline transition-colors hover:text-accent-hover"
                     >
                       {name}
