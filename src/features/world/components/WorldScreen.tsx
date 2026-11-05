@@ -1,21 +1,23 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
+import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { flushSync } from "react-dom";
 import type { IpcError } from "@/lib/ipc";
 import type { RecentWorld, TreeEntry, WrittenPage } from "@/types/api";
 import { Button, IconButton } from "@/ui/Button";
 import type { LinkAnchor } from "@/ui/editor-links";
-import { FileTree, type TreeNameInput } from "@/ui/FileTree";
+import { FileTree } from "@/ui/FileTree";
 import type { MenuItem } from "@/ui/Menu";
 import { Notice } from "@/ui/Notice";
 import { NoPageOpen } from "@/ui/PageView";
 import { TabStrip } from "@/ui/TabStrip";
 import { ToastRegion } from "@/ui/Toast";
-import { folderCreate, pageCreate, worldTree, worldTreeKey } from "../api/commands";
+import { worldTree, worldTreeKey } from "../api/commands";
+import { useNewEntry } from "../hooks/new-entry";
 import { createFromLink } from "../logic/links";
+import { flushPages, pagesDeleted, pagesWritten } from "../logic/written-pages";
 import { type CursorTarget, readingLayout, useWorldStore } from "../stores/world-store";
 import { pageNameOf } from "../utils/paths";
-import { PageTab, pageEditor, switchKeepingTopLine } from "./PageTab";
+import { PageTab, switchKeepingTopLine } from "./PageTab";
 
 const newPageShortcut = "Ctrl+N";
 const newFolderShortcut = "Ctrl+Shift+N";
@@ -215,37 +217,35 @@ export function WorldScreen({
     setReadingTreeOpen,
     setReadingAssistantOpen,
     flush,
-    newEntryFolder,
-    startNaming,
-    setNameError,
-    cancelNaming,
     pageCreated,
-    folderCreated,
     showWorldNotice,
     showHistory,
     showToast,
     dismissToast,
     runToastAction,
     setReviewPaths,
-    flashRows,
   } = useWorldStore.getState();
   const queryClient = useQueryClient();
   const treeKey = [...worldTreeKey, session];
   const tree = useQuery({ queryKey: treeKey, queryFn: worldTree });
   const worldMissing = (tree.error as IpcError | null)?.kind === "world_missing";
+  const refreshTree = () => queryClient.invalidateQueries({ queryKey: treeKey });
 
   useEffect(() => {
     if (worldMissing) showWorldNotice(session, "missing");
   }, [worldMissing, session, showWorldNotice]);
-  /** Where focus was when the name input opened, to return it there when the input closes. */
-  const focusBeforeNaming = useRef<Element | null>(null);
-  const creating = useRef(false);
 
   /** Saves the active page, without a dialog, when `path` is about to take its place. */
   function flushActiveBefore(path: string) {
     const previous = useWorldStore.getState().active;
     if (previous !== null && previous !== path) void flush(previous);
   }
+
+  const { startNew, cancelNew, submitName } = useNewEntry({
+    session,
+    refreshTree,
+    flushActiveBefore,
+  });
 
   function activateTab(path: string) {
     // Ctrl/Cmd+Tab in the editor switches pages; focus then moves to the new page's editor.
@@ -297,7 +297,7 @@ export function WorldScreen({
 
   /** Opens a page just created from quick open in a new tab, once the tree lists it. */
   async function quickOpenCreated(path: string) {
-    await queryClient.invalidateQueries({ queryKey: treeKey });
+    await refreshTree();
     if (useWorldStore.getState().world?.session !== session) return;
     setTreeOverlayOpen(false);
     flushActiveBefore(path);
@@ -313,50 +313,10 @@ export function WorldScreen({
       void openFromTree(path, { newTab, at, focusEditor: true });
     },
     pageCreated: (path) => void quickOpenCreated(path),
-    refreshTree: () => void queryClient.invalidateQueries({ queryKey: treeKey }),
+    refreshTree: () => void refreshTree(),
     showWorldMissing: () => showWorldNotice(session, "missing"),
     close: () => setSearching(false),
   };
-
-  /** Saves the open pages among `paths`; false when any of them could not be saved. */
-  async function flushPages(paths: string[]) {
-    const results = await Promise.all(paths.map((path) => flush(path)));
-    return results.every(({ kind }) => kind === "saved" || kind === "clean");
-  }
-
-  /** Puts written pages in their open tabs, then refreshes the tree and flashes their rows. */
-  async function pagesWritten(pages: WrittenPage[], { flash }: { flash: boolean }) {
-    await Promise.all(
-      pages.map(async ({ path, text, version }) => {
-        const page = useWorldStore.getState().pages[path];
-        if (page?.status === "ready") {
-          await page.saver.adoptWritten({ text, version }, pageEditor(session, path));
-        }
-      }),
-    );
-    // The watcher leaves the application's own writes out, so the tree is refreshed here, and
-    // new pages' rows can flash only once it lists them.
-    await queryClient.invalidateQueries({ queryKey: treeKey });
-    if (!flash) return;
-    flashRows(
-      session,
-      pages.map((page) => page.path),
-    );
-  }
-
-  /** Closes the tabs of deleted pages that hold no unsaved text, then refreshes the tree. */
-  async function pagesDeleted(paths: string[]) {
-    await Promise.all(
-      paths.map(async (path) => {
-        const page = useWorldStore.getState().pages[path];
-        if (page === undefined) return;
-        if (page.status === "ready" && !(await page.saver.pageDeleted())) return;
-        // Unless the tab closed or opened the page again meanwhile.
-        if (useWorldStore.getState().pages[path] === page) closeTab(path);
-      }),
-    );
-    await queryClient.invalidateQueries({ queryKey: treeKey });
-  }
 
   const assistantPorts: AssistantPorts = {
     session,
@@ -370,8 +330,8 @@ export function WorldScreen({
     // Until the tree has loaded, every page counts as there.
     hasPage: (path) => tree.data === undefined || treeHasPage(tree.data, path),
     flushPages,
-    pagesWritten,
-    pagesDeleted,
+    pagesWritten: (pages, { flash }) => pagesWritten(session, pages, { flash, refreshTree }),
+    pagesDeleted: (paths) => pagesDeleted(paths, { refreshTree }),
     showToast: (message, action) => showToast(session, message, action),
     setReviewPaths: (paths) => setReviewPaths(session, paths),
   };
@@ -380,18 +340,6 @@ export function WorldScreen({
   async function openHistory(path: string) {
     await openFromTree(path, { newTab: false });
     showHistory(path);
-  }
-
-  /**
-   * Opens the name input for a new page or folder in its target folder. From the page region
-   * below 960px it opens the tree overlay; at 960px and wider the shell closes the overlay again.
-   * In the reading layout it opens the collapsed tree.
-   */
-  function startNew(kind: TreeNameInput["kind"], rightClickedFolder?: string) {
-    if (!useWorldStore.getState().nameInput) focusBeforeNaming.current = document.activeElement;
-    startNaming(kind, newEntryFolder(rightClickedFolder));
-    if (readingLayout(useWorldStore.getState())) setReadingTreeOpen(true);
-    else setTreeOverlayOpen(true);
   }
 
   /**
@@ -412,43 +360,6 @@ export function WorldScreen({
     switchKeepingTopLine(view, () => flushSync(() => setView(active, !reading.has(active))), {
       focus: focusPage,
     });
-  }
-
-  function returnFocusFromNaming() {
-    const previous = focusBeforeNaming.current;
-    focusBeforeNaming.current = null;
-    if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
-  }
-
-  function cancelNew() {
-    returnFocusFromNaming();
-    cancelNaming();
-  }
-
-  /** Asks the core to create the entry. Its errors keep the input open with their message. */
-  async function submitName(name: string) {
-    const request = useWorldStore.getState().nameInput;
-    if (!request || creating.current) return;
-    creating.current = true;
-    try {
-      const create = request.kind === "page" ? pageCreate : folderCreate;
-      const { path } = await create(request.folder, name);
-      await queryClient.invalidateQueries({ queryKey: treeKey });
-      if (useWorldStore.getState().world?.session !== session) return;
-      if (request.kind === "page") {
-        focusBeforeNaming.current = null;
-        flushActiveBefore(path);
-        pageCreated(path);
-        setTreeOverlayOpen(false);
-      } else {
-        returnFocusFromNaming();
-        folderCreated(path);
-      }
-    } catch (error) {
-      setNameError((error as IpcError).message);
-    } finally {
-      creating.current = false;
-    }
   }
 
   /**
@@ -664,7 +575,7 @@ export function WorldScreen({
                   onOpenPage={(path, options) => void openFromTree(path, options)}
                   onCreateLink={(from, link) =>
                     void createFromLink(session, from, link, {
-                      refreshTree: () => queryClient.invalidateQueries({ queryKey: treeKey }),
+                      refreshTree,
                       open: (path, at) => void openFromTree(path, { newTab: true, at }),
                     })
                   }
