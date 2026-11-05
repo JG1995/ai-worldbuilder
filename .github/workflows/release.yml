@@ -21,6 +21,8 @@ jobs:
       matrix:
         platform: [windows-latest, ubuntu-22.04, macos-latest]
     runs-on: ${{ matrix.platform }}
+    # This job can write releases, so third-party actions run at a pinned commit that a moved tag
+    # cannot change, and the build compiles from scratch rather than from a cache another run saved.
     steps:
       - uses: actions/checkout@v7
 
@@ -37,7 +39,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@v7
         with:
@@ -48,15 +50,11 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
       - run: pnpm install --frozen-lockfile
 
       - name: Build draft release
         if: github.ref_type == 'tag'
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -68,6 +66,6 @@ jobs:
       # Without tagName, releaseName or releaseId, tauri-action creates no release.
       - name: Build installers
         if: github.ref_type != 'tag'
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         with:
           uploadWorkflowArtifacts: true
