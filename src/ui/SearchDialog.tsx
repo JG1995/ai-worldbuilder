@@ -345,7 +345,7 @@ export function SearchDialog({
             aria-label="Search pages"
             aria-autocomplete="list"
             aria-expanded={rows.length > 0}
-            aria-controls={listboxId}
+            aria-controls={rows.length > 0 ? listboxId : undefined}
             aria-activedescendant={selectedIndex === -1 ? undefined : optionId(selectedIndex)}
             aria-invalid={createError ? true : undefined}
             aria-describedby={createError ? errorId : undefined}
