@@ -262,7 +262,8 @@ function reportOutsideChange(session: number, result: ReplaceResult) {
 /**
  * Undoes a restore, the change `change` of the page at `path`: through the page's saver while it
  * is open, so the editor shows the text written back, and through the core alone otherwise. A
- * refused undo shows its reason as a toast.
+ * refused undo shows its reason as a toast. Either way the active page's editor takes focus, from
+ * the toast's button that the next toast replaces.
  */
 export async function undoChange(session: number, path: string, change: string) {
   const undo = () => reportingMissingWorld(session, historyUndo(change));
@@ -277,7 +278,7 @@ export async function undoChange(session: number, path: string, change: string) 
   if (result.kind === "failed") useWorldStore.getState().showToast(session, result.error.message);
   reportOutsideChange(session, result);
   const { active, historyPath } = useWorldStore.getState();
-  if (result.kind === "replaced" && active === path && historyPath !== path) {
+  if (result.kind !== "unsaved" && active === path && historyPath !== path) {
     page.view?.current?.focus();
   }
 }
