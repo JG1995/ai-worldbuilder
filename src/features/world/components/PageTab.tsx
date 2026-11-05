@@ -1,4 +1,3 @@
-import { isolateHistory } from "@codemirror/commands";
 import type { EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -29,14 +28,9 @@ import {
 } from "../api/commands";
 import { usePageImages } from "../logic/images";
 import { followLink, usePageLinks } from "../logic/links";
-import { reloadPage, reloadToast } from "../logic/outside-changes";
-import {
-  isReadOnlyNotice,
-  PageSaver,
-  type ReplaceEditor,
-  type ReplaceResult,
-  type SaveNotice,
-} from "../logic/saving";
+import { reloadToast } from "../logic/outside-changes";
+import { isReadOnlyNotice, PageSaver, type ReplaceResult, type SaveNotice } from "../logic/saving";
+import { pageEditor, readyPage } from "../logic/written-pages";
 import {
   type CursorTarget,
   cursorOffset,
@@ -142,39 +136,6 @@ function reportingMissingWorld<T>(session: number, command: Promise<T>) {
     }
     throw error;
   });
-}
-
-/** The ready page at `path`, while it is open in the world `session`. */
-function readyPage(session: number, path: string) {
-  const { world, pages } = useWorldStore.getState();
-  const page = pages[path];
-  return world?.session === session && page?.status === "ready" ? page : null;
-}
-
-/**
- * Puts a page's text from a core write in its editor: in the running editor while its tab shows
- * the page, otherwise in the state the tab will show.
- */
-export function pageEditor(session: number, path: string): ReplaceEditor {
-  const { setEditor } = useWorldStore.getState();
-  return {
-    replace: (text) => {
-      const page = readyPage(session, path);
-      const view = page?.view?.current;
-      if (view) replaceDocument(view, text);
-      else if (page) {
-        const { editor } = page;
-        const changes = { from: 0, to: editor.doc.length, insert: text };
-        setEditor(
-          session,
-          path,
-          editor.update({ changes, annotations: isolateHistory.of("full") }).state,
-        );
-      }
-    },
-    // As after an outside change: a fresh state with the cursor kept and no undo history.
-    reload: (text) => reloadPage(session, path, text),
-  };
 }
 
 /** The page region that scrolls `view` with the page's title and notices, if it is on screen. */
