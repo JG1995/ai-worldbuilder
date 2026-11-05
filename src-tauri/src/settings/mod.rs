@@ -340,7 +340,9 @@ impl SettingsState {
     }
 
     /// Checks the fields, stores a typed key, or removes the stored key when the origin changes
-    /// without one, and only then writes the settings file.
+    /// without one, and only then writes the settings file. A key typed for another origin than
+    /// the one whose key is stored is stored only once the settings name the new origin with no
+    /// key, so no failure or crash leaves the old origin paired with the new key.
     pub(crate) fn save_provider(
         &self,
         base_url: &str,
@@ -367,13 +369,43 @@ impl SettingsState {
             Err(message) => return Ok(invalid(ProviderField::Key, message)),
         };
 
-        let previous = inner.saved.provider.as_ref();
+        let with_key = |saved: &Saved, key| Saved {
+            ai: true,
+            provider: Some(SavedProvider {
+                base_url: base_url.clone(),
+                model: model.to_owned(),
+                key,
+            }),
+            ..saved.clone()
+        };
+        let previous = inner.saved.provider.clone();
         let storage = match (key, previous) {
-            (Some(key), _) => match self.secrets.store(KeySlot::Text, key, key_file) {
-                Ok(storage) => storage,
-                Err(SecretsError::NoKeychain) => return Ok(ProviderSaved::NoKeychain),
-                Err(error) => return Err(secrets_error(error)),
-            },
+            (Some(key), previous) => {
+                let before = inner.saved.clone();
+                let moves_the_key = previous.is_some_and(|previous| {
+                    previous.key != KeyStorage::None
+                        && previous.base_url.origin() != base_url.origin()
+                });
+                if moves_the_key {
+                    inner.save(with_key(&before, KeyStorage::None))?;
+                }
+                match self.secrets.store(KeySlot::Text, key, key_file) {
+                    Ok(storage) => storage,
+                    // Nothing was stored, so the previous settings and their key stand again.
+                    Err(error @ (SecretsError::NoKeychain | SecretsError::Keychain(_))) => {
+                        if moves_the_key {
+                            inner.save(before)?;
+                        }
+                        return match error {
+                            SecretsError::NoKeychain => Ok(ProviderSaved::NoKeychain),
+                            error => Err(secrets_error(error)),
+                        };
+                    }
+                    // The keychain may hold the new key, so a moved key's new origin stays
+                    // recorded with no key.
+                    Err(error) => return Err(secrets_error(error)),
+                }
+            }
             (None, Some(previous)) if previous.base_url.origin() != base_url.origin() => {
                 // The key belongs to the saved origin; it is deleted before the new origin is.
                 self.secrets
@@ -384,15 +416,7 @@ impl SettingsState {
             (None, Some(previous)) => previous.key,
             (None, None) => KeyStorage::None,
         };
-        let next = Saved {
-            ai: true,
-            provider: Some(SavedProvider {
-                base_url,
-                model: model.to_owned(),
-                key: storage,
-            }),
-            ..inner.saved.clone()
-        };
+        let next = with_key(&inner.saved, storage);
         let settings = inner.save(next)?;
         Ok(ProviderSaved::Saved { settings })
     }
@@ -1242,6 +1266,20 @@ mod tests {
         assert_eq!(saved_key(saved), KeyStorage::File);
         let settings = fs::read_to_string(folder.path().join("settings.json")).unwrap();
         assert!(settings.contains("\"file\"") && !settings.contains(KEY));
+
+        // A key typed for another origin is asked about the same way, and the saved provider
+        // keeps its key until the user agrees.
+        let saved = state
+            .save_provider("https://example.com/v1", MODEL, Some("sk-other-key"), false)
+            .unwrap();
+        assert_eq!(saved, ProviderSaved::NoKeychain);
+        assert_eq!(
+            fs::read_to_string(folder.path().join("settings.json")).unwrap(),
+            settings
+        );
+        assert_eq!(state.get().text_provider.unwrap().base_url, BASE_URL);
+        let keys = fs::read_to_string(folder.path().join("keys.json")).unwrap();
+        assert!(keys.contains(KEY));
     }
 
     #[test]
@@ -1255,6 +1293,58 @@ mod tests {
         assert!(!error.message.contains(KEY));
         assert!(!fixture.file().exists());
         assert_eq!(fixture.state.get().text_provider, None);
+
+        // A key typed for another origin that the keychain refuses leaves the saved provider and
+        // its key as they were.
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+        let before = fixture.file_text();
+        fixture.keychain.fail_next_call();
+
+        let error = fixture
+            .save("https://example.com/v1", Some("sk-other-key"))
+            .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Keychain);
+        assert_eq!(fixture.file_text(), before);
+        assert_eq!(
+            fixture.state.get().text_provider.unwrap().base_url,
+            BASE_URL
+        );
+        assert_eq!(fixture.keychain.password().unwrap(), KEY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_stored_for_another_origin_is_never_paired_with_the_saved_origin() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        fixture.save(BASE_URL, Some(KEY)).unwrap();
+        // The keychain takes the new key, and then the key file it is dropped from cannot be read,
+        // so the save fails after the key is stored.
+        let key_file = fixture.folder.path().join("keys.json");
+        fs::write(&key_file, "{}").unwrap();
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = fixture.save("https://example.com/v1", Some("sk-other-key"));
+
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(error.is_err());
+        assert_eq!(fixture.keychain.password().unwrap(), "sk-other-key");
+        // The settings name the new origin, with no key, so nothing sends the key to the old one.
+        let reloaded = SettingsState::with_secrets(
+            Some(fixture.folder.path()),
+            fixture.keychain.secrets(Some(fixture.folder.path())),
+        );
+        for provider in [
+            fixture.state.get().text_provider,
+            reloaded.get().text_provider,
+        ] {
+            let provider = provider.unwrap();
+            assert_eq!(
+                (provider.base_url.as_str(), provider.key),
+                ("https://example.com/v1", KeyStorage::None)
+            );
+        }
     }
 
     #[test]
