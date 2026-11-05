@@ -154,6 +154,8 @@ describe("SearchDialog", () => {
     );
     expect(screen.queryAllByRole("option")).toEqual([]);
     expect(input()).toHaveAttribute("aria-expanded", "false");
+    // No list is shown, so the input names none.
+    expect(input()).not.toHaveAttribute("aria-controls");
 
     rerender({ results: ready("CON", [], true), createError: "Windows reserves CON." });
     expect(input()).toHaveAccessibleDescription("Windows reserves CON.");
