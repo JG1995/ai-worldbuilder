@@ -1,7 +1,7 @@
 import { invokeCommand } from "@/lib/ipc";
 import type { ImageTestOutcome, ProviderSaved, Settings, TestOutcome, Theme } from "@/types/api";
 
-/** The saved settings: whether AI is on, and the saved text provider without its key. */
+/** The saved settings: whether AI is on, the saved text and image providers without their keys, and the theme. */
 export const settingsGet = () => invokeCommand<Settings>("settings_get");
 
 /** The TanStack Query key of the saved settings. */
