@@ -136,10 +136,20 @@ describe("picking a suggestion", () => {
     expect(await pick(written, answer)).toEqual(at(linked, linked.length));
   });
 
-  it("does not write a second ]] when one follows the cursor", async () => {
-    const picked = await pick("See [[Mi‸]] here", ready(mirela));
+  it.each([
+    ["]] follows the cursor", "See [[Mi‸]] here"],
+    ["the rest of the page name and ]] follow it", "See [[Mi‸rela]] here"],
+    ["the rest of another name and ]] follow it", "See [[Mi‸lo]] here"],
+  ])("replaces the whole link when %s", async (_kind, written) => {
+    const picked = await pick(written, ready(mirela));
 
     expect(picked).toEqual(at("See [[Mirela]] here", "See [[Mirela]]".length));
+  });
+
+  it("keeps the text after the cursor when no ]] closes the link on its line", async () => {
+    const picked = await pick("See [[Mi‸ and [[Kesh]]", ready(mirela));
+
+    expect(picked).toEqual(at("See [[Mirela]] and [[Kesh]]", "See [[Mirela]]".length));
   });
 
   it("changes nothing on the row that says no page matches", async () => {

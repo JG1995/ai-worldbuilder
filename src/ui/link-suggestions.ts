@@ -56,12 +56,17 @@ function folderOf(path: string) {
   return end === -1 ? "" : path.slice(0, end);
 }
 
+/** The rest of a link's page part after the cursor, and the `]]` that closes the link. */
+const restOfLink = /^[^[\]|#]*\]\]/;
+
 /**
  * Writes `insert` and `]]` in place of the link's page part typed so far, from `from` to `to`, and
- * of a `]]` that already follows it, and puts the cursor after the `]]`.
+ * of the rest of the link when its page part goes on to `]]` on the same line, and puts the cursor
+ * after the `]]`.
  */
 function insertLink(view: EditorView, insert: string, from: number, to: number) {
-  const end = view.state.sliceDoc(to, to + 2) === "]]" ? to + 2 : to;
+  const rest = restOfLink.exec(view.state.sliceDoc(to, view.state.doc.lineAt(to).to));
+  const end = rest ? to + rest[0].length : to;
   const text = `${insert}]]`;
   view.dispatch({
     changes: { from, to: end, insert: text },
