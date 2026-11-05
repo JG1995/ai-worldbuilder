@@ -223,4 +223,25 @@ describe("link previews", () => {
     expect(pressed).toBe(false);
     expect(source.follow).toHaveBeenCalledWith(harbour);
   });
+
+  it("leaves a press and a click on its page's scrollbar to the scrollbar, and follows from its text", async () => {
+    const source = sourceOf();
+    view = renderEditor(source);
+    await rest(linkElement(view, ".cm-link", "Saltmere > Harbour"));
+    const scroller = preview()?.querySelector(".cm-scroller");
+    if (!scroller) throw new Error("No page in the preview");
+
+    // WebKit targets the scrolling element itself for a press on its scrollbar.
+    const pressed = fireEvent.mouseDown(scroller, { button: 0 });
+    fireEvent.click(scroller, { button: 0 });
+
+    expect(pressed).toBe(true);
+    expect(source.follow).not.toHaveBeenCalled();
+
+    const line = scroller.querySelector(".cm-line");
+    if (!line) throw new Error("No line in the preview's page");
+    expect(fireEvent.mouseDown(line, { button: 0 })).toBe(false);
+    fireEvent.click(line, { button: 0 });
+    expect(source.follow).toHaveBeenCalledWith(harbour);
+  });
 });

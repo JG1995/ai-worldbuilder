@@ -93,11 +93,19 @@ class PreviewPanel implements TooltipView {
     title.textContent = titleOf(hovered.link.path);
     this.body.className = "cm-link-preview-body";
     this.dom.append(title, this.body);
-    // A press neither moves the focus nor selects; a click follows the link.
-    this.dom.addEventListener("mousedown", (event) => event.preventDefault());
-    this.dom.addEventListener("click", (event) => {
-      if (event.button === 0) source.follow(hovered.link);
+    // A press neither moves the focus nor selects; a click follows the link. Both are left to the
+    // page's scrollbar, which on WebKit a cancelled press cannot drag.
+    this.dom.addEventListener("mousedown", (event) => {
+      if (!this.onScrollbar(event)) event.preventDefault();
     });
+    this.dom.addEventListener("click", (event) => {
+      if (event.button === 0 && !this.onScrollbar(event)) source.follow(hovered.link);
+    });
+  }
+
+  /** Whether `event` is on the page's scrolling element itself, as a press on its scrollbar is. */
+  private onScrollbar(event: Event) {
+    return this.page !== null && event.target === this.page.scrollDOM;
   }
 
   /** Beside the drawn link, which in a grid is not where its text would be. */
