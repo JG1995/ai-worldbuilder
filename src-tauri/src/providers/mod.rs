@@ -51,9 +51,8 @@ impl BaseUrl {
             );
         }
         let mut url = url;
-        if let Some(path) = url.path().strip_suffix('/').map(str::to_owned) {
-            url.set_path(&path);
-        }
+        let path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&path);
         if url.path().ends_with(CHAT_PATH) {
             return Err(
                 "Leave /chat/completions out of the address; Grimoire.md adds it.".to_owned(),
@@ -116,7 +115,9 @@ mod tests {
                 "  https://openrouter.ai/api/v1/\n",
                 Ok("https://openrouter.ai/api/v1"),
             ),
+            ("https://example.com/v1//", Ok("https://example.com/v1")),
             ("https://example.com", Ok("https://example.com")),
+            ("https://example.com//", Ok("https://example.com")),
             ("http://localhost:11434/v1", Ok("http://localhost:11434/v1")),
             ("http://127.0.0.1:8080/v1", Ok("http://127.0.0.1:8080/v1")),
             ("http://127.1.2.3/v1", Ok("http://127.1.2.3/v1")),
@@ -134,7 +135,7 @@ mod tests {
                 Err("Leave /chat/completions out"),
             ),
             (
-                "https://example.com/v1/chat/completions/",
+                "https://example.com/v1/chat/completions//",
                 Err("Leave /chat/completions out"),
             ),
             ("openrouter.ai/api/v1", Err("full address")),
