@@ -115,6 +115,11 @@ describe("finding a link's heading or block", () => {
     expect(anchor("docks", null)).toBe(page.lastIndexOf("# Docks"));
   });
 
+  it("matches a link's heading with repeated or surrounding spaces as the heading's text reads", () => {
+    expect(anchor("The  docks", null)).toBe(page.indexOf("##   The DOCKS"));
+    expect(anchor(" the docks ", null)).toBe(page.indexOf("##   The DOCKS"));
+  });
+
   it("finds the first line that ends in whitespace and the block's id", () => {
     expect(anchor(null, "quay-1")).toBe(page.indexOf("A quay"));
   });

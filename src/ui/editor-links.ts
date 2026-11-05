@@ -87,14 +87,17 @@ export type LinkAnchor = { heading: string | null; block: string | null };
 /**
  * Where the anchor is in the page's text, after any frontmatter: the start of the first ATX or
  * Setext heading whose text, without its `#` or underline markers and surrounding whitespace,
- * equals the heading ignoring letter case; or the start of the first line that ends in whitespace
- * and `^id`. Null when the page has no such heading or block, or the link names neither.
+ * equals the heading ignoring letter case, with whitespace runs in both read as one space; or the
+ * start of the first line that ends in whitespace and `^id`. Null when the page has no such
+ * heading or block, or the link names neither.
  */
 export function findAnchor(state: EditorState, { heading, block }: LinkAnchor): number | null {
   const bodyLine = frontmatterEnd(state.doc) + 1;
   if (bodyLine > state.doc.lines) return null;
   const bodyStart = state.doc.line(bodyLine).from;
-  if (heading !== null) return headingStart(state, bodyStart, heading.toLowerCase());
+  if (heading !== null) {
+    return headingStart(state, bodyStart, heading.replace(/\s+/g, " ").trim().toLowerCase());
+  }
   if (block !== null) return blockStart(state.doc, bodyLine, `^${block}`);
   return null;
 }
