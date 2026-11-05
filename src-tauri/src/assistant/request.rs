@@ -90,7 +90,7 @@ pub fn build(
         ));
     }
     // An answer stopped before any text or proposal has nothing to send, and some providers
-    // refuse it.
+    // refuse it, as they refuse one of only whitespace.
     let earlier: Vec<ChatMessage> = earlier
         .iter()
         .map(|message| ChatMessage {
@@ -100,7 +100,7 @@ pub fn build(
             },
             content: content(message),
         })
-        .filter(|message| !message.content.is_empty())
+        .filter(|message| !message.content.trim().is_empty())
         .collect();
     let kept = &earlier[earlier.len() - fitting(&earlier)..];
     let mut messages = vec![ChatMessage {
@@ -228,7 +228,8 @@ mod tests {
             message("a".repeat(EARLIER_LIMIT), None),
             message("Brief.".to_owned(), Some(AnswerState::Complete)),
             message("Again?".to_owned(), None),
-            message(String::new(), Some(AnswerState::Stopped)),
+            // Only a line break and spaces arrived before the stop.
+            message("\n  ".to_owned(), Some(AnswerState::Stopped)),
         ];
 
         let request = build("Kesh", &Context::default(), &earlier, "Now?", None);
