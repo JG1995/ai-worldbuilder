@@ -1222,6 +1222,18 @@ impl Store {
         now: i64,
     ) -> Result<i64, AppError> {
         self.write(|transaction| {
+            // An answer deleted since the accept's check is refused, rather than failing the
+            // insert's foreign key, which would move the store to memory.
+            let answered = transaction
+                .query_row(
+                    "SELECT 1 FROM messages WHERE id = ?1 AND role = ?2",
+                    params![answer, ASSISTANT],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if answered.is_none() {
+                return Err(WriteFailure::Refused(no_proposal()));
+            }
             transaction.execute(
                 "INSERT INTO accepts (message, change, started, state, time)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -3135,7 +3147,7 @@ mod tests {
         let app_data = tempfile::tempdir().unwrap();
         let mut store = opened(&app_data);
         let (conversation, answer, [a, b, _]) = with_proposals(&mut store);
-        let (_, _, [other, ..]) = with_proposals(&mut store);
+        let (other_conversation, other_answer, [other, ..]) = with_proposals(&mut store);
         fn kind<T>(result: Result<T, AppError>) -> ErrorKind {
             result.err().expect("the store refuses").kind
         }
@@ -3170,6 +3182,12 @@ mod tests {
         assert_eq!(kind(store.reject(b)), ErrorKind::Conflict);
         store.begin_undo(set).unwrap();
         assert_eq!(kind(store.begin_undo(set)), ErrorKind::Conflict);
+        // An answer deleted between an accept's check and its write.
+        store.delete(other_conversation).unwrap();
+        assert_eq!(
+            kind(store.begin_accept(other_answer, &pages_of(&[other]), None, 6)),
+            ErrorKind::NotFound
+        );
         // Refusals are not failures: the store still saves to its file.
         assert_eq!(store.conversations().unwrap().notice, None);
     }
