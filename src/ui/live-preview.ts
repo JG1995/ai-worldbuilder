@@ -23,6 +23,11 @@ export const previewView = Facet.define<PreviewView, PreviewView>({
   combine: (values) => values[0] ?? "editing",
 });
 
+/** Whether `state` shows the reading view. */
+export function isReading(state: EditorState) {
+  return state.facet(previewView) === "reading";
+}
+
 /** The numbers of the lines that any selection range touches; none in the reading view. */
 export function revealedLines(state: EditorState): Set<number> {
   const lines = new Set<number>();
