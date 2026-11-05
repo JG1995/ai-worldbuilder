@@ -97,6 +97,19 @@ describe("switching views", () => {
     expect(within(strip).getAllByRole("button")).toEqual([viewButton()]);
     expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
   });
+
+  it("Ctrl/Cmd+N in the reading layout opens its collapsed tree with the name input", async () => {
+    await openOverview();
+    const textbox = await screen.findByRole("textbox", { name: "Overview" });
+    act(() => textbox.focus());
+    switchKey(textbox);
+    expect(treeButton()).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "n", ctrlKey: true });
+
+    expect(treeButton()).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByRole("textbox", { name: "New page name" })).toBeVisible();
+  });
 });
 
 describe("the view switch is refused", () => {

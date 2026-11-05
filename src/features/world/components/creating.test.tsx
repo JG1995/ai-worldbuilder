@@ -1,8 +1,10 @@
+import { EditorView } from "@codemirror/view";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeEntry } from "@/types/api";
 import { mockWorldIpc, shellLayout, testTree, testWorld } from "../api/test-ipc";
+import { autosaveDelay } from "../logic/saving";
 import { useWorldStore } from "../stores/world-store";
 import { World } from "./World";
 
@@ -70,6 +72,18 @@ const createCalls = (calls: { command: string; args?: unknown }[]) =>
       args,
     }));
 
+const writesOf = (calls: { command: string; args?: unknown }[]) =>
+  calls.filter(({ command }) => command === "page_write").map(({ args }) => args);
+
+function typeAtEnd(textbox: HTMLElement, text: string) {
+  const view = EditorView.findFromDOM(textbox);
+  if (!view) throw new Error("No editor");
+  view.dispatch({
+    changes: { from: view.state.doc.length, insert: text },
+    userEvent: "input.type",
+  });
+}
+
 beforeEach(() => {
   useWorldStore.getState().closed();
   // jsdom has no layout: the shell lays out as at 960px and wider, and the tab strip never overflows.
@@ -108,6 +122,31 @@ describe("creating pages and folders", () => {
     expect(screen.queryByRole("textbox", { name: "New page name" })).not.toBeInTheDocument();
   });
 
+  it("saves the active page's edits at once before the page it creates opens", async () => {
+    const calls = mockCreatingIpc();
+    await openTestWorld();
+    fireEvent.click(row("Overview"));
+    typeAtEnd(await screen.findByRole("textbox", { name: "Overview" }), "More");
+
+    pressShortcut("n");
+    submit(await pageNameInput(), "Gazetteer");
+
+    await screen.findByRole("textbox", { name: "Gazetteer" });
+    // Sooner than the autosave delay, so the save was not an autosave.
+    await waitFor(
+      () =>
+        expect(writesOf(calls)).toEqual([
+          {
+            path: "Overview.md",
+            text: "# Overview\nMore",
+            version: "version of Overview.md",
+            keepMine: false,
+          },
+        ]),
+      { timeout: autosaveDelay / 2 },
+    );
+  });
+
   it("keeps focus in the tree when an existing page opens from it", async () => {
     mockCreatingIpc();
     await openTestWorld();
@@ -140,25 +179,32 @@ describe("creating pages and folders", () => {
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
   });
 
-  it("cancels on Escape and creates nothing", async () => {
+  it("cancels on Escape, creates nothing and gives the focus back", async () => {
     const calls = mockCreatingIpc();
     await openTestWorld();
     const header = screen.getByRole("button", { name: "New page", description: "New page Ctrl+N" });
+    act(() => header.focus());
     fireEvent.click(header);
 
-    fireEvent.keyDown(await pageNameInput(), { key: "Escape" });
+    const input = await pageNameInput();
+    await waitFor(() => expect(input).toHaveFocus());
+    fireEvent.keyDown(input, { key: "Escape" });
 
     expect(screen.queryByRole("textbox", { name: "New page name" })).not.toBeInTheDocument();
     expect(createCalls(calls)).toEqual([]);
+    expect(header).toHaveFocus();
   });
 
-  it("creates a folder with Ctrl+Shift+N in the selected folder, then expands and selects it", async () => {
+  it("creates a folder with Ctrl+Shift+N in the selected folder, then expands and selects it and gives the focus back", async () => {
     const calls = mockCreatingIpc();
     await openTestWorld();
     fireEvent.click(row("Places"));
+    act(() => row("Places").focus());
 
     pressShortcut("N", { shiftKey: true });
-    submit(await screen.findByRole("textbox", { name: "New folder name" }), "Coast");
+    const input = await screen.findByRole("textbox", { name: "New folder name" });
+    await waitFor(() => expect(input).toHaveFocus());
+    submit(input, "Coast");
 
     const folder = await screen.findByRole("treeitem", { name: "Coast" });
     expect(createCalls(calls)).toEqual([
@@ -166,6 +212,7 @@ describe("creating pages and folders", () => {
     ]);
     expect(folder).toHaveAttribute("aria-expanded", "true");
     expect(folder).toHaveAttribute("aria-selected", "true");
+    expect(row("Places")).toHaveFocus();
   });
 
   it("starts a page at the world's top level with Ctrl+N when nothing is selected", async () => {
