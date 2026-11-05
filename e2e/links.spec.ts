@@ -127,7 +127,7 @@ test("typing [[ and part of a name, then Enter, inserts a link that resolves", a
   await editor.locator(".cm-line").last().click();
 
   await page.keyboard.type("[[kesh");
-  const list = page.getByRole("listbox");
+  const list = page.getByRole("listbox", { name: "Link suggestions" });
   await expect(list.getByRole("option")).toHaveText([/^Kesh Tor\s*Locations$/]);
   await expect(editor).toHaveAttribute("aria-activedescendant", /.+/);
   // The list ignores keys for its first 75 ms, so that a quick Enter does not pick by accident.
