@@ -12,7 +12,8 @@ type ToggleProps = {
 
 /**
  * A switch with its label, its On/Off state text and an optional description. The track is a
- * rectangle with an `outline` border, filled with `accent` while on.
+ * rectangle with an `outline` border, filled with `accent` while on. The thumb has a 1px border,
+ * transparent, so Windows contrast themes, which repaint both fills, still paint the thumb.
  */
 export function Toggle({ label, checked, onChange, description, ref }: ToggleProps) {
   const switchId = useId();
@@ -45,7 +46,7 @@ export function Toggle({ label, checked, onChange, description, ref }: TogglePro
           className={`flex h-5 w-9 items-center rounded-sm border p-0.5 transition-colors ${checked ? "border-accent bg-accent" : "border-outline"}`}
         >
           <span
-            className={`size-3.5 rounded-sm transition-transform ${checked ? "translate-x-4 bg-on-accent" : "bg-text-muted"}`}
+            className={`size-3.5 rounded-sm border border-transparent transition-transform ${checked ? "translate-x-4 bg-on-accent" : "bg-text-muted"}`}
           />
         </button>
       </div>
