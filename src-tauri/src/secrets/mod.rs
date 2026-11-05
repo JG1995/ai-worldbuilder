@@ -95,7 +95,8 @@ impl Secrets {
     /// Stores `key` in `slot`'s keychain entry and drops any key the key file holds for `slot`.
     /// When no keychain can be reached, it writes `slot` in the key file only with
     /// `file_consent`, and otherwise stores nothing and returns `NoKeychain`. A keychain that
-    /// refuses never leads to the key file.
+    /// refuses never leads to the key file. After `NoKeychain` or `Keychain`, nothing is stored;
+    /// after `File`, the keychain may hold `key`.
     pub fn store(
         &self,
         slot: KeySlot,
