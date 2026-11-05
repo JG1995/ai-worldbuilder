@@ -7,7 +7,7 @@ import {
   closeCompletion,
 } from "@codemirror/autocomplete";
 import { syntaxTree } from "@codemirror/language";
-import { type EditorState, Facet, Prec } from "@codemirror/state";
+import { EditorState, Facet, Prec } from "@codemirror/state";
 import { type EditorView, keymap } from "@codemirror/view";
 import type { LinkSuggestion, LinkSuggestions } from "@/types/api";
 import { frontmatterEnd } from "./editor-links";
@@ -163,4 +163,6 @@ export const linkSuggestions = [
     addToOptions: [{ render: aliasOf, position: 90 }],
   }),
   Prec.highest(keymap.of([{ key: "Tab", run: acceptCompletion }])),
+  // The list's accessible name, which the package takes from this phrase.
+  EditorState.phrases.of({ Completions: "Link suggestions" }),
 ];
