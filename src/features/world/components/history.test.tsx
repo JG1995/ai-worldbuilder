@@ -333,9 +333,13 @@ describe("restoring a version", () => {
       },
     });
 
-    fireEvent.click(await within(toastRegion()).findByRole("button", { name: "Undo" }));
+    const undoButton = await within(toastRegion()).findByRole("button", { name: "Undo" });
+    // Pressed from the keyboard, so focus is on the toast's button, which the refusal replaces.
+    undoButton.focus();
+    fireEvent.click(undoButton);
 
     expect(await within(toastRegion()).findByText(refusal)).toBeInTheDocument();
     expect(editorOf(textbox).state.doc.toString()).toBe("# Overview restored\n");
+    expect(textbox).toHaveFocus();
   });
 });
