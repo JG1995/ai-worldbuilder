@@ -15,7 +15,7 @@ mod write;
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1016,8 +1016,9 @@ struct Worker {
 struct WorkerShared {
     /// Set when the opening ends; the worker checks it before each file read and each index lock.
     stop: AtomicBool,
-    /// How many pages the worker has read, for tests.
-    reads: AtomicU64,
+    /// How many pages the worker has read.
+    #[cfg(test)]
+    reads: std::sync::atomic::AtomicU64,
     /// Keeps the worker from running full passes, so a test can close a world before one runs.
     #[cfg(test)]
     hold_passes: AtomicBool,
@@ -1234,6 +1235,7 @@ impl Job {
                 && let Some((path, read)) = queue.pop_front()
             {
                 self.check()?;
+                #[cfg(test)]
                 self.shared.reads.fetch_add(1, Ordering::Relaxed);
                 match read_for_index(&self.root, &path) {
                     Some(page) => {
