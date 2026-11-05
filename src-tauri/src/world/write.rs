@@ -1424,15 +1424,15 @@ enum Reversal {
 
 /// Undoes the change `target` as a whole, and records the undo: puts back each page it edited,
 /// deletes each page and image file it created and removes each folder it created that is empty,
-/// deepest first, keeping one that is not. It writes only when every page and file the change
-/// wrote still holds exactly the bytes it left, and every folder it created is still a folder;
-/// otherwise it is a `conflict` naming the first that changed, and nothing is written. A change that history does not hold, or
-/// whose kind or start time differ, is `not_found`. The undo is begun with every entry before
-/// anything is written, and `on_record` then gets its id and start time, or none, with the pages'
-/// paths; when it returns false, nothing is written. A failed write rolls back what the undo did
-/// and records nothing; only when the rollback fails too does the undo stay partly done, recorded
-/// as written, and the result names the failure. The caller holds the world lock, so writes do not
-/// overlap.
+/// deepest first, keeping one that is not. It writes only when every page and file the change wrote
+/// still holds exactly the bytes it left, and every folder it created is still a folder; otherwise
+/// it is a `conflict` naming the first that changed, and nothing is written. A change that history
+/// does not hold, or whose kind or start time differ, is `not_found`. The undo is begun with every
+/// entry before anything is written, and `on_record` then gets its id and start time, or none, with
+/// the pages' paths; when it returns false, nothing is written. A failed write rolls back what the
+/// undo did and records nothing; only when the rollback fails too does the undo stay partly done,
+/// recorded as written, and the result names the failure. The caller holds the world lock, so
+/// writes do not overlap.
 pub fn undo_change(
     root: &Path,
     own: &mut OwnWrites,

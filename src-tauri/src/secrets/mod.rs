@@ -42,7 +42,7 @@ impl KeySlot {
     }
 }
 
-/// Where the text provider's key is stored.
+/// Where a provider's key is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]

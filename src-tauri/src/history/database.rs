@@ -9,16 +9,17 @@
 //!
 //! - `meta`: one row, the world folder's path.
 //! - `changes`: one row per change: its `kind` (`edit`, `new_page`, `new_folder`,
-//!   `restored_missing`, `keep_mine`, `restore` or `undo`), `started` and `latest`, the times of its
-//!   first and latest write in seconds since the Unix epoch, and `pending`, 1 while a write of the
-//!   change is in flight.
+//!   `restored_missing`, `keep_mine`, `restore`, `undo`, `accepted` or `approved_image`),
+//!   `started` and `latest`, the times of its first and latest write in seconds since the Unix
+//!   epoch, and `pending`, 1 while a write of the change is in flight.
 //! - `entries`: one row per path a change touched, keyed by (`change_id`, `path`), with the state
-//!   before and after (`absent`, `folder` or `page`, a page with its exact bytes), and
-//!   `pending_after`, the bytes of a save in flight that extends the change. Deleting a change
-//!   deletes its entries.
+//!   before and after (`absent`, `folder`, `page` or `file`, a page or another file with its exact
+//!   bytes), and `pending_after`, the bytes of a save in flight that extends the change. Deleting a
+//!   change deletes its entries.
 //!
 //! The database keeps SQLite's default rollback journal and syncs fully, so a committed record
-//! survives a crash or a power loss.
+//! survives a crash of the application. A power loss right after a commit can still roll it back,
+//! because SQLite does not sync the folder after it deletes the journal.
 
 use std::fs;
 use std::io;

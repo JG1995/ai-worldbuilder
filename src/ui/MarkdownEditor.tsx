@@ -34,7 +34,7 @@ const codeHighlight = HighlightStyle.define([{ tag: tags.monospace, class: monoC
 
 const monoLine = Decoration.line({ class: monoClass });
 
-/** A block of lines from a first line of `---` to the next `---` line, as Obsidian reads it. */
+/** The page's frontmatter block, by the rule of `frontmatterEnd`. */
 function frontmatterDecorations(doc: Text): DecorationSet {
   const end = frontmatterEnd(doc);
   if (end === 0) return Decoration.none;

@@ -1,8 +1,7 @@
 //! The `index` area: each world's pages, their aliases, their wiki links, with the page each link
 //! resolves to, and their text for search, kept in a cache database in the app data folder. It
-//! knows nothing about Tauri
-//! or confinement, and it never reads or writes a world folder: the world area gives it paths,
-//! parsed text and file stamps, and a closure for a page's stamp on disk now.
+//! knows nothing about Tauri or confinement, and it never reads or writes a world folder: the world
+//! area gives it paths, parsed text and file stamps, and a closure for a page's stamp on disk now.
 //!
 //! An entry is only ever stored from bytes that are still on disk when it is stored: `apply` takes
 //! the stamp a page had when it was read and refuses the page, for reading again, when its stamp
