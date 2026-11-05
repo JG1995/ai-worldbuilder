@@ -126,6 +126,12 @@ for (const [theme, faces] of Object.entries(themeFaces)) {
           { state: "found", path: "Maps/Kesh map.png", stamp: "7-1700000000" },
           { state: "web" },
         ],
+        link_suggest: {
+          indexing: false,
+          items: [{ path: "Kesh Tor.md", name: "Kesh Tor", alias: null, insert: "Kesh Tor" }],
+        },
+        // The autosave after typing a link.
+        page_write: { version: "2" },
       };
       Object.assign(window, {
         isTauri: true,
@@ -217,6 +223,17 @@ for (const [theme, faces] of Object.entries(themeFaces)) {
       return faces.length > 0 && faces.every((face) => face.status === "loaded");
     });
     expect(iconsLoaded).toBe(true);
+
+    // The link suggestion list: only @codemirror/autocomplete's own base theme, in the <style>
+    // element that carries the nonce, gives it its minimum width, and the theme lays out its rows.
+    await editor.locator(".cm-line").last().click();
+    await page.keyboard.type("[[ke");
+    const suggestions = page.getByRole("listbox", { name: "Link suggestions" });
+    await expect(suggestions.getByRole("option")).toHaveText([/^Kesh Tor/]);
+    await expect(suggestions).toHaveCSS("min-width", "250px");
+    await expect(suggestions.getByRole("option")).toHaveCSS("display", "flex");
+    await page.keyboard.press("Escape");
+    await expect(suggestions).toHaveCount(0);
 
     const violations = () =>
       page.evaluate(() => (window as unknown as { violations: string[] }).violations);
