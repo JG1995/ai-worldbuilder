@@ -1,5 +1,6 @@
 import { EditorView } from "@codemirror/view";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EditorLink, ImageEmbed } from "@/types/api";
 import { setLinks } from "./editor-links";
@@ -200,6 +201,28 @@ describe("following a link", () => {
     expect(followed).toBe(false);
     expect(outside.onFollow).not.toHaveBeenCalled();
     expect(ignored).toBe(true);
+  });
+
+  it("follows once after strict mode mounts the editor twice on one element", () => {
+    const onFollow = vi.fn();
+    const state = createPageState(text, "Kesh Tor", link.to);
+    render(
+      <StrictMode>
+        <MarkdownEditor
+          state={state.update({ effects: setLinks([link]) }).state}
+          readOnly={false}
+          onFollow={onFollow}
+        />
+      </StrictMode>,
+    );
+
+    // The first editor's listeners went with it, so only the running editor follows.
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Kesh Tor" }), {
+      key: "Enter",
+      altKey: true,
+    });
+
+    expect(onFollow.mock.calls).toEqual([[link]]);
   });
 });
 
