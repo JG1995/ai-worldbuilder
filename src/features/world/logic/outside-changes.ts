@@ -120,7 +120,7 @@ async function pageChanged(session: number, path: string): Promise<OutsideChange
   // A page still loading is being read now.
   if (page?.status !== "ready") return "unchanged";
 
-  const result = await page.saver.outsideChange((text) => reload(session, path, text));
+  const result = await page.saver.outsideChange((text) => reloadPage(session, path, text));
   const { pages, setPage, showWorldNotice } = useWorldStore.getState();
   if (result.kind === "world_missing") showWorldNotice(session, "missing");
   const current = pages[path];
@@ -136,7 +136,7 @@ async function pageChanged(session: number, path: string): Promise<OutsideChange
  * where it was: in the running editor while the tab shows the page, otherwise in the state the
  * tab will show. False when the page is no longer open in that world.
  */
-function reload(session: number, path: string, text: string) {
+export function reloadPage(session: number, path: string, text: string) {
   const { world, pages, setEditor } = useWorldStore.getState();
   const page = pages[path];
   if (world?.session !== session || page?.status !== "ready") return false;

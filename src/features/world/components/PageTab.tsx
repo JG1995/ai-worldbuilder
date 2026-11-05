@@ -8,13 +8,7 @@ import { type IpcError, imageUrl } from "@/lib/ipc";
 import type { EditorLink, HistoryVersion, Properties } from "@/types/api";
 import { Backlinks } from "@/ui/Backlinks";
 import { Button } from "@/ui/Button";
-import {
-  createPageState,
-  MarkdownEditor,
-  reloadedState,
-  replaceDocument,
-  replaceState,
-} from "@/ui/MarkdownEditor";
+import { createPageState, MarkdownEditor, replaceDocument } from "@/ui/MarkdownEditor";
 import { Notice } from "@/ui/Notice";
 import { PageView } from "@/ui/PageView";
 import { propertiesNeeded, setProperties } from "@/ui/properties-block";
@@ -35,7 +29,7 @@ import {
 } from "../api/commands";
 import { usePageImages } from "../logic/images";
 import { followLink, usePageLinks } from "../logic/links";
-import { reloadToast } from "../logic/outside-changes";
+import { reloadPage, reloadToast } from "../logic/outside-changes";
 import {
   isReadOnlyNotice,
   PageSaver,
@@ -179,15 +173,7 @@ export function pageEditor(session: number, path: string): ReplaceEditor {
       }
     },
     // As after an outside change: a fresh state with the cursor kept and no undo history.
-    reload: (text) => {
-      const page = readyPage(session, path);
-      if (!page) return false;
-      const view = page.view?.current;
-      const label = pageNameOf(path);
-      if (view) replaceState(view, reloadedState(view.state, text, label));
-      else setEditor(session, path, reloadedState(page.editor, text, label));
-      return true;
-    },
+    reload: (text) => reloadPage(session, path, text),
   };
 }
 
