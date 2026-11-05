@@ -3689,9 +3689,9 @@ mod tests {
             let reopen = reopened.elapsed();
             assert_eq!(reads(&state), 0);
 
-            let paragraph = fs::read_to_string(world.path().join("Folder 9/Page 9.md")).unwrap();
-            let paragraph: Vec<&str> = paragraph.lines().nth(8).unwrap().split(' ').collect();
-            let paragraph = paragraph.join(" ").repeat(3);
+            // A paragraph pasted from a page: six of its lines after the heading, as one line.
+            let pasted = fs::read_to_string(world.path().join("Folder 9/Page 9.md")).unwrap();
+            let paragraph = pasted.lines().skip(5).take(6).collect::<Vec<_>>().join(" ");
             let queries = [
                 ("one letter", "s"),
                 ("two letters", "sa"),
@@ -3713,7 +3713,8 @@ mod tests {
                 let TextMatches::Ready { pages: texts } = texts else {
                     panic!("{kind}: the text matches are not ready");
                 };
-                timings.push((kind, page_time, text_time, texts.len()));
+                let found: Vec<String> = texts.into_iter().map(|page| page.path).collect();
+                timings.push((kind, page_time, text_time, found));
             }
             let cache = index::file(app_data.path(), world.path().to_str().unwrap());
             let size = fs::metadata(&cache).unwrap().len();
@@ -3724,11 +3725,20 @@ mod tests {
                 size / 1_000_000
             );
             for (kind, page_time, text_time, found) in &timings {
+                let found = found.len();
                 eprintln!("{kind}: page matches {page_time:?}, {found} text matches {text_time:?}");
             }
             assert!(words > 450);
-            assert_eq!(timings[4].3, 5, "the rare word");
-            assert_eq!(timings[6].3, 0, "no match");
+            assert!(
+                paragraph.split(' ').count() >= 60,
+                "the pasted paragraph's words"
+            );
+            assert_eq!(timings[4].3.len(), 5, "the rare word");
+            assert!(
+                timings[5].3.iter().any(|path| path == "Folder 9/Page 9.md"),
+                "the pasted paragraph finds its page"
+            );
+            assert_eq!(timings[6].3.len(), 0, "no match");
             assert!(saved_during_build, "the save ran after the build");
             assert!(first_build < Duration::from_secs(10));
             assert!(save_time < Duration::from_millis(200));
